@@ -1,0 +1,31 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest    # x86-64 Linux
+          - os: macos-latest     # AArch64 macOS
+          # Enable once the repository is public (free ARM Linux runners
+          # are available for public repositories only):
+          # - os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup update stable && rustup default stable
+      - run: cargo build --release --workspace
+      - run: cargo test --release --workspace
+      - run: cargo test --workspace
+      - run: cargo doc --no-deps -p cmpth
+        env:
+          RUSTDOCFLAGS: -D warnings

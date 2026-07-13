@@ -1,0 +1,9 @@
+# cargo-release configuration
+# Run: cargo release patch / minor / major
+
+pre-release-commit-message = "chore: release {{version}}"
+tag-message = ""
+push = true
+publish = true
+sign-commit = false
+sign-tag = false

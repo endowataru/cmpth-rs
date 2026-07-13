@@ -1,0 +1,39 @@
+[package]
+name = "cmpth-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+cmpth = { path = ".." }
+rayon = "1"
+may = { version = "0.3", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[build-dependencies]
+pkg-config = "0.3"
+
+[features]
+massivethreads = []
+may = ["dep:may"]
+tokio-rt = ["dep:tokio"]
+argobots = []
+
+[[bench]]
+name = "fib"
+harness = false
+
+[[bench]]
+name = "nqueens"
+harness = false
+
+[[bench]]
+name = "spawn_overhead"
+harness = false
+
+[[bench]]
+name = "spawn_async"
+harness = false

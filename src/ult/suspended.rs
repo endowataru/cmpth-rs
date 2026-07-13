@@ -1,0 +1,134 @@
+//! ULT-layer suspended-thread interface and default implementation.
+
+use std::marker::PhantomData;
+use std::ptr;
+use std::sync::atomic::{AtomicPtr, Ordering};
+
+use crate::traits::SuspendedThread;
+use crate::ult::system::UltSystem;
+use crate::ult::desc::{SuspendedUlt, UltDesc};
+use crate::ult::worker::{ContextSwitcher, LocalQueue, UltWorker, Worker};
+
+/// ULT-layer interface for parked-continuation slots.
+///
+/// Implementors supply only the [`cont`](Self::cont) accessor; all scheduling
+/// operations are provided as default methods built on [`UltWorker`].  Swap
+/// in a different struct (e.g. one with profiling counters) by implementing
+/// `cont()` and overriding whichever methods need customisation.
+///
+/// The blanket `impl<T: UltSuspendedThread> SuspendedThread for T` then
+/// automatically satisfies the top-level [`SuspendedThread`] interface.
+pub trait UltSuspendedThread: Send + Default {
+    type UltSystem: UltSystem;
+
+    /// Access the raw continuation slot.
+    ///
+    /// The slot is atomic because it is the publication point between the
+    /// parking worker and a concurrent notifier: the parker stores the slot
+    /// with `Release` *after* the context save, and consumers take it with an
+    /// `Acquire` swap.  On weakly-ordered machines (AArch64) a plain store
+    /// here can become visible before the saved context does, letting the
+    /// notifier resume a continuation whose frame is not yet written.
+    fn cont(&self) -> &AtomicPtr<UltDesc>;
+
+    // --- helpers ------------------------------------------------------------
+
+    fn take_cont(&self) -> SuspendedUlt {
+        // `swap` (not load+store) so that concurrent take/cancel pairs can
+        // never both obtain the continuation.
+        let c = self.cont().swap(ptr::null_mut(), Ordering::Acquire);
+        assert!(!c.is_null(), "SuspendedThread: no parked continuation");
+        SuspendedUlt(c)
+    }
+
+    fn wk() -> &'static UltWorker<Self::UltSystem> {
+        UltWorker::<Self::UltSystem>::current()
+            .expect("cmpth: SuspendedThread operation called outside a worker")
+    }
+
+    // --- default implementations --------------------------------------------
+
+    fn is_set_impl(&self) -> bool {
+        !self.cont().load(Ordering::Acquire).is_null()
+    }
+
+    fn wait_with_impl<F: FnOnce()>(&self, f: F) {
+        let slot = self.cont() as *const AtomicPtr<UltDesc>;
+        Self::wk().suspend_to_sched(move |_wk, prev| {
+            // Release: publishes the context saved just before this callback.
+            unsafe { (*slot).store(prev.into_raw(), Ordering::Release) };
+            f();
+        });
+    }
+
+    fn wait_with_cond_impl<F: FnOnce() -> bool>(&self, f: F) {
+        let slot = self.cont() as *const AtomicPtr<UltDesc>;
+        Self::wk().cond_suspend_to_sched(move |_wk, prev| {
+            unsafe {
+                (*slot).store(prev.take().unwrap().into_raw(), Ordering::Release)
+            };
+            if !f() {
+                let c = unsafe { (*slot).swap(ptr::null_mut(), Ordering::Acquire) };
+                debug_assert!(!c.is_null());
+                *prev = Some(SuspendedUlt(c));
+            }
+        });
+    }
+
+    fn notify_impl(&self) {
+        let c = self.take_cont();
+        Self::wk().push_local_top(c);
+    }
+
+    fn enter_impl(&self) {
+        let wk = Self::wk();
+        let c = self.take_cont();
+        wk.suspend_to_cont(c, |wk, prev| wk.push_local_top(prev));
+    }
+
+    fn swap_impl(&self, next: &Self) {
+        debug_assert!(!self.is_set_impl());
+        let wk = Self::wk();
+        let c = next.take_cont();
+        let slot = self.cont() as *const AtomicPtr<UltDesc>;
+        wk.suspend_to_cont(c, move |_wk, prev| {
+            unsafe { (*slot).store(prev.into_raw(), Ordering::Release) };
+        });
+    }
+}
+
+/// Blanket: any `UltSuspendedThread` automatically implements `SuspendedThread`.
+impl<T: UltSuspendedThread> SuspendedThread for T {
+    type System = T::UltSystem;
+    fn is_set(&self) -> bool { self.is_set_impl() }
+    fn wait_with<F: FnOnce()>(&self, f: F) { self.wait_with_impl(f) }
+    fn wait_with_cond<F: FnOnce() -> bool>(&self, f: F) { self.wait_with_cond_impl(f) }
+    fn notify(&self) { self.notify_impl() }
+    fn enter(&self) { self.enter_impl() }
+    fn swap(&self, next: &Self) { self.swap_impl(next) }
+}
+
+/// Single-slot parked-continuation implementation.  Implements
+/// [`UltSuspendedThread`] by providing just the `cont()` accessor; all
+/// behaviour comes from the default methods.
+pub struct BasicSuspendedThread<S: UltSystem> {
+    cont: AtomicPtr<UltDesc>,
+    _marker: PhantomData<S>,
+}
+
+unsafe impl<S: UltSystem> Send for BasicSuspendedThread<S> {}
+
+impl<S: UltSystem> Default for BasicSuspendedThread<S> {
+    fn default() -> Self { Self::new() }
+}
+
+impl<S: UltSystem> BasicSuspendedThread<S> {
+    pub const fn new() -> Self {
+        BasicSuspendedThread { cont: AtomicPtr::new(ptr::null_mut()), _marker: PhantomData }
+    }
+}
+
+impl<S: UltSystem> UltSuspendedThread for BasicSuspendedThread<S> {
+    type UltSystem = S;
+    fn cont(&self) -> &AtomicPtr<UltDesc> { &self.cont }
+}

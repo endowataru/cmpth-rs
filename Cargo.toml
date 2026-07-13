@@ -1,0 +1,24 @@
+[workspace]
+members = [".", "bench"]
+
+[package]
+name = "cmpth"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+build = "build.rs"
+description = "Trait-composable user-level threading (ULT) with work-first fork/join scheduling — a Rust reimplementation of ComposableThreads"
+license = "Apache-2.0"
+readme = "README.md"
+keywords = ["threads", "ult", "fibers", "work-stealing", "fork-join"]
+categories = ["concurrency", "asynchronous"]
+repository = "https://github.com/endowataru/cmpth-rs"
+exclude = [".github", ".gitignore", "CLAUDE.md", "tests"]
+
+[build-dependencies]
+cc = "1"
+
+[dependencies]
+crossbeam-deque = "0.8"
+libc = "0.2"
+
