@@ -19,6 +19,7 @@ mod context;
 pub mod traits;
 mod os;
 mod spin;
+pub mod future;
 pub mod ult;
 
 pub use context::{CondTransfer, Context, ContextPolicy, NativeContext, Transfer};
