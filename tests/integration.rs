@@ -293,6 +293,28 @@ fn block_on_yield_once() {
 }
 
 #[test]
+fn future_yield_now_in_block_on() {
+    run(2, || {
+        let v = DefaultUltSystem::block_on(async {
+            cmpth::future::yield_now().await;
+            42u32
+        });
+        assert_eq!(v, 42);
+    });
+}
+
+#[test]
+fn future_yield_now_without_worker() {
+    // No `current()` worker: block_on falls back to OsPoller's busy-poll,
+    // which re-polls regardless of the waker.
+    let v = OsSystem::block_on(async {
+        cmpth::future::yield_now().await;
+        7u32
+    });
+    assert_eq!(v, 7);
+}
+
+#[test]
 fn block_on_already_ready() {
     run(1, || {
         let v = DefaultUltSystem::block_on(async { 99u32 });
@@ -569,7 +591,6 @@ fn spawn_async_immediate() {
 #[test]
 fn spawn_async_yield() {
     // Future that yields once before completing.
-    use std::future::poll_fn;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -577,17 +598,7 @@ fn spawn_async_yield() {
         let flag = Arc::new(AtomicBool::new(false));
         let flag2 = Arc::clone(&flag);
         let h = spawn_async(async move {
-            // Yield once.
-            let mut yielded = false;
-            poll_fn(|cx| {
-                if yielded {
-                    std::task::Poll::Ready(())
-                } else {
-                    yielded = true;
-                    cx.waker().wake_by_ref();
-                    std::task::Poll::Pending
-                }
-            }).await;
+            cmpth::future::yield_now().await;
             flag2.store(true, Ordering::Release);
             42u32
         });
