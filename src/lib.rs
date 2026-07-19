@@ -44,37 +44,101 @@ pub use ult::worker::{ContextSwitcher, LocalQueue, TaskPool, UltWorker, Worker, 
 // Default instantiations
 // ---------------------------------------------------------------------------
 
-crate::ult_system! {
-    /// The default ULT system: runs on top of [`OsSystem`].
-    pub struct DefaultUltSystem {
-        base:       crate::OsSystem,
-        context:    crate::NativeContext,
-        deque:      crate::CrossbeamDeque,
-        stack_size: 64 * 1024,
+// Both default systems host stackless spawn_async-style tasks as well as
+// stackful ULTs (`ult::system::AsyncWorkerSystem` + `UltSystem`), and their
+// `Mutex`/`Barrier` are meant to be contended-together from either calling
+// convention -- so `ult_system!` (which can't assume `AsyncWorkerSystem`
+// is also implemented, since a stackful-only system must stay expressible)
+// isn't used here. Everything it would have generated is written out by
+// hand instead, with `UltSystem::Mutex`/`Barrier` bound to the same
+// `SuspendedTask`-parameterized `DualMutex`/`DualBarrier` as
+// `AsyncWorkerSystem::Mutex`/`Barrier`: since `SuspendedTask<S>`
+// implements both `StackfulResumable` and `StacklessResumable` (unlike
+// the macro's default `BasicSuspendedThread`, stackful-only), one type
+// satisfies both `StackfulMutex` and `StacklessMutex`, so a single
+// instance is genuinely shared and contended between stackful and
+// stackless callers -- not two separate locks that happen to have the
+// same name.
+
+/// The default ULT system: runs on top of [`OsSystem`].
+pub struct DefaultUltSystem;
+
+impl ult::system::UltContextSystem for DefaultUltSystem {
+    type StackAlloc = ult::stack::HeapStack;
+}
+
+impl ult::system::UltSchedulerSystem for DefaultUltSystem {
+    type Base  = OsSystem;
+    type Ctx   = NativeContext;
+    type Deque = CrossbeamDeque;
+    const STACK_SIZE: usize = 64 * 1024;
+
+    type SuspendedThread = ult::suspended::BasicSuspendedThread<Self>;
+    type ExternalQueue   = ult::external_queue::StealPathQueue;
+    type Pool            = ult::pool::ReturnPool<ult::stack::HeapStack>;
+    type Lookup          = ult::lookup::TlsCurrent;
+
+    fn worker_tls() -> &'static <OsSystem as ThreadSystem>::ThreadSpecific<UltWorker<Self>> {
+        static A: TlsAnchor = TlsAnchor::new();
+        TlsSlot::from_anchor(&A)
     }
 }
 
-crate::ult_system! {
-    /// A second-level ULT system: runs on top of [`DefaultUltSystem`]'s ULTs.
-    pub struct DefaultUltUltSystem {
-        base:       crate::DefaultUltSystem,
-        context:    crate::NativeContext,
-        deque:      crate::CrossbeamDeque,
-        stack_size: 64 * 1024,
+impl UltSystem for DefaultUltSystem {
+    type Mutex<T: Send> = UltDualMutex<Self, T, SuspendedTask<Self>>;
+    type Barrier         = UltDualBarrier<Self, SuspendedTask<Self>>;
+    type Delegator<C: DelegatorConsumer<Self>> = McsDelegator<Self, C>;
+
+    fn run<F>(num_workers: usize, root: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        ult::scheduler::run::<Self, F>(num_workers, root)
     }
 }
 
-// Both default systems can also host stackless spawn_async-style tasks.
-// See `ult::system::AsyncWorkerSystem` — kept separate from the
-// `ult_system!` macro deliberately (see docs/sync-async-unification.md).
-// `Mutex`/`Barrier` here are bound to `DualMutex`/`DualBarrier` over
-// `SuspendedTask` (not the `BasicSuspendedThread`-based ones `UltSystem`
-// gets from the macro) so stackless callers get real, contended-together-
-// with-ULTs capability, not just a marker.
 impl ult::system::AsyncWorkerSystem for DefaultUltSystem {
     type Mutex<T: Send> = UltDualMutex<Self, T, SuspendedTask<Self>>;
     type Barrier = UltDualBarrier<Self, SuspendedTask<Self>>;
 }
+
+/// A second-level ULT system: runs on top of [`DefaultUltSystem`]'s ULTs.
+pub struct DefaultUltUltSystem;
+
+impl ult::system::UltContextSystem for DefaultUltUltSystem {
+    type StackAlloc = ult::stack::HeapStack;
+}
+
+impl ult::system::UltSchedulerSystem for DefaultUltUltSystem {
+    type Base  = DefaultUltSystem;
+    type Ctx   = NativeContext;
+    type Deque = CrossbeamDeque;
+    const STACK_SIZE: usize = 64 * 1024;
+
+    type SuspendedThread = ult::suspended::BasicSuspendedThread<Self>;
+    type ExternalQueue   = ult::external_queue::StealPathQueue;
+    type Pool            = ult::pool::ReturnPool<ult::stack::HeapStack>;
+    type Lookup          = ult::lookup::TlsCurrent;
+
+    fn worker_tls() -> &'static <DefaultUltSystem as ThreadSystem>::ThreadSpecific<UltWorker<Self>> {
+        static A: TlsAnchor = TlsAnchor::new();
+        TlsSlot::from_anchor(&A)
+    }
+}
+
+impl UltSystem for DefaultUltUltSystem {
+    type Mutex<T: Send> = UltDualMutex<Self, T, SuspendedTask<Self>>;
+    type Barrier         = UltDualBarrier<Self, SuspendedTask<Self>>;
+    type Delegator<C: DelegatorConsumer<Self>> = McsDelegator<Self, C>;
+
+    fn run<F>(num_workers: usize, root: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        ult::scheduler::run::<Self, F>(num_workers, root)
+    }
+}
+
 impl ult::system::AsyncWorkerSystem for DefaultUltUltSystem {
     type Mutex<T: Send> = UltDualMutex<Self, T, SuspendedTask<Self>>;
     type Barrier = UltDualBarrier<Self, SuspendedTask<Self>>;
