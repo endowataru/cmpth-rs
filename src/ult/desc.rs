@@ -385,19 +385,37 @@ pub trait AsyncTaskDesc: TaskDesc {
     /// resetting to POLLING (`false`) so the caller re-polls immediately
     /// instead of parking.
     ///
-    /// Plain store, not a CAS loop — matches the original call site
-    /// exactly (not changed by this naming pass).
+    /// CAS loop, matching `park_after_poll`. A plain load-then-store here
+    /// raced with `try_wake_state`'s CAS: if a concurrent `wake()` claimed
+    /// POLLING -> NOTIFIED between this method's load and store, the store
+    /// (computed from the stale POLLING read) clobbered NOTIFIED back to
+    /// PARKED. `try_wake_state` had already returned `SetNotified` (task
+    /// "still running, will notice on its own") and so never pushed a
+    /// continuation -- the task committed to PARKED with nobody left to
+    /// wake it, a permanent lost-wakeup livelock.
     fn decide_park(&self) -> bool {
-        let refs = self.waker_refs().load(Ordering::Relaxed);
-        let state = refs & STATE_MASK;
-        if state == NOTIFIED {
-            let new = (refs & !STATE_MASK) | POLLING;
-            self.waker_refs().store(new, Ordering::Release);
-            false
-        } else {
-            let new = (refs & !STATE_MASK) | PARKED;
-            self.waker_refs().store(new, Ordering::Release);
-            true
+        loop {
+            let refs = self.waker_refs().load(Ordering::Acquire);
+            let state = refs & STATE_MASK;
+            if state == NOTIFIED {
+                let new = (refs & !STATE_MASK) | POLLING;
+                if self
+                    .waker_refs()
+                    .compare_exchange(refs, new, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    return false;
+                }
+            } else {
+                let new = (refs & !STATE_MASK) | PARKED;
+                if self
+                    .waker_refs()
+                    .compare_exchange(refs, new, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+                {
+                    return true;
+                }
+            }
         }
     }
 
