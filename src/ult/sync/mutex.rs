@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::ops::{Deref, DerefMut};
 
 use crate::spin::SpinLock;
-use crate::traits::{Condvar as CondvarTrait, Mutex as MutexTrait, SuspendedThread};
+use crate::traits::{Condvar as CondvarTrait, Mutex as MutexTrait, Resumable, StackfulResumable};
 use crate::ult::system::{UltSchedulerSystem, UltSystem};
 
 // ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::traits::{Delegator as DelegatorTrait, DelegatorConsumer, SuspendedThread};
+use crate::traits::{Delegator as DelegatorTrait, DelegatorConsumer, Resumable, StackfulResumable};
 use crate::ult::system::UltSystem;
 use crate::ult::thread;
 
@@ -59,6 +59,8 @@ pub struct Delegator<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> 
     finished:     AtomicBool,
     // consumer ULT handle kept until stop()
     consumer_th:  std::cell::UnsafeCell<Option<thread::JoinHandle<S, ()>>>,
+    // Guards lazily spawning the consumer ULT — see `ensure_consumer_started`.
+    consumer_started: AtomicBool,
 }
 
 unsafe impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Send
@@ -77,6 +79,7 @@ impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default>
             is_executed:  Cell::new(true),
             finished:     AtomicBool::new(false),
             consumer_th:  std::cell::UnsafeCell::new(None),
+            consumer_started: AtomicBool::new(false),
         }
     }
 }
@@ -88,6 +91,71 @@ impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default>
 impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Delegator<S, C, Q> {
     fn consumer(&self) -> &mut C {
         unsafe { &mut *self.consumer.get() }
+    }
+
+    // -- consumer ULT startup -------------------------------------------------
+
+    /// Spawn the dedicated consumer ULT on first use, not in `start()`.
+    ///
+    /// `start()` returns `Self` *by value*, so any address taken inside it
+    /// (e.g. `&del`) is not guaranteed to be `self`'s final address — the
+    /// caller is very likely to immediately move the returned value again
+    /// (`Arc::new(Delegator::start(..))`, the common case, definitely moves
+    /// it once more onto the heap). Capturing `&self` here instead, inside a
+    /// `&self` method, is sound: by the time any caller can invoke
+    /// `execute_or_delegate` concurrently from multiple ULTs at all, `self`
+    /// must already be behind something that gives it a stable address
+    /// (`Arc`, a `'static` reference, etc.) — that's already a precondition
+    /// for sharing it, independent of this method.
+    ///
+    /// (An earlier version of this function spawned eagerly inside `start()`
+    /// using a captured `&del as *const Self as usize`; that crashed with
+    /// SIGBUS in ~1 out of 13 stress runs once the consumer ULT actually
+    /// existed to dereference the stale address — exactly the failure mode
+    /// this comment describes. Caught by repeated stress runs, not the first
+    /// few passes.)
+    fn ensure_consumer_started(&self) {
+        if self.consumer_started.load(Ordering::Acquire) {
+            return;
+        }
+        if self
+            .consumer_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return; // another caller already won the race to start it
+        }
+        let self_ptr = self as *const Self as usize;
+        let th = thread::spawn::<S, (), _>(move || {
+            let del = unsafe { &*(self_ptr as *const Self) };
+            del.consumer_loop();
+        });
+        unsafe { *self.consumer_th.get() = Some(th) };
+    }
+
+    // -- lock_wait -------------------------------------------------------------
+
+    /// Acquire the position, waiting if necessary — never delegating actual
+    /// work, just parking on the queue node's own `sth` (which `unlock()`
+    /// already recognizes as "next waiter wants the lock", via
+    /// `sth.is_set()`). Used by `stop()`, mirroring the C++ reference's
+    /// `stop_consumer()`, which does a full `lock(); ...; unlock();` cycle —
+    /// not a bare `unlock()` — precisely so `unlock()`'s `get_head()` is
+    /// always called by whoever currently, legitimately holds the position.
+    fn lock_wait(&self) {
+        let (is_locked, prev, cur) = self.queue.start_lock();
+        if is_locked {
+            return;
+        }
+        let queue_ptr = &self.queue as *const Q;
+        let prev_ptr = prev;
+        let cur_ptr = cur;
+        let sth_ref: &S::SuspendedThread = unsafe { &(*cur).sth };
+        sth_ref.wait_with(move || {
+            if !prev_ptr.is_null() {
+                unsafe { (*queue_ptr).set_next(prev_ptr, cur_ptr) };
+            }
+        });
     }
 
     // -- lock_or_delegate ----------------------------------------------------
@@ -181,9 +249,9 @@ impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Delegator<S, C, 
 
     // -- consume -------------------------------------------------------------
 
-    // Dedicated-consumer mode: `start` does not spawn a consumer thread yet
-    // (`consumer_th` stays `None`), so these two methods are currently unused.
-    #[allow(dead_code)]
+    // Dedicated-consumer mode: the consumer ULT spawned by `start()` runs
+    // `consumer_loop`, which calls `consume` in a loop until `stop()` sets
+    // `finished`.
     fn consume(&self) {
         let con = self.consumer();
         let mut is_executed = self.is_executed.get();
@@ -234,11 +302,20 @@ impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Delegator<S, C, 
 
         let is_active = con.is_active();
         if !is_active && is_executed {
-            // Try to suspend consumer until next work arrives.
+            // Try to suspend consumer until next work arrives — but only if
+            // try_unlock actually succeeds (queue genuinely empty). If a
+            // successor enqueued concurrently, cancel the suspend instead of
+            // committing to it unconditionally: whoever enqueued does *not*
+            // call unlock()/notify() on our behalf (they never won the lock),
+            // so an unconditional park here would never be woken. Matches
+            // the C++ reference's `try_unlock_and_wait`, built on a
+            // conditional suspend for exactly this reason. On cancel, the
+            // outer `consumer_loop`'s `while !finished { consume() }` simply
+            // re-enters and re-derives state from scratch.
             let queue_ptr = &self.queue as *const Q;
             let head_ptr = head;
-            self.consumer_sth.wait_with(move || {
-                unsafe { (*queue_ptr).try_unlock(head_ptr) };
+            self.consumer_sth.wait_with_cond(move || unsafe {
+                (*queue_ptr).try_unlock(head_ptr)
             });
         }
 
@@ -249,7 +326,6 @@ impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Delegator<S, C, 
 
     // -- consumer loop -------------------------------------------------------
 
-    #[allow(dead_code)]
     fn consumer_loop(&self) {
         while !self.finished.load(Ordering::Acquire) {
             self.consume();
@@ -271,10 +347,22 @@ impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default + 'stat
         let (is_locked, _, _) = del.queue.start_lock();
         assert!(is_locked, "new queue must be empty");
 
+        // The consumer ULT itself is spawned lazily, on first
+        // `execute_or_delegate` call — see `ensure_consumer_started` for why
+        // spawning it here (before the caller has settled `del` at its final
+        // address, e.g. inside an `Arc`) is unsound.
         del
     }
 
     fn stop(self) {
+        // Become the position holder first (waiting our turn if someone
+        // else currently holds it) — matching the C++ reference's
+        // `stop_consumer()`, which does `lock(); ...; unlock();`, not a bare
+        // `unlock()`. Without this, `unlock()`'s `get_head()` can read a
+        // null `head` (whenever the queue is genuinely idle at the moment
+        // `stop()` happens to be called), since nothing established this
+        // caller as the current holder.
+        self.lock_wait();
         self.finished.store(true, Ordering::Release);
         let is_active = self.consumer().is_active();
         self.unlock();
@@ -291,6 +379,7 @@ impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default + 'stat
         Imm: FnOnce(&mut C) -> (bool, Option<S::SuspendedThread>),
         Del: FnOnce(&mut C::Work) -> &S::SuspendedThread,
     {
+        self.ensure_consumer_started();
         let is_locked = self.lock_or_delegate(del);
         if is_locked {
             let (is_done, wait_sth) = imm(self.consumer());

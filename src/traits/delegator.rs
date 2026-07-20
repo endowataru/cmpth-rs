@@ -30,7 +30,10 @@ pub trait DelegatorConsumer<S: ThreadSystem>: Send + 'static {
 pub trait Delegator<S: ThreadSystem, C: DelegatorConsumer<S>>:
     Sized + Send + Sync + 'static
 {
-    /// Spawn the consumer ULT and start accepting delegations.
+    /// Start accepting delegations. Implementations may spawn the consumer
+    /// ULT eagerly here or lazily on first use — see the implementation for
+    /// which, and why (a `Self`-address-stability concern rules eager
+    /// spawning out for `Delegator<S, C, Q>`).
     fn start(consumer: C) -> Self;
 
     /// Stop the consumer ULT (blocks until it exits).

@@ -166,8 +166,9 @@ fn nested_mutex() {
     run(2, || {
         DefaultUltUltSystem::run(2, || {
             use std::sync::Arc;
+            use cmpth::traits::StackfulMutex;
             type M = <DefaultUltUltSystem as ThreadSystem>::Mutex<u64>;
-            let m = Arc::new(<M as MutexTrait<u64>>::new(0));
+            let m = Arc::new(<M as StackfulMutex<u64>>::new(0));
             let handles: Vec<_> = (0..20)
                 .map(|_| {
                     let m = Arc::clone(&m);
@@ -188,7 +189,8 @@ fn nested_mutex() {
 
 fn generic_workload<S: ThreadSystem>() -> u64 {
     use std::sync::Arc;
-    let m = Arc::new(<S::Mutex<u64> as MutexTrait<u64>>::new(0));
+    use cmpth::traits::StackfulMutex;
+    let m = Arc::new(<S::Mutex<u64> as StackfulMutex<u64>>::new(0));
     let handles: Vec<_> = (0..8)
         .map(|_| {
             let m = Arc::clone(&m);
@@ -738,8 +740,9 @@ fn arena_parallel_fib() {
 fn arena_mutex_stress() {
     ArenaUltSystem::run(4, || {
         use std::sync::Arc;
+        use cmpth::traits::StackfulMutex;
         type M = <ArenaUltSystem as ThreadSystem>::Mutex<u64>;
-        let m = Arc::new(<M as MutexTrait<u64>>::new(0));
+        let m = Arc::new(<M as StackfulMutex<u64>>::new(0));
         let handles: Vec<_> = (0..100)
             .map(|_| {
                 let m = Arc::clone(&m);

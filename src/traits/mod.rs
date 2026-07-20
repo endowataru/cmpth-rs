@@ -2,14 +2,30 @@
 
 pub mod barrier;
 pub mod delegator;
+pub mod lock;
 pub mod mutex;
 pub mod poller;
-pub mod suspended;
 pub mod thread_system;
+pub mod ult_system;
+pub mod wait;
 
-pub use barrier::{Barrier, BarrierWaitResult};
+pub use barrier::{Barrier, BarrierWaitResult, DualBarrier, StackfulBarrier, StacklessBarrier};
 pub use delegator::{Delegator, DelegatorConsumer};
+pub use lock::{DualMutex, StackfulMutex, StacklessMutex};
 pub use mutex::{Condvar, Mutex};
 pub use poller::Poller;
-pub use suspended::SuspendedThread;
 pub use thread_system::{JoinHandleLike, TlsAnchor, TlsSlot, ThreadSystem};
+pub use ult_system::{AsyncWorkerSystem, UltSystem};
+pub use wait::{Resumable, StackfulResumable, StacklessResumable};
+
+/// Bulk import for stackful (real-ULT, blocking-call) code:
+/// `use cmpth::traits::stackful::*;`.
+pub mod stackful {
+    pub use crate::traits::{Resumable, StackfulBarrier, StackfulMutex, StackfulResumable, ThreadSystem, UltSystem};
+}
+
+/// Bulk import for stackless (`spawn_async`, `.await`-based) code:
+/// `use cmpth::traits::stackless::*;`.
+pub mod stackless {
+    pub use crate::traits::{AsyncWorkerSystem, Resumable, StacklessBarrier, StacklessMutex, StacklessResumable};
+}
