@@ -6,7 +6,7 @@
 //! implemented by a concrete struct.  Three layers:
 //!
 //! * **`traits/`** — interface layer, no implementations:
-//!   [`ThreadSystem`], [`traits::Resumable`], [`traits::Mutex`], [`traits::Barrier`], …
+//!   [`ThreadSystem`], [`traits::Resumable`], [`traits::StackfulMutex`], [`traits::StackfulBarrier`], …
 //! * **`ult/`** — ULT implementation layer (parametric over [`UltSystem`]):
 //!   [`UltWorker<S>`], [`BasicSuspendedThread<S>`], sync primitives, scheduler.
 //! * **`lib.rs`** — instantiations: [`DefaultUltSystem`], [`DefaultUltUltSystem`].
@@ -229,7 +229,7 @@ pub mod default {
 // ---------------------------------------------------------------------------
 
 pub mod system {
-    pub use crate::traits::{Barrier, Condvar, JoinHandleLike, Mutex, ThreadSystem};
+    pub use crate::traits::{JoinHandleLike, StackfulBarrier, StackfulMutex, ThreadSystem};
     pub use crate::os::{OsBarrier, OsCondvar, OsMutex, OsSystem};
 
     pub type WssSystem = crate::DefaultUltSystem;

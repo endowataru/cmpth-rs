@@ -1,19 +1,16 @@
 //! [`StackfulMutex`]/[`StacklessMutex`]/[`DualMutex`] — same-named
 //! stackful/stackless mutex traits.
 //!
-//! (Not named after the file: kept in `lock.rs` rather than `mutex.rs` to
-//! avoid colliding with the older `traits::mutex` module, which still
-//! holds the pre-existing `Mutex`/`Condvar` pair — see that module's docs.)
-//!
 //! Same disambiguation pattern as [`crate::traits::StackfulResumable`]/
 //! [`crate::traits::StacklessResumable`]: both traits define a method
 //! literally named `lock`; which one resolves at a call site depends on
 //! which trait is `use`d there, not on a `_async` suffix.
 //!
-//! Each carries its own `new`, replacing the older `traits::Mutex`'s role
-//! (which also paired a `Condvar` type — never used generically through
-//! `S::Mutex`, only via concrete types like `McsCondvar`, so it's not
-//! carried over here).
+//! Each carries its own `new`. There is no generic `Condvar` trait: it was
+//! never used generically through `S::Mutex`, only via concrete types like
+//! `McsCondvar`, so pairing types (`McsMutex`/`McsCondvar`,
+//! `OsMutex`/`OsCondvar`, …) expose their condvar as an inherent type with
+//! inherent methods instead.
 //!
 //! The interface owns the name here, not the implementation: `DualMutex`
 //! is the trait; the concrete generic-over-N type (`ult::sync::DualMutex`)

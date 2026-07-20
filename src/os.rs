@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use std::task::Context;
 
-use crate::traits::{Barrier, BarrierWaitResult, Condvar, Delegator, DelegatorConsumer, Mutex, Poller};
+use crate::traits::{BarrierWaitResult, Delegator, DelegatorConsumer, StackfulBarrier, StackfulMutex, Poller};
 use crate::traits::thread_system::{JoinHandleLike, TlsSlot, ThreadSystem, noop_waker};
 
 // ---------------------------------------------------------------------------
@@ -159,24 +159,7 @@ impl<T: 'static> TlsSlot<T> for OsTls<T> {
 
 pub struct OsMutex<T>(std::sync::Mutex<T>);
 
-impl<T: Send> Mutex<T> for OsMutex<T> {
-    type Guard<'a>
-        = std::sync::MutexGuard<'a, T>
-    where
-        Self: 'a,
-        T: 'a;
-    type Condvar = OsCondvar;
-
-    fn new(val: T) -> Self {
-        OsMutex(std::sync::Mutex::new(val))
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, T> {
-        self.0.lock().unwrap()
-    }
-}
-
-impl<T: Send> crate::traits::StackfulMutex<T> for OsMutex<T> {
+impl<T: Send> StackfulMutex<T> for OsMutex<T> {
     type Guard<'a>
         = std::sync::MutexGuard<'a, T>
     where
@@ -192,43 +175,38 @@ impl<T: Send> crate::traits::StackfulMutex<T> for OsMutex<T> {
     }
 }
 
+/// Condvar paired with [`OsMutex`]. Not part of any generic trait: never used
+/// generically through `S::Mutex`, only via this concrete type, so its
+/// interface is inherent methods rather than a `Condvar` trait.
 pub struct OsCondvar(std::sync::Condvar);
 
-impl<T: Send> Condvar<OsMutex<T>, T> for OsCondvar {
-    fn new() -> Self {
+impl OsCondvar {
+    pub fn new() -> Self {
         OsCondvar(std::sync::Condvar::new())
     }
 
-    fn wait<'a>(&self, guard: std::sync::MutexGuard<'a, T>) -> std::sync::MutexGuard<'a, T>
-    where
-        OsMutex<T>: 'a,
-        T: 'a,
-    {
+    pub fn wait<'a, T>(&self, guard: std::sync::MutexGuard<'a, T>) -> std::sync::MutexGuard<'a, T> {
         self.0.wait(guard).unwrap()
     }
 
-    fn notify_one(&self) {
+    pub fn notify_one(&self) {
         self.0.notify_one();
     }
 
-    fn notify_all(&self) {
+    pub fn notify_all(&self) {
         self.0.notify_all();
+    }
+}
+
+impl Default for OsCondvar {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 pub struct OsBarrier(std::sync::Barrier);
 
-impl Barrier for OsBarrier {
-    fn new(count: usize) -> Self {
-        OsBarrier(std::sync::Barrier::new(count))
-    }
-
-    fn wait(&self) -> BarrierWaitResult {
-        BarrierWaitResult { is_leader: self.0.wait().is_leader() }
-    }
-}
-
-impl crate::traits::StackfulBarrier for OsBarrier {
+impl StackfulBarrier for OsBarrier {
     fn new(count: usize) -> Self {
         OsBarrier(std::sync::Barrier::new(count))
     }
