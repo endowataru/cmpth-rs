@@ -99,8 +99,10 @@ pub trait UltSuspendedThread: Send + Default {
 }
 
 /// Blanket: any `UltSuspendedThread` automatically implements the top-level
-/// wait-slot traits (`enter`/`swap` always succeed here — `true` is
-/// type-guaranteed, unlike `SuspendedTask`, which may hold an async waiter).
+/// wait-slot traits. `enter`/`swap` always perform a real context switch
+/// here — the slot can only ever hold a real continuation, unlike
+/// `SuspendedTask`, which may hold an async waiter and has to fall back to
+/// a plain wake internally.
 impl<T: UltSuspendedThread> Resumable<T::UltSchedulerSystem> for T {
     fn is_set(&self) -> bool { self.is_set_impl() }
     fn notify(&self) { self.notify_impl() }
@@ -109,8 +111,8 @@ impl<T: UltSuspendedThread> Resumable<T::UltSchedulerSystem> for T {
 impl<T: UltSuspendedThread> StackfulResumable<T::UltSchedulerSystem> for T {
     fn wait_with<F: FnOnce()>(&self, f: F) { self.wait_with_impl(f) }
     fn wait_with_cond<F: FnOnce() -> bool>(&self, f: F) { self.wait_with_cond_impl(f) }
-    fn enter(&self) -> bool { self.enter_impl(); true }
-    fn swap(&self, next: &Self) -> bool { self.swap_impl(next); true }
+    fn enter(&self) { self.enter_impl() }
+    fn swap(&self, next: &Self) { self.swap_impl(next) }
 }
 
 /// Single-slot parked-continuation implementation.  Implements

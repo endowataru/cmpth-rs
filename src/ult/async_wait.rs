@@ -44,13 +44,12 @@ impl<S: AsyncWorkerSystem> Resumable<S> for SuspendedFuture<S> {
 }
 
 impl<S: AsyncWorkerSystem> StacklessResumable<S> for SuspendedFuture<S> {
-    fn register(&self, cx: &mut Context<'_>) -> bool {
+    fn register(&self, cx: &mut Context<'_>) {
         let boxed = Box::new(cx.waker().clone());
         let ptr = Box::into_raw(boxed);
         // Release: publishes the waker before a concurrent notify() can
         // observe it via the Acquire swap above.
         let old = self.waker.swap(ptr, Ordering::AcqRel);
         debug_assert!(old.is_null(), "SuspendedFuture::register called on an already-set slot");
-        true
     }
 }

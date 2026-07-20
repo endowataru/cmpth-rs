@@ -20,7 +20,7 @@ const ASYNC_TAG: usize = 1;
 /// `cmpth-rs`'s own existing "task" vocabulary (`TaskDesc::TaskResult`,
 /// `UltWorker::cur_task` already mean "whichever kind is running").
 ///
-/// `enter`/`swap` (via [`StackfulResumable`]) return `false` without acting when
+/// `enter`/`swap` (via [`StackfulResumable`]) fall back to a plain wake when
 /// the slot turns out to hold an async waiter — a real context jump is only
 /// possible into a genuine continuation. `wait_with`/`register` never need
 /// this: they only ever *write* a fresh registration into what must already
@@ -55,13 +55,13 @@ fn assert_on_real_ult<S: UltSchedulerSystem>(wk: &UltWorker<S>) {
     );
 }
 
-impl<S: UltSchedulerSystem + AsyncWorkerSystem> Resumable<S> for SuspendedTask<S> {
-    fn is_set(&self) -> bool {
-        self.state.load(Ordering::Acquire) != EMPTY
-    }
-
-    fn notify(&self) {
-        let v = self.state.swap(EMPTY, Ordering::AcqRel);
+impl<S: UltSchedulerSystem + AsyncWorkerSystem> SuspendedTask<S> {
+    /// Wake whatever `v` (a raw slot value already taken via
+    /// `state.swap(EMPTY, ..)`) represents: push a real ULT continuation to
+    /// the local deque, or wake a boxed [`Waker`]. `v == EMPTY` is a no-op.
+    /// Shared by `notify()` and by `enter`/`swap`'s fallback when the slot
+    /// didn't hold a real continuation to switch into.
+    fn wake_raw(v: usize) {
         if v == EMPTY {
             return;
         }
@@ -71,9 +71,20 @@ impl<S: UltSchedulerSystem + AsyncWorkerSystem> Resumable<S> for SuspendedTask<S
             w.wake();
         } else {
             let wk = UltWorker::<S>::current()
-                .expect("cmpth: SuspendedTask::notify called outside a worker");
+                .expect("cmpth: SuspendedTask wake called outside a worker");
             wk.push_local_top(SuspendedUlt(v as *mut BasicTaskDesc));
         }
+    }
+}
+
+impl<S: UltSchedulerSystem + AsyncWorkerSystem> Resumable<S> for SuspendedTask<S> {
+    fn is_set(&self) -> bool {
+        self.state.load(Ordering::Acquire) != EMPTY
+    }
+
+    fn notify(&self) {
+        let v = self.state.swap(EMPTY, Ordering::AcqRel);
+        Self::wake_raw(v);
     }
 }
 
@@ -107,53 +118,46 @@ impl<S: UltSchedulerSystem + AsyncWorkerSystem> StackfulResumable<S> for Suspend
         });
     }
 
-    fn enter(&self) -> bool {
+    fn enter(&self) {
         let wk = UltWorker::<S>::current()
             .expect("cmpth: SuspendedTask::enter called outside a worker");
         assert_on_real_ult(wk);
         let v = self.state.swap(EMPTY, Ordering::AcqRel);
-        if v == EMPTY {
-            return false;
+        if v != EMPTY && v & ASYNC_TAG == 0 {
+            let c = SuspendedUlt(v as *mut BasicTaskDesc);
+            wk.suspend_to_cont(c, |wk, prev| wk.push_local_top(prev));
+        } else {
+            // Not a real continuation — no context jump is possible here,
+            // so fall back to a plain wake instead.
+            Self::wake_raw(v);
         }
-        if v & ASYNC_TAG != 0 {
-            // Not a real continuation — put the registration back untouched
-            // and let the caller fall back to `notify()`.
-            self.state.store(v, Ordering::Release);
-            return false;
-        }
-        let c = SuspendedUlt(v as *mut BasicTaskDesc);
-        wk.suspend_to_cont(c, |wk, prev| wk.push_local_top(prev));
-        true
     }
 
-    fn swap(&self, next: &Self) -> bool {
+    fn swap(&self, next: &Self) {
         debug_assert!(!self.is_set(), "SuspendedTask::swap: self must be empty");
         let wk = UltWorker::<S>::current()
             .expect("cmpth: SuspendedTask::swap called outside a worker");
         assert_on_real_ult(wk);
         let v = next.state.swap(EMPTY, Ordering::AcqRel);
-        if v == EMPTY {
-            return false;
+        if v != EMPTY && v & ASYNC_TAG == 0 {
+            let c = SuspendedUlt(v as *mut BasicTaskDesc);
+            let slot = &self.state as *const AtomicUsize;
+            wk.suspend_to_cont(c, move |_wk, prev| {
+                unsafe { (*slot).store(prev.into_raw() as usize, Ordering::Release) };
+            });
+        } else {
+            // Not a real continuation — fall back to a plain wake; `self`
+            // never becomes parked since no switch happens.
+            Self::wake_raw(v);
         }
-        if v & ASYNC_TAG != 0 {
-            next.state.store(v, Ordering::Release);
-            return false;
-        }
-        let c = SuspendedUlt(v as *mut BasicTaskDesc);
-        let slot = &self.state as *const AtomicUsize;
-        wk.suspend_to_cont(c, move |_wk, prev| {
-            unsafe { (*slot).store(prev.into_raw() as usize, Ordering::Release) };
-        });
-        true
     }
 }
 
 impl<S: UltSchedulerSystem + AsyncWorkerSystem> StacklessResumable<S> for SuspendedTask<S> {
-    fn register(&self, cx: &mut Context<'_>) -> bool {
+    fn register(&self, cx: &mut Context<'_>) {
         let boxed = Box::new(cx.waker().clone());
         let ptr = Box::into_raw(boxed) as usize | ASYNC_TAG;
         let old = self.state.swap(ptr, Ordering::AcqRel);
         debug_assert_eq!(old, EMPTY, "SuspendedTask::register called on an already-set slot");
-        true
     }
 }
