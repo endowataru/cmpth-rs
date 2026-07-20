@@ -42,15 +42,16 @@ pub trait StackfulResumable<S>: Resumable<S> {
     fn wait_with_cond<F: FnOnce() -> bool>(&self, f: F);
 
     /// Switch directly to the parked continuation, pushing the caller's own
-    /// continuation to the local deque. Returns `false` without switching
-    /// if the slot didn't hold a real continuation — only possible when
-    /// `Self` also admits async waiters (e.g. `SuspendedTask`) — in which
-    /// case the caller should fall back to [`Resumable::notify`].
-    fn enter(&self) -> bool;
+    /// continuation to the local deque. If the slot didn't hold a real
+    /// continuation — only possible when `Self` also admits async waiters
+    /// (e.g. `SuspendedTask`) — falls back to waking it the
+    /// [`Resumable::notify`] way internally, so callers never need to
+    /// branch on whether a real switch happened.
+    fn enter(&self);
 
     /// Symmetric handoff: park the current ULT here and switch to `next`.
-    /// Same `false`-on-async-target caveat as [`enter`](Self::enter).
-    fn swap(&self, next: &Self) -> bool;
+    /// Same async-target fallback as [`enter`](Self::enter).
+    fn swap(&self, next: &Self);
 }
 
 /// Stackless (poll-based) flavor of parking.
@@ -63,10 +64,8 @@ pub trait StackfulResumable<S>: Resumable<S> {
 /// (see `ISSUES.md`). Adding them before that's fixed would silently invert
 /// the intended priority.
 pub trait StacklessResumable<S>: Resumable<S> {
-    /// Register `cx`'s waker. Returns `true` if the caller should return
-    /// `Poll::Pending` (currently always, since there is no "already
-    /// resolved" fast path yet).
-    fn register(&self, cx: &mut Context<'_>) -> bool;
+    /// Register `cx`'s waker.
+    fn register(&self, cx: &mut Context<'_>);
 
     /// `.await`-able equivalent of [`StackfulResumable::wait_with`]:
     /// registers this task's waker, then runs `f`, then suspends by

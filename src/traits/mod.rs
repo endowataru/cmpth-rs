@@ -19,7 +19,10 @@ pub use wait::{Resumable, StackfulResumable, StacklessResumable};
 /// Bulk import for stackful (real-ULT, blocking-call) code:
 /// `use cmpth::traits::stackful::*;`.
 pub mod stackful {
-    pub use crate::traits::{Resumable, StackfulBarrier, StackfulMutex, StackfulResumable, ThreadSystem, UltSystem};
+    pub use crate::traits::{
+        Delegator, DelegatorConsumer, Resumable, StackfulBarrier, StackfulMutex, StackfulResumable,
+        ThreadSystem, UltSystem,
+    };
 }
 
 /// Bulk import for stackless (`spawn_async`, `.await`-based) code:
