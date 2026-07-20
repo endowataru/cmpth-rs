@@ -95,7 +95,7 @@ pub trait UltSchedulerSystem: UltContextSystem {
     type Lookup: crate::ult::lookup::CurrentLookup<Self>;
 
     /// Parked-continuation type for this system.
-    type SuspendedThread: UltSuspendedThread<UltSystem = Self>;
+    type SuspendedThread: UltSuspendedThread<UltSchedulerSystem = Self>;
 
     /// Queue for continuations pushed by external (non-worker) OS threads.
     type ExternalQueue: ExternalQueue<Self>;
@@ -114,7 +114,7 @@ pub use crate::traits::ult_system::{AsyncWorkerSystem, UltSystem};
 // Blanket ThreadSystem implementation for every UltSystem
 // ---------------------------------------------------------------------------
 
-impl<S: UltSystem> ThreadSystem for S {
+impl<S: UltSystem + UltSchedulerSystem> ThreadSystem for S {
     type Poller = crate::ult::waker::UltPoller<S>;
 
     fn yield_now() {
@@ -253,6 +253,13 @@ macro_rules! ult_system {
             type Barrier         = $crate::ult::sync::DualBarrier<Self, $crate::ult::suspended::BasicSuspendedThread<Self>>;
             type Delegator<C: $crate::DelegatorConsumer<Self>> =
                 $crate::ult::sync::McsDelegator<Self, C>;
+
+            fn run<F>(num_workers: usize, root: F)
+            where
+                F: FnOnce() + Send + 'static,
+            {
+                $crate::ult::scheduler::run::<Self, F>(num_workers, root)
+            }
         }
     };
 }

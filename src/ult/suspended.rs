@@ -5,7 +5,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::traits::{Resumable, StackfulResumable};
-use crate::ult::system::UltSystem;
+use crate::ult::system::UltSchedulerSystem;
 use crate::ult::desc::{SuspendedUlt, BasicTaskDesc};
 use crate::ult::worker::{ContextSwitcher, LocalQueue, UltWorker, Worker};
 
@@ -20,7 +20,7 @@ use crate::ult::worker::{ContextSwitcher, LocalQueue, UltWorker, Worker};
 /// then automatically satisfies the top-level wait-slot interface
 /// (`docs/sync-async-unification.md`).
 pub trait UltSuspendedThread: Send + Default {
-    type UltSystem: UltSystem;
+    type UltSchedulerSystem: UltSchedulerSystem;
 
     /// Access the raw continuation slot.
     ///
@@ -42,8 +42,8 @@ pub trait UltSuspendedThread: Send + Default {
         SuspendedUlt(c)
     }
 
-    fn wk() -> &'static UltWorker<Self::UltSystem> {
-        UltWorker::<Self::UltSystem>::current()
+    fn wk() -> &'static UltWorker<Self::UltSchedulerSystem> {
+        UltWorker::<Self::UltSchedulerSystem>::current()
             .expect("cmpth: UltSuspendedThread operation called outside a worker")
     }
 
@@ -101,12 +101,12 @@ pub trait UltSuspendedThread: Send + Default {
 /// Blanket: any `UltSuspendedThread` automatically implements the top-level
 /// wait-slot traits (`enter`/`swap` always succeed here — `true` is
 /// type-guaranteed, unlike `SuspendedTask`, which may hold an async waiter).
-impl<T: UltSuspendedThread> Resumable<T::UltSystem> for T {
+impl<T: UltSuspendedThread> Resumable<T::UltSchedulerSystem> for T {
     fn is_set(&self) -> bool { self.is_set_impl() }
     fn notify(&self) { self.notify_impl() }
 }
 
-impl<T: UltSuspendedThread> StackfulResumable<T::UltSystem> for T {
+impl<T: UltSuspendedThread> StackfulResumable<T::UltSchedulerSystem> for T {
     fn wait_with<F: FnOnce()>(&self, f: F) { self.wait_with_impl(f) }
     fn wait_with_cond<F: FnOnce() -> bool>(&self, f: F) { self.wait_with_cond_impl(f) }
     fn enter(&self) -> bool { self.enter_impl(); true }
@@ -116,24 +116,24 @@ impl<T: UltSuspendedThread> StackfulResumable<T::UltSystem> for T {
 /// Single-slot parked-continuation implementation.  Implements
 /// [`UltSuspendedThread`] by providing just the `cont()` accessor; all
 /// behaviour comes from the default methods.
-pub struct BasicSuspendedThread<S: UltSystem> {
+pub struct BasicSuspendedThread<S: UltSchedulerSystem> {
     cont: AtomicPtr<BasicTaskDesc>,
     _marker: PhantomData<S>,
 }
 
-unsafe impl<S: UltSystem> Send for BasicSuspendedThread<S> {}
+unsafe impl<S: UltSchedulerSystem> Send for BasicSuspendedThread<S> {}
 
-impl<S: UltSystem> Default for BasicSuspendedThread<S> {
+impl<S: UltSchedulerSystem> Default for BasicSuspendedThread<S> {
     fn default() -> Self { Self::new() }
 }
 
-impl<S: UltSystem> BasicSuspendedThread<S> {
+impl<S: UltSchedulerSystem> BasicSuspendedThread<S> {
     pub const fn new() -> Self {
         BasicSuspendedThread { cont: AtomicPtr::new(ptr::null_mut()), _marker: PhantomData }
     }
 }
 
-impl<S: UltSystem> UltSuspendedThread for BasicSuspendedThread<S> {
-    type UltSystem = S;
+impl<S: UltSchedulerSystem> UltSuspendedThread for BasicSuspendedThread<S> {
+    type UltSchedulerSystem = S;
     fn cont(&self) -> &AtomicPtr<BasicTaskDesc> { &self.cont }
 }

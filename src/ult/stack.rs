@@ -385,6 +385,7 @@ fn page_size() -> usize {
 #[cfg(test)]
 mod tests {
     use crate::ThreadSystem;
+    use crate::UltSystem;
 
     crate::ult_system! {
         struct SpTestSystem {
@@ -409,7 +410,7 @@ mod tests {
             unsafe { core::arch::asm!("mov {}, rsp", out(reg) sp) };
             sp
         }
-        <SpTestSystem as crate::UltSystem>::run(2, || {
+        SpTestSystem::run(2, || {
             let h = SpTestSystem::spawn(|| {
                 let slot = super::slot_from_sp(current_sp())
                     .expect("sp lookup missed on an arena stack");

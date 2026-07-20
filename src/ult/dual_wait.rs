@@ -7,7 +7,7 @@ use std::task::{Context, Waker};
 
 use crate::traits::{Resumable, StackfulResumable, StacklessResumable};
 use crate::ult::desc::{BasicTaskDesc, SuspendedUlt, TaskDesc};
-use crate::ult::system::{AsyncWorkerSystem, UltSystem};
+use crate::ult::system::{AsyncWorkerSystem, UltSchedulerSystem};
 use crate::ult::worker::{ContextSwitcher, LocalQueue, UltWorker, Worker};
 
 const EMPTY: usize = 0;
@@ -25,15 +25,15 @@ const ASYNC_TAG: usize = 1;
 /// possible into a genuine continuation. `wait_with`/`register` never need
 /// this: they only ever *write* a fresh registration into what must already
 /// be an empty slot, so there's no ambiguity about prior content.
-pub struct SuspendedTask<S: UltSystem + AsyncWorkerSystem> {
+pub struct SuspendedTask<S: UltSchedulerSystem + AsyncWorkerSystem> {
     state: AtomicUsize,
     _marker: PhantomData<S>,
 }
 
-unsafe impl<S: UltSystem + AsyncWorkerSystem> Send for SuspendedTask<S> {}
-unsafe impl<S: UltSystem + AsyncWorkerSystem> Sync for SuspendedTask<S> {}
+unsafe impl<S: UltSchedulerSystem + AsyncWorkerSystem> Send for SuspendedTask<S> {}
+unsafe impl<S: UltSchedulerSystem + AsyncWorkerSystem> Sync for SuspendedTask<S> {}
 
-impl<S: UltSystem + AsyncWorkerSystem> Default for SuspendedTask<S> {
+impl<S: UltSchedulerSystem + AsyncWorkerSystem> Default for SuspendedTask<S> {
     fn default() -> Self {
         SuspendedTask { state: AtomicUsize::new(EMPTY), _marker: PhantomData }
     }
@@ -46,7 +46,7 @@ impl<S: UltSystem + AsyncWorkerSystem> Default for SuspendedTask<S> {
 /// See `docs/sync-async-unification.md` for why this replaces an explicit
 /// capability-token parameter: `cur_task` already carries exactly this
 /// information, correctly maintained by the context-switch shims.
-fn assert_on_real_ult<S: UltSystem>(wk: &UltWorker<S>) {
+fn assert_on_real_ult<S: UltSchedulerSystem>(wk: &UltWorker<S>) {
     let is_root = unsafe { (*wk.cur_task.get()).is_root() };
     assert!(
         !is_root,
@@ -55,7 +55,7 @@ fn assert_on_real_ult<S: UltSystem>(wk: &UltWorker<S>) {
     );
 }
 
-impl<S: UltSystem + AsyncWorkerSystem> Resumable<S> for SuspendedTask<S> {
+impl<S: UltSchedulerSystem + AsyncWorkerSystem> Resumable<S> for SuspendedTask<S> {
     fn is_set(&self) -> bool {
         self.state.load(Ordering::Acquire) != EMPTY
     }
@@ -77,7 +77,7 @@ impl<S: UltSystem + AsyncWorkerSystem> Resumable<S> for SuspendedTask<S> {
     }
 }
 
-impl<S: UltSystem + AsyncWorkerSystem> StackfulResumable<S> for SuspendedTask<S> {
+impl<S: UltSchedulerSystem + AsyncWorkerSystem> StackfulResumable<S> for SuspendedTask<S> {
     fn wait_with<F: FnOnce()>(&self, f: F) {
         let wk = UltWorker::<S>::current()
             .expect("cmpth: SuspendedTask::wait_with called outside a worker");
@@ -148,7 +148,7 @@ impl<S: UltSystem + AsyncWorkerSystem> StackfulResumable<S> for SuspendedTask<S>
     }
 }
 
-impl<S: UltSystem + AsyncWorkerSystem> StacklessResumable<S> for SuspendedTask<S> {
+impl<S: UltSchedulerSystem + AsyncWorkerSystem> StacklessResumable<S> for SuspendedTask<S> {
     fn register(&self, cx: &mut Context<'_>) -> bool {
         let boxed = Box::new(cx.waker().clone());
         let ptr = Box::into_raw(boxed) as usize | ASYNC_TAG;

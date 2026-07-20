@@ -11,7 +11,7 @@ use std::task::{Context, Poll};
 
 use crate::context::{ContextPolicy, Transfer};
 use crate::traits::thread_system::JoinHandleLike;
-use crate::ult::system::UltSystem;
+use crate::ult::system::UltSchedulerSystem;
 use crate::ult::desc::{
     AsyncTaskDesc, BasicTaskDesc, JoinState, StackfulTaskDesc, SuspendedUlt, TaskDesc, JS_FINISHED,
 };
@@ -39,7 +39,7 @@ enum StackResult<T> {
 /// approach required.
 pub fn spawn<S, T, F>(f: F) -> JoinHandle<S, T>
 where
-    S: UltSystem,
+    S: UltSchedulerSystem,
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
 {
@@ -103,7 +103,7 @@ fn align_down(addr: usize, align: usize) -> usize {
 ///
 /// `scheduler` is a type-erased `*const Scheduler<S>` stored on the
 /// descriptor for external-thread wake support.
-pub(crate) fn fork_parent_first<S: UltSystem>(body: ErasedBody, scheduler: *const ()) -> SuspendedUlt {
+pub(crate) fn fork_parent_first<S: UltSchedulerSystem>(body: ErasedBody, scheduler: *const ()) -> SuspendedUlt {
     use crate::ult::stack::StackAlloc as _;
     let desc = BasicTaskDesc::alloc_with(S::StackAlloc::alloc_stack(S::STACK_SIZE).into(), false);
     unsafe { (*desc).scheduler().set(scheduler) };
@@ -118,7 +118,7 @@ pub(crate) fn fork_parent_first<S: UltSystem>(body: ErasedBody, scheduler: *cons
     SuspendedUlt(desc)
 }
 
-unsafe extern "C" fn task_entry<S: UltSystem>(transfer: Transfer, arg: *mut ()) -> ! {
+unsafe extern "C" fn task_entry<S: UltSchedulerSystem>(transfer: Transfer, arg: *mut ()) -> ! {
     let wk = unsafe { &*(transfer.0 as *const UltWorker<S>) };
     let desc = wk.cur_task.get();
     let body = *unsafe { Box::from_raw(arg as *mut ErasedBody) };
@@ -144,7 +144,7 @@ unsafe extern "C" fn task_entry<S: UltSystem>(transfer: Transfer, arg: *mut ()) 
 /// concurrently — late joiner registration, waker replacement, detach — so
 /// the exit callback publishes `FINISHED` with a `swap` *after* the context
 /// switch and settles whichever party it finds in the old value.
-fn exit_with_result<S: UltSystem, T: Send + 'static>(
+fn exit_with_result<S: UltSchedulerSystem, T: Send + 'static>(
     wk: &UltWorker<S>,
     desc: *mut BasicTaskDesc,
     result_ptr: *mut StackResult<T>,
@@ -190,7 +190,7 @@ fn exit_with_result<S: UltSystem, T: Send + 'static>(
 
 /// Exit for parent-first tasks (`fork_parent_first`): the result, if kept,
 /// is already in `desc.result`.  Same state machine as `exit_with_result`.
-fn exit<S: UltSystem>(wk: &UltWorker<S>, desc: *mut BasicTaskDesc) -> ! {
+fn exit<S: UltSchedulerSystem>(wk: &UltWorker<S>, desc: *mut BasicTaskDesc) -> ! {
     match unsafe { (*desc).read_join_state() } {
         JoinState::SyncJoiner(j_desc) => {
             wk.exit_to_cont(SuspendedUlt(j_desc), move |_wk| unsafe {
@@ -215,7 +215,7 @@ fn exit<S: UltSystem>(wk: &UltWorker<S>, desc: *mut BasicTaskDesc) -> ! {
 // JoinHandle
 // ---------------------------------------------------------------------------
 
-pub struct JoinHandle<S: UltSystem, T> {
+pub struct JoinHandle<S: UltSchedulerSystem, T> {
     desc: *mut BasicTaskDesc,
     result_ptr: *mut StackResult<T>,
     // Type-erased drop for the result slot; avoids a T: Send + 'static bound
@@ -228,11 +228,11 @@ unsafe fn drop_stack_result<T>(ptr: *mut ()) {
     unsafe { std::ptr::drop_in_place(ptr as *mut StackResult<T>) };
 }
 
-unsafe impl<S: UltSystem, T: Send> Send for JoinHandle<S, T> {}
+unsafe impl<S: UltSchedulerSystem, T: Send> Send for JoinHandle<S, T> {}
 // JoinHandle holds only raw pointers; it is safe to move at any time.
-impl<S: UltSystem, T> Unpin for JoinHandle<S, T> {}
+impl<S: UltSchedulerSystem, T> Unpin for JoinHandle<S, T> {}
 
-impl<S: UltSystem, T: Send + 'static> JoinHandle<S, T> {
+impl<S: UltSchedulerSystem, T: Send + 'static> JoinHandle<S, T> {
     pub fn join(self) -> Result<T, Box<dyn Any + Send>> {
         let wk = UltWorker::<S>::current().expect("cmpth: join called outside a worker");
         let desc = self.desc;
@@ -291,7 +291,7 @@ impl<S: UltSystem, T: Send + 'static> JoinHandle<S, T> {
     }
 }
 
-impl<S: UltSystem, T> Drop for JoinHandle<S, T> {
+impl<S: UltSchedulerSystem, T> Drop for JoinHandle<S, T> {
     fn drop(&mut self) {
         if self.desc.is_null() {
             return; // consumed by Future::poll
@@ -318,7 +318,7 @@ impl<S: UltSystem, T> Drop for JoinHandle<S, T> {
     }
 }
 
-impl<S: UltSystem, T: Send + 'static> JoinHandleLike<T> for JoinHandle<S, T> {
+impl<S: UltSchedulerSystem, T: Send + 'static> JoinHandleLike<T> for JoinHandle<S, T> {
     fn join(self) -> T {
         match JoinHandle::join(self) {
             Ok(v) => v,
@@ -327,7 +327,7 @@ impl<S: UltSystem, T: Send + 'static> JoinHandleLike<T> for JoinHandle<S, T> {
     }
 }
 
-impl<S: UltSystem, T: Send + 'static> Future for JoinHandle<S, T> {
+impl<S: UltSchedulerSystem, T: Send + 'static> Future for JoinHandle<S, T> {
     type Output = T;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
@@ -366,7 +366,7 @@ impl<S: UltSystem, T: Send + 'static> Future for JoinHandle<S, T> {
 /// `BasicTaskDesc::free`, never returned to the fixed-size pool.
 pub fn spawn_async<S, T, F>(f: F) -> JoinHandle<S, T>
 where
-    S: UltSystem,
+    S: UltSchedulerSystem,
     F: Future<Output = T> + Send + 'static,
     T: Send + 'static,
 {
@@ -419,7 +419,7 @@ unsafe fn async_poll_fn<S, T, F>(
     cx: &mut Context<'_>,
 ) -> bool
 where
-    S: UltSystem,
+    S: UltSchedulerSystem,
     T: Send + 'static,
     F: Future<Output = T> + Send + 'static,
 {

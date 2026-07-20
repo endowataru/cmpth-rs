@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::traits::thread_system::TlsSlot;
 use crate::ult::desc::TaskDesc;
-use crate::ult::system::UltSystem;
+use crate::ult::system::UltSchedulerSystem;
 use crate::ult::worker::{UltWorker, Worker};
 
 static NEXT_ULT_TLS_KEY: AtomicUsize = AtomicUsize::new(0);
@@ -38,7 +38,7 @@ impl<S, T> Default for UltTls<S, T> {
     }
 }
 
-impl<S: UltSystem, T: 'static> TlsSlot<T> for UltTls<S, T> {
+impl<S: UltSchedulerSystem, T: 'static> TlsSlot<T> for UltTls<S, T> {
     fn from_anchor(anchor: &'static crate::traits::thread_system::TlsAnchor) -> &'static Self {
         // Sound: repr(transparent) over TlsAnchor (PhantomData is a ZST).
         unsafe { &*(anchor as *const _ as *const Self) }

@@ -4,22 +4,22 @@ use std::ops::{Deref, DerefMut};
 
 use crate::spin::SpinLock;
 use crate::traits::{Condvar as CondvarTrait, Mutex as MutexTrait, Resumable, StackfulResumable};
-use crate::ult::system::{UltSchedulerSystem, UltSystem};
+use crate::ult::system::UltSchedulerSystem;
 
 // ---------------------------------------------------------------------------
 // MutexCore
 // ---------------------------------------------------------------------------
 
-pub struct MutexState<S: UltSystem> {
+pub struct MutexState<S: UltSchedulerSystem> {
     pub(super) locked: bool,
     pub(super) waiters: VecDeque<S::SuspendedThread>,
 }
 
 pub trait MutexCore: Send + Sync + Sized {
-    type UltSystem: UltSystem;
+    type UltSchedulerSystem: UltSchedulerSystem;
     type Data: Send;
 
-    fn state(&self) -> &SpinLock<MutexState<Self::UltSystem>>;
+    fn state(&self) -> &SpinLock<MutexState<Self::UltSchedulerSystem>>;
     fn data(&self) -> &UnsafeCell<Self::Data>;
 
     fn lock_impl(&self) -> MutexGuard<'_, Self> {
@@ -29,7 +29,7 @@ pub trait MutexCore: Send + Sync + Sized {
             return MutexGuard { mutex: self };
         }
         s.waiters.push_back(Default::default());
-        let sth: *const <Self::UltSystem as UltSchedulerSystem>::SuspendedThread = s.waiters.back().unwrap();
+        let sth: *const <Self::UltSchedulerSystem as UltSchedulerSystem>::SuspendedThread = s.waiters.back().unwrap();
         unsafe { &*sth }.wait_with(move || drop(s));
         MutexGuard { mutex: self }
     }
@@ -83,22 +83,22 @@ impl<M: MutexCore> Drop for MutexGuard<'_, M> {
 // Mutex
 // ---------------------------------------------------------------------------
 
-pub struct Mutex<S: UltSystem, T> {
+pub struct Mutex<S: UltSchedulerSystem, T> {
     state: SpinLock<MutexState<S>>,
     data: UnsafeCell<T>,
 }
 
-unsafe impl<S: UltSystem, T: Send> Send for Mutex<S, T> {}
-unsafe impl<S: UltSystem, T: Send> Sync for Mutex<S, T> {}
+unsafe impl<S: UltSchedulerSystem, T: Send> Send for Mutex<S, T> {}
+unsafe impl<S: UltSchedulerSystem, T: Send> Sync for Mutex<S, T> {}
 
-impl<S: UltSystem, T: Send> MutexCore for Mutex<S, T> {
-    type UltSystem = S;
+impl<S: UltSchedulerSystem, T: Send> MutexCore for Mutex<S, T> {
+    type UltSchedulerSystem = S;
     type Data = T;
     fn state(&self) -> &SpinLock<MutexState<S>> { &self.state }
     fn data(&self) -> &UnsafeCell<T> { &self.data }
 }
 
-impl<S: UltSystem, T: Send> MutexTrait<T> for Mutex<S, T> {
+impl<S: UltSchedulerSystem, T: Send> MutexTrait<T> for Mutex<S, T> {
     type Guard<'a> = MutexGuard<'a, Mutex<S, T>> where Self: 'a, T: 'a;
     type Condvar = Condvar<S>;
 
@@ -116,14 +116,14 @@ impl<S: UltSystem, T: Send> MutexTrait<T> for Mutex<S, T> {
 // Condvar
 // ---------------------------------------------------------------------------
 
-pub struct Condvar<S: UltSystem> {
+pub struct Condvar<S: UltSchedulerSystem> {
     waiters: SpinLock<VecDeque<S::SuspendedThread>>,
 }
 
-unsafe impl<S: UltSystem> Send for Condvar<S> {}
-unsafe impl<S: UltSystem> Sync for Condvar<S> {}
+unsafe impl<S: UltSchedulerSystem> Send for Condvar<S> {}
+unsafe impl<S: UltSchedulerSystem> Sync for Condvar<S> {}
 
-impl<S: UltSystem> Condvar<S> {
+impl<S: UltSchedulerSystem> Condvar<S> {
     pub fn new() -> Self {
         Condvar { waiters: SpinLock::new(VecDeque::new()) }
     }
@@ -151,11 +151,11 @@ impl<S: UltSystem> Condvar<S> {
     }
 }
 
-impl<S: UltSystem> Default for Condvar<S> {
+impl<S: UltSchedulerSystem> Default for Condvar<S> {
     fn default() -> Self { Self::new() }
 }
 
-impl<S: UltSystem, T: Send> CondvarTrait<Mutex<S, T>, T> for Condvar<S> {
+impl<S: UltSchedulerSystem, T: Send> CondvarTrait<Mutex<S, T>, T> for Condvar<S> {
     fn new() -> Self { Condvar::new() }
 
     fn wait<'a>(&self, guard: MutexGuard<'a, Mutex<S, T>>) -> MutexGuard<'a, Mutex<S, T>>

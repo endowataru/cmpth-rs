@@ -2,22 +2,22 @@ use std::collections::VecDeque;
 
 use crate::spin::SpinLock;
 use crate::traits::{Barrier as BarrierTrait, BarrierWaitResult, Resumable, StackfulBarrier, StackfulResumable};
-use crate::ult::system::{UltSchedulerSystem, UltSystem};
+use crate::ult::system::UltSchedulerSystem;
 
 // ---------------------------------------------------------------------------
 // BarrierCore
 // ---------------------------------------------------------------------------
 
-pub struct BarrierState<S: UltSystem> {
+pub struct BarrierState<S: UltSchedulerSystem> {
     pub(super) count: usize,
     pub(super) waiters: VecDeque<S::SuspendedThread>,
 }
 
 pub trait BarrierCore: Send + Sync + Sized {
-    type UltSystem: UltSystem;
+    type UltSchedulerSystem: UltSchedulerSystem;
 
     fn n(&self) -> usize;
-    fn state(&self) -> &SpinLock<BarrierState<Self::UltSystem>>;
+    fn state(&self) -> &SpinLock<BarrierState<Self::UltSchedulerSystem>>;
 
     fn wait_impl(&self) -> BarrierWaitResult {
         let mut s = self.state().lock();
@@ -30,7 +30,7 @@ pub trait BarrierCore: Send + Sync + Sized {
             return BarrierWaitResult { is_leader: true };
         }
         s.waiters.push_back(Default::default());
-        let sth: *const <Self::UltSystem as UltSchedulerSystem>::SuspendedThread = s.waiters.back().unwrap();
+        let sth: *const <Self::UltSchedulerSystem as UltSchedulerSystem>::SuspendedThread = s.waiters.back().unwrap();
         unsafe { &*sth }.wait_with(move || drop(s));
         BarrierWaitResult { is_leader: false }
     }
@@ -40,33 +40,33 @@ pub trait BarrierCore: Send + Sync + Sized {
 // Barrier
 // ---------------------------------------------------------------------------
 
-pub struct Barrier<S: UltSystem> {
+pub struct Barrier<S: UltSchedulerSystem> {
     n: usize,
     state: SpinLock<BarrierState<S>>,
 }
 
-unsafe impl<S: UltSystem> Send for Barrier<S> {}
-unsafe impl<S: UltSystem> Sync for Barrier<S> {}
+unsafe impl<S: UltSchedulerSystem> Send for Barrier<S> {}
+unsafe impl<S: UltSchedulerSystem> Sync for Barrier<S> {}
 
-impl<S: UltSystem> Barrier<S> {
+impl<S: UltSchedulerSystem> Barrier<S> {
     pub fn new(n: usize) -> Self {
         assert!(n > 0);
         Barrier { n, state: SpinLock::new(BarrierState { count: 0, waiters: VecDeque::new() }) }
     }
 }
 
-impl<S: UltSystem> BarrierCore for Barrier<S> {
-    type UltSystem = S;
+impl<S: UltSchedulerSystem> BarrierCore for Barrier<S> {
+    type UltSchedulerSystem = S;
     fn n(&self) -> usize { self.n }
     fn state(&self) -> &SpinLock<BarrierState<S>> { &self.state }
 }
 
-impl<S: UltSystem> BarrierTrait for Barrier<S> {
+impl<S: UltSchedulerSystem> BarrierTrait for Barrier<S> {
     fn new(count: usize) -> Self { Barrier::new(count) }
     fn wait(&self) -> BarrierWaitResult { self.wait_impl() }
 }
 
-impl<S: UltSystem> StackfulBarrier for Barrier<S> {
+impl<S: UltSchedulerSystem> StackfulBarrier for Barrier<S> {
     fn new(count: usize) -> Self { Barrier::new(count) }
     fn wait(&self) -> BarrierWaitResult { self.wait_impl() }
 }

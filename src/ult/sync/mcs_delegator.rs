@@ -2,7 +2,8 @@ use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::traits::DelegatorConsumer;
-use crate::ult::system::UltSystem;
+use crate::ult::system::UltSchedulerSystem;
+use crate::traits::UltSystem;
 
 use super::delegator::{Delegator, DelegatorNode, SyncQueue};
 
@@ -10,7 +11,7 @@ use super::delegator::{Delegator, DelegatorNode, SyncQueue};
 // MCS queue node wrapper
 // ---------------------------------------------------------------------------
 
-struct McsEntry<S: UltSystem, C: DelegatorConsumer<S>> {
+struct McsEntry<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>> {
     next: AtomicPtr<McsEntry<S, C>>,
     node: DelegatorNode<S, C>,
 }
@@ -19,16 +20,16 @@ struct McsEntry<S: UltSystem, C: DelegatorConsumer<S>> {
 // McsQueue
 // ---------------------------------------------------------------------------
 
-pub struct McsQueue<S: UltSystem, C: DelegatorConsumer<S>> {
+pub struct McsQueue<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>> {
     tail: AtomicPtr<McsEntry<S, C>>,
     // head tracks the current lock holder's entry
     head: std::cell::Cell<*mut McsEntry<S, C>>,
 }
 
-unsafe impl<S: UltSystem, C: DelegatorConsumer<S>> Send for McsQueue<S, C> {}
-unsafe impl<S: UltSystem, C: DelegatorConsumer<S>> Sync for McsQueue<S, C> {}
+unsafe impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>> Send for McsQueue<S, C> {}
+unsafe impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>> Sync for McsQueue<S, C> {}
 
-impl<S: UltSystem, C: DelegatorConsumer<S>> Default for McsQueue<S, C> {
+impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>> Default for McsQueue<S, C> {
     fn default() -> Self {
         // No sentinel: `tail`/`head` start genuinely null, matching the C++
         // reference (`basic_mcs_core.hpp`: `tail_{nullptr}`, `head_` defaults
@@ -46,7 +47,7 @@ impl<S: UltSystem, C: DelegatorConsumer<S>> Default for McsQueue<S, C> {
     }
 }
 
-impl<S: UltSystem, C: DelegatorConsumer<S>> Drop for McsQueue<S, C> {
+impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>> Drop for McsQueue<S, C> {
     fn drop(&mut self) {
         // Free the sentinel (and any remaining nodes, though normally none).
         let mut ptr = self.head.get();
@@ -58,7 +59,7 @@ impl<S: UltSystem, C: DelegatorConsumer<S>> Drop for McsQueue<S, C> {
     }
 }
 
-impl<S: UltSystem, C: DelegatorConsumer<S>> SyncQueue<S, C> for McsQueue<S, C> {
+impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>> SyncQueue<S, C> for McsQueue<S, C> {
     fn start_lock(
         &self,
     ) -> (bool, *mut DelegatorNode<S, C>, *mut DelegatorNode<S, C>) {
@@ -143,7 +144,7 @@ impl<S: UltSystem, C: DelegatorConsumer<S>> SyncQueue<S, C> for McsQueue<S, C> {
     }
 }
 
-fn entry_of<S: UltSystem, C: DelegatorConsumer<S>>(
+fn entry_of<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>>(
     node: *mut DelegatorNode<S, C>,
 ) -> *mut McsEntry<S, C> {
     // DelegatorNode is the `node` field of McsEntry; compute the container ptr.

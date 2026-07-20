@@ -823,6 +823,13 @@ impl UltSystem for ManualSystem {
     type Barrier        = cmpth::ult::sync::Barrier<Self>;
     type Delegator<C: cmpth::DelegatorConsumer<Self>> =
         cmpth::ult::sync::McsDelegator<Self, C>;
+
+    fn run<F>(num_workers: usize, root: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        cmpth::ult::scheduler::run::<Self, F>(num_workers, root)
+    }
 }
 
 #[test]

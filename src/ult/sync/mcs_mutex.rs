@@ -6,40 +6,40 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::spin::SpinLock;
 use crate::traits::{Condvar as CondvarTrait, Mutex as MutexTrait, Resumable, StackfulMutex, StackfulResumable};
-use crate::ult::system::UltSystem;
+use crate::ult::system::UltSchedulerSystem;
 
 // ---------------------------------------------------------------------------
 // McsMutex
 // ---------------------------------------------------------------------------
 
-struct McsNode<S: UltSystem> {
+struct McsNode<S: UltSchedulerSystem> {
     next: AtomicPtr<McsNode<S>>,
     suspended: S::SuspendedThread,
 }
 
-pub struct McsMutex<S: UltSystem, T: Send> {
+pub struct McsMutex<S: UltSchedulerSystem, T: Send> {
     tail: AtomicPtr<McsNode<S>>,
     data: UnsafeCell<T>,
 }
 
-unsafe impl<S: UltSystem, T: Send> Send for McsMutex<S, T> {}
-unsafe impl<S: UltSystem, T: Send> Sync for McsMutex<S, T> {}
+unsafe impl<S: UltSchedulerSystem, T: Send> Send for McsMutex<S, T> {}
+unsafe impl<S: UltSchedulerSystem, T: Send> Sync for McsMutex<S, T> {}
 
-pub struct McsMutexGuard<'a, S: UltSystem, T: Send> {
+pub struct McsMutexGuard<'a, S: UltSchedulerSystem, T: Send> {
     mutex: &'a McsMutex<S, T>,
     node: Box<McsNode<S>>,
 }
 
-impl<S: UltSystem, T: Send> Deref for McsMutexGuard<'_, S, T> {
+impl<S: UltSchedulerSystem, T: Send> Deref for McsMutexGuard<'_, S, T> {
     type Target = T;
     fn deref(&self) -> &T { unsafe { &*self.mutex.data.get() } }
 }
 
-impl<S: UltSystem, T: Send> DerefMut for McsMutexGuard<'_, S, T> {
+impl<S: UltSchedulerSystem, T: Send> DerefMut for McsMutexGuard<'_, S, T> {
     fn deref_mut(&mut self) -> &mut T { unsafe { &mut *self.mutex.data.get() } }
 }
 
-impl<S: UltSystem, T: Send> Drop for McsMutexGuard<'_, S, T> {
+impl<S: UltSchedulerSystem, T: Send> Drop for McsMutexGuard<'_, S, T> {
     fn drop(&mut self) {
         let node_ptr: *mut McsNode<S> = &mut *self.node;
         if self.mutex.tail
@@ -71,7 +71,7 @@ impl<S: UltSystem, T: Send> Drop for McsMutexGuard<'_, S, T> {
     }
 }
 
-impl<S: UltSystem, T: Send> MutexTrait<T> for McsMutex<S, T> {
+impl<S: UltSchedulerSystem, T: Send> MutexTrait<T> for McsMutex<S, T> {
     type Guard<'a> = McsMutexGuard<'a, S, T> where Self: 'a, T: 'a;
     type Condvar = McsCondvar<S>;
 
@@ -95,7 +95,7 @@ impl<S: UltSystem, T: Send> MutexTrait<T> for McsMutex<S, T> {
     }
 }
 
-impl<S: UltSystem, T: Send> StackfulMutex<T> for McsMutex<S, T> {
+impl<S: UltSchedulerSystem, T: Send> StackfulMutex<T> for McsMutex<S, T> {
     type Guard<'a> = McsMutexGuard<'a, S, T> where Self: 'a, T: 'a;
 
     fn new(val: T) -> Self {
@@ -111,11 +111,11 @@ impl<S: UltSystem, T: Send> StackfulMutex<T> for McsMutex<S, T> {
 // McsCondvar
 // ---------------------------------------------------------------------------
 
-pub struct McsCondvar<S: UltSystem> {
+pub struct McsCondvar<S: UltSchedulerSystem> {
     waiters: SpinLock<VecDeque<S::SuspendedThread>>,
 }
 
-impl<S: UltSystem> McsCondvar<S> {
+impl<S: UltSchedulerSystem> McsCondvar<S> {
     pub fn new() -> Self {
         McsCondvar { waiters: SpinLock::new(VecDeque::new()) }
     }
@@ -130,7 +130,7 @@ impl<S: UltSystem> McsCondvar<S> {
     }
 }
 
-impl<S: UltSystem, T: Send> CondvarTrait<McsMutex<S, T>, T> for McsCondvar<S> {
+impl<S: UltSchedulerSystem, T: Send> CondvarTrait<McsMutex<S, T>, T> for McsCondvar<S> {
     fn new() -> Self { McsCondvar::new() }
 
     fn wait<'a>(&self, guard: McsMutexGuard<'a, S, T>) -> McsMutexGuard<'a, S, T>
