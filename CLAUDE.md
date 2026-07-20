@@ -25,3 +25,10 @@ perf: reduce false sharing in MCS lock queue nodes
 test: add barrier_sync stress test
 docs: document UltContext safety invariants
 ```
+
+## docs/
+
+`docs/` is scratch space for working notes, design drafts, and investigation
+logs written during development — not project documentation. Never `git add`
+or commit anything under `docs/`, even as part of an otherwise-unrelated
+commit.
