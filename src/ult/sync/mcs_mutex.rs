@@ -5,7 +5,7 @@ use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::spin::SpinLock;
-use crate::traits::{Condvar as CondvarTrait, Mutex as MutexTrait, Resumable, StackfulMutex, StackfulResumable};
+use crate::traits::{Resumable, StackfulMutex, StackfulResumable};
 use crate::ult::system::UltSchedulerSystem;
 
 // ---------------------------------------------------------------------------
@@ -71,9 +71,8 @@ impl<S: UltSchedulerSystem, T: Send> Drop for McsMutexGuard<'_, S, T> {
     }
 }
 
-impl<S: UltSchedulerSystem, T: Send> MutexTrait<T> for McsMutex<S, T> {
+impl<S: UltSchedulerSystem, T: Send> StackfulMutex<T> for McsMutex<S, T> {
     type Guard<'a> = McsMutexGuard<'a, S, T> where Self: 'a, T: 'a;
-    type Condvar = McsCondvar<S>;
 
     fn new(val: T) -> Self {
         McsMutex { tail: AtomicPtr::new(null_mut()), data: UnsafeCell::new(val) }
@@ -95,18 +94,6 @@ impl<S: UltSchedulerSystem, T: Send> MutexTrait<T> for McsMutex<S, T> {
     }
 }
 
-impl<S: UltSchedulerSystem, T: Send> StackfulMutex<T> for McsMutex<S, T> {
-    type Guard<'a> = McsMutexGuard<'a, S, T> where Self: 'a, T: 'a;
-
-    fn new(val: T) -> Self {
-        <Self as MutexTrait<T>>::new(val)
-    }
-
-    fn lock(&self) -> McsMutexGuard<'_, S, T> {
-        MutexTrait::lock(self)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // McsCondvar
 // ---------------------------------------------------------------------------
@@ -120,22 +107,9 @@ impl<S: UltSchedulerSystem> McsCondvar<S> {
         McsCondvar { waiters: SpinLock::new(VecDeque::new()) }
     }
 
-    pub fn notify_one(&self) {
-        if let Some(sth) = self.waiters.lock().pop_front() { sth.notify(); }
-    }
-
-    pub fn notify_all(&self) {
-        let all: VecDeque<_> = std::mem::take(&mut *self.waiters.lock());
-        for sth in all { sth.notify(); }
-    }
-}
-
-impl<S: UltSchedulerSystem, T: Send> CondvarTrait<McsMutex<S, T>, T> for McsCondvar<S> {
-    fn new() -> Self { McsCondvar::new() }
-
-    fn wait<'a>(&self, guard: McsMutexGuard<'a, S, T>) -> McsMutexGuard<'a, S, T>
-    where McsMutex<S, T>: 'a, T: 'a
-    {
+    /// Release `guard`, wait for a notification, then re-acquire and return
+    /// a fresh guard.
+    pub fn wait<'a, T: Send>(&self, guard: McsMutexGuard<'a, S, T>) -> McsMutexGuard<'a, S, T> {
         let mutex = guard.mutex;
         let mut waiters = self.waiters.lock();
         waiters.push_back(S::SuspendedThread::default());
@@ -144,9 +118,15 @@ impl<S: UltSchedulerSystem, T: Send> CondvarTrait<McsMutex<S, T>, T> for McsCond
             drop(waiters);
             drop(guard);
         });
-        MutexTrait::lock(mutex)
+        StackfulMutex::lock(mutex)
     }
 
-    fn notify_one(&self) { McsCondvar::notify_one(self); }
-    fn notify_all(&self) { McsCondvar::notify_all(self); }
+    pub fn notify_one(&self) {
+        if let Some(sth) = self.waiters.lock().pop_front() { sth.notify(); }
+    }
+
+    pub fn notify_all(&self) {
+        let all: VecDeque<_> = std::mem::take(&mut *self.waiters.lock());
+        for sth in all { sth.notify(); }
+    }
 }

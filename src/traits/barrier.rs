@@ -1,18 +1,14 @@
-//! [`Barrier`] — thread-system-agnostic barrier.
+//! [`StackfulBarrier`]/[`StacklessBarrier`]/[`DualBarrier`] — same-named
+//! stackful/stackless barrier traits.
 
-/// Return value of [`Barrier::wait`], mirroring `std::sync::BarrierWaitResult`.
+/// Return value of [`StackfulBarrier::wait`], mirroring
+/// `std::sync::BarrierWaitResult`.
 pub struct BarrierWaitResult {
     pub is_leader: bool,
 }
 
 impl BarrierWaitResult {
     pub fn is_leader(&self) -> bool { self.is_leader }
-}
-
-/// Barrier abstraction.
-pub trait Barrier: Sized + Send + Sync {
-    fn new(count: usize) -> Self;
-    fn wait(&self) -> BarrierWaitResult;
 }
 
 /// Stackful/stackless-flavored barrier `wait`, same disambiguation pattern

@@ -3,7 +3,7 @@ use std::collections::VecDeque;
 use std::ops::{Deref, DerefMut};
 
 use crate::spin::SpinLock;
-use crate::traits::{Condvar as CondvarTrait, Mutex as MutexTrait, Resumable, StackfulResumable};
+use crate::traits::{Resumable, StackfulMutex, StackfulResumable};
 use crate::ult::system::UltSchedulerSystem;
 
 // ---------------------------------------------------------------------------
@@ -98,9 +98,8 @@ impl<S: UltSchedulerSystem, T: Send> MutexCore for Mutex<S, T> {
     fn data(&self) -> &UnsafeCell<T> { &self.data }
 }
 
-impl<S: UltSchedulerSystem, T: Send> MutexTrait<T> for Mutex<S, T> {
+impl<S: UltSchedulerSystem, T: Send> StackfulMutex<T> for Mutex<S, T> {
     type Guard<'a> = MutexGuard<'a, Mutex<S, T>> where Self: 'a, T: 'a;
-    type Condvar = Condvar<S>;
 
     fn new(val: T) -> Self {
         Mutex {
@@ -153,17 +152,4 @@ impl<S: UltSchedulerSystem> Condvar<S> {
 
 impl<S: UltSchedulerSystem> Default for Condvar<S> {
     fn default() -> Self { Self::new() }
-}
-
-impl<S: UltSchedulerSystem, T: Send> CondvarTrait<Mutex<S, T>, T> for Condvar<S> {
-    fn new() -> Self { Condvar::new() }
-
-    fn wait<'a>(&self, guard: MutexGuard<'a, Mutex<S, T>>) -> MutexGuard<'a, Mutex<S, T>>
-    where Mutex<S, T>: 'a, T: 'a,
-    {
-        Condvar::wait(self, guard)
-    }
-
-    fn notify_one(&self) { Condvar::notify_one(self); }
-    fn notify_all(&self) { Condvar::notify_all(self); }
 }
