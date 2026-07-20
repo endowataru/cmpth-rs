@@ -66,7 +66,7 @@ const ARENA_RESERVE: usize = 1 << 34; // 16 GiB of address space
 /// Concrete implementations: [`HeapStackMem`] (plain heap) and
 /// [`ArenaStackMem`] (arena cell).  Both are produced by their corresponding
 /// [`StackAlloc`] implementation and converted into [`StackMem`] for storage
-/// inside [`UltDesc`](crate::ult::desc::UltDesc).
+/// inside [`BasicTaskDesc`](crate::ult::desc::BasicTaskDesc).
 pub trait UltStackMemory: Send + 'static {
     /// Pointer one byte past the top of the usable stack region.
     fn stack_top(&self) -> *mut u8;
@@ -123,7 +123,7 @@ impl Drop for ArenaStackMem {
 // StackMem — internal type-erased stack storage inside UltDesc
 // ---------------------------------------------------------------------------
 
-/// An allocated task stack stored inside [`UltDesc`](crate::ult::desc::UltDesc).
+/// An allocated task stack stored inside [`BasicTaskDesc`](crate::ult::desc::BasicTaskDesc).
 ///
 /// Produced by converting a typed [`UltStackMemory`] value (via `From`); freed
 /// when the owning descriptor is dropped.  Root pseudo-descriptors use the

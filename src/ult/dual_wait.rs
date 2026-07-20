@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Waker};
 
 use crate::traits::{Resumable, StackfulResumable, StacklessResumable};
-use crate::ult::desc::{SuspendedUlt, UltDesc};
+use crate::ult::desc::{BasicTaskDesc, SuspendedUlt, TaskDesc};
 use crate::ult::system::{AsyncWorkerSystem, UltSystem};
 use crate::ult::worker::{ContextSwitcher, LocalQueue, UltWorker, Worker};
 
@@ -17,7 +17,7 @@ const ASYNC_TAG: usize = 1;
 /// continuation *or* a registered async [`Waker`] — chosen
 /// per wait attempt by whichever entry point (sync or async) the caller
 /// used. Internally a single tagged word (bit 0 = async), matching
-/// `cmpth-rs`'s own existing "task" vocabulary (`UltDesc::TaskResult`,
+/// `cmpth-rs`'s own existing "task" vocabulary (`TaskDesc::TaskResult`,
 /// `UltWorker::cur_task` already mean "whichever kind is running").
 ///
 /// `enter`/`swap` (via [`StackfulResumable`]) return `false` without acting when
@@ -47,7 +47,7 @@ impl<S: UltSystem + AsyncWorkerSystem> Default for SuspendedTask<S> {
 /// capability-token parameter: `cur_task` already carries exactly this
 /// information, correctly maintained by the context-switch shims.
 fn assert_on_real_ult<S: UltSystem>(wk: &UltWorker<S>) {
-    let is_root = unsafe { (*wk.cur_task.get()).is_root };
+    let is_root = unsafe { (*wk.cur_task.get()).is_root() };
     assert!(
         !is_root,
         "cmpth: StackfulResumable operation called outside a real ULT \
@@ -72,7 +72,7 @@ impl<S: UltSystem + AsyncWorkerSystem> Resumable<S> for SuspendedTask<S> {
         } else {
             let wk = UltWorker::<S>::current()
                 .expect("cmpth: SuspendedTask::notify called outside a worker");
-            wk.push_local_top(SuspendedUlt(v as *mut UltDesc));
+            wk.push_local_top(SuspendedUlt(v as *mut BasicTaskDesc));
         }
     }
 }
@@ -102,7 +102,7 @@ impl<S: UltSystem + AsyncWorkerSystem> StackfulResumable<S> for SuspendedTask<S>
             if !f() {
                 let v = unsafe { (*slot).swap(EMPTY, Ordering::Acquire) };
                 debug_assert_ne!(v, EMPTY);
-                *prev = Some(SuspendedUlt(v as *mut UltDesc));
+                *prev = Some(SuspendedUlt(v as *mut BasicTaskDesc));
             }
         });
     }
@@ -121,7 +121,7 @@ impl<S: UltSystem + AsyncWorkerSystem> StackfulResumable<S> for SuspendedTask<S>
             self.state.store(v, Ordering::Release);
             return false;
         }
-        let c = SuspendedUlt(v as *mut UltDesc);
+        let c = SuspendedUlt(v as *mut BasicTaskDesc);
         wk.suspend_to_cont(c, |wk, prev| wk.push_local_top(prev));
         true
     }
@@ -139,7 +139,7 @@ impl<S: UltSystem + AsyncWorkerSystem> StackfulResumable<S> for SuspendedTask<S>
             next.state.store(v, Ordering::Release);
             return false;
         }
-        let c = SuspendedUlt(v as *mut UltDesc);
+        let c = SuspendedUlt(v as *mut BasicTaskDesc);
         let slot = &self.state as *const AtomicUsize;
         wk.suspend_to_cont(c, move |_wk, prev| {
             unsafe { (*slot).store(prev.into_raw() as usize, Ordering::Release) };

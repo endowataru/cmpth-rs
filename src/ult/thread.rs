@@ -7,13 +7,13 @@ use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll};
 
 use crate::context::{ContextPolicy, Transfer};
 use crate::traits::thread_system::JoinHandleLike;
 use crate::ult::system::UltSystem;
 use crate::ult::desc::{
-    decode_join_state, JoinState, SuspendedUlt, UltDesc, JS_ASYNC_TAG, JS_FINISHED,
+    AsyncTaskDesc, BasicTaskDesc, JoinState, StackfulTaskDesc, SuspendedUlt, TaskDesc, JS_FINISHED,
 };
 use crate::ult::worker::{ContextSwitcher, LocalQueue, TaskPool, UltWorker, Worker};
 
@@ -45,8 +45,8 @@ where
 {
     let wk = UltWorker::<S>::current().expect("cmpth: spawn called outside a worker");
     let desc = wk.alloc_task(true);
-    unsafe { (*desc).scheduler = wk.shared.get() as *const () };
-    if let Some(slot) = unsafe { (*desc).slot } {
+    unsafe { (*desc).scheduler().set(wk.shared.get() as *const ()) };
+    if let Some(slot) = unsafe { (*desc).slot().get() } {
         unsafe { (*slot).system_id.set(crate::ult::lookup::system_id::<S>()) };
     }
     let stack_top = unsafe { (*desc).stack_top() } as usize;
@@ -84,7 +84,7 @@ where
         // The closure may have suspended and resumed on a different worker,
         // but every resume records the worker in the descriptor — cheaper
         // than a TLS lookup.
-        let wk = unsafe { &*((*desc).worker.get() as *const UltWorker<S>) };
+        let wk = unsafe { &*((*desc).worker().get() as *const UltWorker<S>) };
         debug_assert!(std::ptr::eq(wk, UltWorker::<S>::current().expect("cmpth: worker vanished")));
         debug_assert!(std::ptr::eq(wk.cur_task.get(), desc));
         exit_with_result(wk, desc, result_ptr, val)
@@ -105,16 +105,16 @@ fn align_down(addr: usize, align: usize) -> usize {
 /// descriptor for external-thread wake support.
 pub(crate) fn fork_parent_first<S: UltSystem>(body: ErasedBody, scheduler: *const ()) -> SuspendedUlt {
     use crate::ult::stack::StackAlloc as _;
-    let desc = UltDesc::alloc_with(S::StackAlloc::alloc_stack(S::STACK_SIZE).into(), false);
-    unsafe { (*desc).scheduler = scheduler };
-    if let Some(slot) = unsafe { (*desc).slot } {
+    let desc = BasicTaskDesc::alloc_with(S::StackAlloc::alloc_stack(S::STACK_SIZE).into(), false);
+    unsafe { (*desc).scheduler().set(scheduler) };
+    if let Some(slot) = unsafe { (*desc).slot().get() } {
         unsafe { (*slot).system_id.set(crate::ult::lookup::system_id::<S>()) };
     }
     let arg = Box::into_raw(Box::new(body));
     let ctx = unsafe {
         S::Ctx::make_context((*desc).stack_top(), task_entry::<S>, arg as *mut ())
     };
-    unsafe { (*desc).ctx.store(ctx.0, Ordering::Release) };
+    unsafe { (*desc).init_saved_context(ctx.0) };
     SuspendedUlt(desc)
 }
 
@@ -124,10 +124,10 @@ unsafe extern "C" fn task_entry<S: UltSystem>(transfer: Transfer, arg: *mut ()) 
     let body = *unsafe { Box::from_raw(arg as *mut ErasedBody) };
     let result = catch_unwind(AssertUnwindSafe(body));
     // See spawn: the descriptor tracks the current worker across migrations.
-    let wk = unsafe { &*((*desc).worker.get() as *const UltWorker<S>) };
+    let wk = unsafe { &*((*desc).worker().get() as *const UltWorker<S>) };
     debug_assert!(std::ptr::eq(wk, UltWorker::<S>::current().expect("cmpth: worker vanished")));
     debug_assert!(std::ptr::eq(wk.cur_task.get(), desc));
-    unsafe { *(*desc).result.get() = Some(result) };
+    unsafe { *(*desc).result().get() = Some(result) };
     exit(wk, desc)
 }
 
@@ -146,17 +146,17 @@ unsafe extern "C" fn task_entry<S: UltSystem>(transfer: Transfer, arg: *mut ()) 
 /// switch and settles whichever party it finds in the old value.
 fn exit_with_result<S: UltSystem, T: Send + 'static>(
     wk: &UltWorker<S>,
-    desc: *mut UltDesc,
+    desc: *mut BasicTaskDesc,
     result_ptr: *mut StackResult<T>,
     val: Result<T, Box<dyn Any + Send>>,
 ) -> ! {
-    match decode_join_state(unsafe { (*desc).join_state.load(Ordering::Acquire) }) {
+    match unsafe { (*desc).read_join_state() } {
         JoinState::SyncJoiner(j_desc) => {
             // Direct handoff: switch straight to the parked joiner.
             let sr = match val { Ok(v) => StackResult::Ok(v), Err(e) => StackResult::Err(e) };
             unsafe { result_ptr.write(sr) };
             wk.exit_to_cont(SuspendedUlt(j_desc), move |_wk| unsafe {
-                (*desc).join_state.store(JS_FINISHED, Ordering::Release);
+                (*desc).commit_finished();
             })
         }
         JoinState::Detached => {
@@ -169,8 +169,7 @@ fn exit_with_result<S: UltSystem, T: Send + 'static>(
             let sr = match val { Ok(v) => StackResult::Ok(v), Err(e) => StackResult::Err(e) };
             unsafe { result_ptr.write(sr) };
             wk.exit_to_sched(move |wk| {
-                let old = unsafe { (*desc).join_state.swap(JS_FINISHED, Ordering::AcqRel) };
-                match decode_join_state(old) {
+                match unsafe { (*desc).publish_finished() } {
                     // No joiner appeared: the JoinHandle collects the result.
                     JoinState::Running => {}
                     // A joiner registered while we were exiting.
@@ -191,18 +190,17 @@ fn exit_with_result<S: UltSystem, T: Send + 'static>(
 
 /// Exit for parent-first tasks (`fork_parent_first`): the result, if kept,
 /// is already in `desc.result`.  Same state machine as `exit_with_result`.
-fn exit<S: UltSystem>(wk: &UltWorker<S>, desc: *mut UltDesc) -> ! {
-    match decode_join_state(unsafe { (*desc).join_state.load(Ordering::Acquire) }) {
+fn exit<S: UltSystem>(wk: &UltWorker<S>, desc: *mut BasicTaskDesc) -> ! {
+    match unsafe { (*desc).read_join_state() } {
         JoinState::SyncJoiner(j_desc) => {
             wk.exit_to_cont(SuspendedUlt(j_desc), move |_wk| unsafe {
-                (*desc).join_state.store(JS_FINISHED, Ordering::Release);
+                (*desc).commit_finished();
             })
         }
         // Root tasks start in this state; desc.result drops with the desc.
         JoinState::Detached => wk.exit_to_sched(move |wk| unsafe { wk.free_task(desc) }),
         _ => wk.exit_to_sched(move |wk| {
-            let old = unsafe { (*desc).join_state.swap(JS_FINISHED, Ordering::AcqRel) };
-            match decode_join_state(old) {
+            match unsafe { (*desc).publish_finished() } {
                 JoinState::Running => {}
                 JoinState::SyncJoiner(j) => wk.push_local_top(SuspendedUlt(j)),
                 JoinState::AsyncWaker(w) => unsafe { Box::from_raw(w) }.wake(),
@@ -218,7 +216,7 @@ fn exit<S: UltSystem>(wk: &UltWorker<S>, desc: *mut UltDesc) -> ! {
 // ---------------------------------------------------------------------------
 
 pub struct JoinHandle<S: UltSystem, T> {
-    desc: *mut UltDesc,
+    desc: *mut BasicTaskDesc,
     result_ptr: *mut StackResult<T>,
     // Type-erased drop for the result slot; avoids a T: Send + 'static bound
     // on the Drop impl (Rust disallows extra bounds there).
@@ -243,7 +241,7 @@ impl<S: UltSystem, T: Send + 'static> JoinHandle<S, T> {
         // this whenever the parent continuation was not stolen, so the whole
         // fork-join hot path lands here.  FINISHED is published with Release
         // after the result write; the Acquire read makes the result visible.
-        if unsafe { (*desc).join_state.load(Ordering::Acquire) } == JS_FINISHED {
+        if unsafe { (*desc).is_finished() } {
             return self.take_result(wk);
         }
 
@@ -252,34 +250,14 @@ impl<S: UltSystem, T: Send + 'static> JoinHandle<S, T> {
         // meantime (the CAS loses to the exit path's swap).
         // The returned worker is the one we resumed on — no TLS re-read.
         let wk = wk.cond_suspend_to_sched(move |_wk, prev| {
-            let j = prev.as_ref().expect("cond_suspend contract").desc() as usize;
-            let mut cur = unsafe { (*desc).join_state.load(Ordering::Relaxed) };
-            loop {
-                if cur == JS_FINISHED {
-                    return; // leave `prev` in place -> cancel, resume at once
-                }
-                match unsafe {
-                    (*desc).join_state.compare_exchange_weak(
-                        cur, j, Ordering::Release, Ordering::Acquire,
-                    )
-                } {
-                    Ok(_) => {
-                        // A sync join supersedes any registered async waker.
-                        if let JoinState::AsyncWaker(w) = decode_join_state(cur) {
-                            drop(unsafe { Box::from_raw(w) });
-                        }
-                        let _ = prev.take().expect("cond_suspend contract").into_raw();
-                        return; // committed: we stay parked
-                    }
-                    Err(c) => cur = c,
-                }
+            let joiner = prev.as_ref().expect("cond_suspend contract").desc();
+            if unsafe { (*desc).try_register_sync_joiner(joiner) } {
+                let _ = prev.take().expect("cond_suspend contract").into_raw();
             }
+            // else: leave `prev` in place -> cancel, resume at once
         });
 
-        debug_assert_eq!(
-            unsafe { (*desc).join_state.load(Ordering::Relaxed) },
-            JS_FINISHED
-        );
+        debug_assert!(unsafe { (*desc).join_state().load(Ordering::Relaxed) } == JS_FINISHED);
         self.take_result(wk)
     }
 
@@ -289,8 +267,8 @@ impl<S: UltSystem, T: Send + 'static> JoinHandle<S, T> {
         std::mem::forget(self);
         let sr = unsafe { result_ptr.read() };
         // Async task descs bypass the pool (variable size allocation).
-        if unsafe { (*desc).poll_fn.is_some() } {
-            unsafe { UltDesc::free(desc) };
+        if unsafe { (*desc).poll_fn().get().is_some() } {
+            unsafe { BasicTaskDesc::free(desc) };
         } else {
             unsafe { wk.free_task(desc) };
         }
@@ -305,7 +283,7 @@ impl<S: UltSystem, T: Send + 'static> JoinHandle<S, T> {
         let result_ptr = self.result_ptr;
         std::mem::forget(self);
         let sr = unsafe { result_ptr.read() };
-        unsafe { UltDesc::free(desc) };
+        unsafe { BasicTaskDesc::free(desc) };
         match sr {
             StackResult::Ok(val) => Ok(val),
             StackResult::Err(e) => Err(e),
@@ -322,39 +300,19 @@ impl<S: UltSystem, T> Drop for JoinHandle<S, T> {
         let result_ptr = self.result_ptr as *mut ();
         let result_drop = self.result_drop;
 
-        let mut cur = unsafe { (*desc).join_state.load(Ordering::Acquire) };
-        loop {
-            if cur == JS_FINISHED {
-                // Task done: this handle owns the result and the descriptor.
-                unsafe { result_drop(result_ptr) };
-                // Async task descs bypass the pool (variable size).
-                if unsafe { (*desc).poll_fn.is_some() } {
-                    unsafe { UltDesc::free(desc) };
-                } else {
-                    match UltWorker::<S>::current() {
-                        Some(wk) => unsafe { wk.free_task(desc) },
-                        None => unsafe { UltDesc::free(desc) },
-                    }
+        // RUNNING or an async waker (a parked sync joiner is impossible: join
+        // consumes the handle) -> detach, the exit path cleans up. Already
+        // finished -> this handle owns the result and the descriptor.
+        if unsafe { (*desc).try_mark_detached() } {
+            unsafe { result_drop(result_ptr) };
+            // Async task descs bypass the pool (variable size).
+            if unsafe { (*desc).poll_fn().get().is_some() } {
+                unsafe { BasicTaskDesc::free(desc) };
+            } else {
+                match UltWorker::<S>::current() {
+                    Some(wk) => unsafe { wk.free_task(desc) },
+                    None => unsafe { BasicTaskDesc::free(desc) },
                 }
-                return;
-            }
-            // RUNNING or an async waker (a parked sync joiner is impossible:
-            // join consumes the handle).  Detach; the exit path cleans up.
-            match unsafe {
-                (*desc).join_state.compare_exchange_weak(
-                    cur,
-                    crate::ult::desc::JS_DETACHED,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-            } {
-                Ok(_) => {
-                    if let JoinState::AsyncWaker(w) = decode_join_state(cur) {
-                        drop(unsafe { Box::from_raw(w) });
-                    }
-                    return;
-                }
-                Err(c) => cur = c,
             }
         }
     }
@@ -376,31 +334,10 @@ impl<S: UltSystem, T: Send + 'static> Future for JoinHandle<S, T> {
         let this = self.get_mut(); // JoinHandle: Unpin
         let desc = this.desc;
 
-        let mut cur = unsafe { (*desc).join_state.load(Ordering::Acquire) };
-        if cur != JS_FINISHED {
-            // Register (or replace) the async waker, boxed so that ownership
-            // transfers atomically with the state word.
-            let new = Box::into_raw(Box::new(cx.waker().clone())) as usize | JS_ASYNC_TAG;
-            loop {
-                if cur == JS_FINISHED {
-                    // Finished while we were registering: discard ours.
-                    drop(unsafe { Box::from_raw((new & !JS_ASYNC_TAG) as *mut Waker) });
-                    break;
-                }
-                match unsafe {
-                    (*desc).join_state.compare_exchange_weak(
-                        cur, new, Ordering::Release, Ordering::Acquire,
-                    )
-                } {
-                    Ok(_) => {
-                        if let JoinState::AsyncWaker(w) = decode_join_state(cur) {
-                            drop(unsafe { Box::from_raw(w) });
-                        }
-                        return Poll::Pending;
-                    }
-                    Err(c) => cur = c,
-                }
-            }
+        // Register (or replace) the async waker; no-op and fall through to
+        // taking the result if the task turned out to already be finished.
+        if unsafe { (*desc).try_register_waker(cx.waker().clone()) } {
+            return Poll::Pending;
         }
         // FINISHED: consume the handle (null desc so Drop becomes a no-op).
         let handle = unsafe { std::ptr::read(this) };
@@ -426,7 +363,7 @@ impl<S: UltSystem, T: Send + 'static> Future for JoinHandle<S, T> {
 ///
 /// Returns a [`JoinHandle`] that can be `await`ed or `.join()`ed like a
 /// spawned ULT.  Pool bypass: async task descs are always freed with
-/// `UltDesc::free`, never returned to the fixed-size pool.
+/// `BasicTaskDesc::free`, never returned to the fixed-size pool.
 pub fn spawn_async<S, T, F>(f: F) -> JoinHandle<S, T>
 where
     S: UltSystem,
@@ -453,8 +390,8 @@ where
         + 16;
 
     // Allocate desc outside the pool (variable size).
-    let desc = UltDesc::alloc(stack_size, true);
-    unsafe { (*desc).scheduler = wk.shared.get() as *const () };
+    let desc = BasicTaskDesc::alloc(stack_size, true);
+    unsafe { (*desc).scheduler().set(wk.shared.get() as *const ()) };
 
     let stack_top = unsafe { (*desc).stack_top() } as usize;
     let result_addr = align_down(stack_top - result_layout.size(), result_layout.align());
@@ -464,7 +401,7 @@ where
     let f_ptr = f_addr as *mut F;
 
     unsafe { f_ptr.write(f) };
-    unsafe { (*desc).poll_fn = Some(async_poll_fn::<S, T, F>) };
+    unsafe { (*desc).poll_fn().set(Some(async_poll_fn::<S, T, F>)) };
 
     // Push to the deque as a ready-to-poll task.
     wk.push_local_top(SuspendedUlt(desc));
@@ -472,13 +409,13 @@ where
     JoinHandle { desc, result_ptr, result_drop: drop_stack_result::<T>, _marker: PhantomData }
 }
 
-/// Type-erased poll function stored in `UltDesc::poll_fn` for async tasks.
+/// Type-erased poll function stored in `BasicTaskDesc::poll_fn` for async tasks.
 ///
 /// Polls `F` once.  Returns `true` when `Poll::Ready` (the task is done and
 /// the caller must not access `desc` afterwards for the detached case).
 /// Returns `false` when `Poll::Pending`.
 unsafe fn async_poll_fn<S, T, F>(
-    desc: *mut UltDesc,
+    desc: *mut BasicTaskDesc,
     cx: &mut Context<'_>,
 ) -> bool
 where
@@ -513,14 +450,13 @@ where
 
     // Task done.  Invalidate the waker before signalling the joiner so that
     // any concurrent wake() becomes a no-op (IDLE state).
-    unsafe { (*desc).waker_refs.store(crate::ult::desc::IDLE, std::sync::atomic::Ordering::Release) };
+    unsafe { (*desc).mark_idle() };
 
     unsafe { result_ptr.write(sr) };
 
     // Publish FINISHED and settle whoever the old state names.  Runs on the
     // scheduler stack (no context-switch-target decision needed).
-    let old = unsafe { (*desc).join_state.swap(JS_FINISHED, Ordering::AcqRel) };
-    match decode_join_state(old) {
+    match unsafe { (*desc).publish_finished() } {
         JoinState::SyncJoiner(j_desc) => {
             // Push the waiting ULT back to the deque.  This is always called
             // from within a worker (execute → run_async_poll → poll_fn).
@@ -534,7 +470,7 @@ where
         JoinState::Detached => {
             // Detached task: drop result and free desc now.
             unsafe { std::ptr::drop_in_place(result_ptr) };
-            unsafe { UltDesc::free(desc) };
+            unsafe { BasicTaskDesc::free(desc) };
         }
         JoinState::Finished => unreachable!("cmpth: double async task completion"),
     }

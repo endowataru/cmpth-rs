@@ -1,6 +1,6 @@
 //! Async waker integration for ULT-based systems.
 //!
-//! The waker data pointer is `*mut UltDesc`.  Two vtables are used:
+//! The waker data pointer is `*mut BasicTaskDesc`.  Two vtables are used:
 //!
 //! * **PRIVATE** (`waker_refs & EVER_SHARED == 0`): the waker has never been
 //!   cloned.  State transitions are driven by `waker_refs` bits 0-1
@@ -37,9 +37,7 @@ use std::task::{Context, RawWaker, RawWakerVTable, Waker};
 
 use crate::traits::Poller;
 use crate::traits::thread_system::{noop_waker, ThreadSystem};
-use crate::ult::desc::{
-    SuspendedUlt, UltDesc, EVER_SHARED, IDLE, NOTIFIED, PARKED, POLLING, REF_ONE, STATE_MASK,
-};
+use crate::ult::desc::{AsyncTaskDesc, BasicTaskDesc, StackfulTaskDesc, SuspendedUlt, WakeOutcome};
 use crate::ult::external_queue::ExternalQueue;
 use crate::ult::scheduler::Scheduler;
 use crate::ult::system::UltSchedulerSystem;
@@ -84,7 +82,7 @@ fn shared_vtable<S: UltSchedulerSystem>() -> &'static RawWakerVTable {
 /// [`Poller`] implementation for ULT systems.
 ///
 /// In ULT mode (`desc` is `Some`): stores a real [`Waker`] backed by
-/// `waker_refs` in the current [`UltDesc`].  [`wait`](Poller::wait) uses
+/// `waker_refs` in the current [`BasicTaskDesc`].  [`wait`](Poller::wait) uses
 /// `cond_suspend_to_sched` with NOTIFIED-cancel logic.
 ///
 /// In fallback mode (`desc` is `None`, called from outside the scheduler):
@@ -95,7 +93,7 @@ fn shared_vtable<S: UltSchedulerSystem>() -> &'static RawWakerVTable {
 /// means "bound to the same ULT", not "bound to the same OS thread" — the
 /// scheduler moves the entire ULT stack atomically on steal.
 pub struct UltPoller<S: UltSchedulerSystem> {
-    desc: Option<NonNull<UltDesc>>,
+    desc: Option<NonNull<BasicTaskDesc>>,
     waker: Waker,
     _marker: PhantomData<S>,
 }
@@ -105,7 +103,7 @@ impl<S: UltSchedulerSystem> Poller for UltPoller<S> {
         match UltWorker::<S>::current() {
             Some(wk) => {
                 let desc = wk.cur_task.get();
-                unsafe { (*desc).waker_refs.store(POLLING, Ordering::Release) };
+                unsafe { (*desc).mark_polling() };
                 let raw = RawWaker::new(desc as *const (), private_vtable::<S>());
                 let waker = unsafe { Waker::from_raw(raw) };
                 UltPoller {
@@ -133,16 +131,10 @@ impl<S: UltSchedulerSystem> Poller for UltPoller<S> {
                 UltWorker::<S>::current()
                     .expect("UltPoller::wait called from outside scheduler")
                     .cond_suspend_to_sched(|_wk, prev_opt| {
-                        let refs = unsafe { (*desc).waker_refs.load(Ordering::Relaxed) };
-                        let state = refs & STATE_MASK;
-                        if state == NOTIFIED {
-                            // wake() fired during poll(); cancel park and re-poll.
-                            let new = (refs & !STATE_MASK) | POLLING;
-                            unsafe { (*desc).waker_refs.store(new, Ordering::Release) };
-                        } else {
-                            // Commit: POLLING → PARKED.
-                            let new = (refs & !STATE_MASK) | PARKED;
-                            unsafe { (*desc).waker_refs.store(new, Ordering::Release) };
+                        // wake() fired during poll(): decide_park cancels
+                        // (resets to POLLING) and returns false; otherwise
+                        // it commits to PARKED and we consume prev_opt.
+                        if unsafe { (*desc).decide_park() } {
                             let _ = prev_opt.take().unwrap().into_raw();
                         }
                     });
@@ -156,7 +148,7 @@ impl<S: UltSchedulerSystem> Drop for UltPoller<S> {
     fn drop(&mut self) {
         if let Some(desc) = self.desc {
             // Reset before self.waker drops, so racing wakers see IDLE.
-            unsafe { desc.as_ref().waker_refs.store(IDLE, Ordering::Release) };
+            unsafe { desc.as_ref().mark_idle() };
         }
         // self.waker drops here (calls drop_private / drop_shared as needed).
     }
@@ -168,11 +160,11 @@ impl<S: UltSchedulerSystem> Drop for UltPoller<S> {
 
 /// # Safety
 /// `desc` must be a currently-suspended task whose ctx has just been cleared.
-unsafe fn push_continuation<S: UltSchedulerSystem>(desc: *mut UltDesc) {
+unsafe fn push_continuation<S: UltSchedulerSystem>(desc: *mut BasicTaskDesc) {
     match UltWorker::<S>::current() {
         Some(wk) => wk.push_local_top(SuspendedUlt(desc)),
         None => {
-            let scheduler = unsafe { (*desc).scheduler };
+            let scheduler = unsafe { (*desc).scheduler().get() };
             assert!(
                 !scheduler.is_null(),
                 "cmpth: wake() called from outside ULT scheduler \
@@ -198,45 +190,15 @@ unsafe fn push_continuation<S: UltSchedulerSystem>(desc: *mut UltDesc) {
 /// before this; the push races with the task freeing itself).
 ///
 /// # Safety
-/// `desc` must point to a live `UltDesc`.
-unsafe fn try_wake<S: UltSchedulerSystem>(desc: *const UltDesc) {
-    let desc = desc as *mut UltDesc;
-    loop {
-        let refs = unsafe { (*desc).waker_refs.load(Ordering::Acquire) };
-        let state = refs & STATE_MASK;
-
-        match state {
-            s if s == POLLING => {
-                // Task is running; request a re-poll by setting NOTIFIED.
-                let new = (refs & !STATE_MASK) | NOTIFIED;
-                match unsafe {
-                    (*desc).waker_refs.compare_exchange(refs, new, Ordering::AcqRel, Ordering::Acquire)
-                } {
-                    Ok(_) => return,
-                    Err(_) => continue,
-                }
-            }
-            s if s == PARKED => {
-                // Task is suspended; claim it and push continuation.
-                let new = (refs & !STATE_MASK) | POLLING;
-                match unsafe {
-                    (*desc).waker_refs.compare_exchange(refs, new, Ordering::AcqRel, Ordering::Acquire)
-                } {
-                    Ok(_) => {
-                        // The ctx store (Release) in cond_shim happened-before
-                        // our Acquire CAS; we can now load ctx safely.
-                        let _ctx = unsafe { (*desc).ctx.load(Ordering::Relaxed) };
-                        debug_assert!(!_ctx.is_null());
-                        unsafe { push_continuation::<S>(desc) };
-                        return;
-                    }
-                    Err(_) => continue,
-                }
-            }
-            s if s == NOTIFIED => return, // already notified
-            s if s == IDLE => return,     // stale wake
-            _ => unreachable!("unexpected waker_refs: {:#x}", refs),
-        }
+/// `desc` must point to a live `BasicTaskDesc`.
+unsafe fn try_wake<S: UltSchedulerSystem>(desc: *const BasicTaskDesc) {
+    let desc = desc as *mut BasicTaskDesc;
+    if let WakeOutcome::ClaimedParked = unsafe { (*desc).try_wake_state() } {
+        // The ctx store (Release) in cond_shim happened-before the Acquire
+        // CAS inside try_wake_state; we can now load ctx safely.
+        let _ctx = unsafe { (*desc).ctx().load(Ordering::Relaxed) };
+        debug_assert!(!_ctx.is_null());
+        unsafe { push_continuation::<S>(desc) };
     }
 }
 
@@ -245,22 +207,8 @@ unsafe fn try_wake<S: UltSchedulerSystem>(desc: *const UltDesc) {
 // ---------------------------------------------------------------------------
 
 unsafe fn clone_private<S: UltSchedulerSystem>(ptr: *const ()) -> RawWaker {
-    let desc = ptr as *const UltDesc;
-    // Transition to SHARED: set EVER_SHARED, init ref count to 2
-    // (original waker + this new clone).
-    //
-    // Use a CAS loop to preserve the current state bits while setting
-    // EVER_SHARED.  Concurrent wake() may change the state bits.
-    loop {
-        let old = unsafe { (*desc).waker_refs.load(Ordering::Relaxed) };
-        let new = EVER_SHARED | (2 * REF_ONE) | (old & STATE_MASK);
-        match unsafe {
-            (*desc).waker_refs.compare_exchange(old, new, Ordering::Release, Ordering::Relaxed)
-        } {
-            Ok(_) => break,
-            Err(_) => continue,
-        }
-    }
+    let desc = ptr as *const BasicTaskDesc;
+    unsafe { (*desc).transition_to_shared() };
     // The clone uses the SHARED vtable; the original retains PRIVATE vtable
     // but its wake_private/drop_private check EVER_SHARED and dispatch correctly.
     RawWaker::new(ptr, shared_vtable::<S>())
@@ -275,9 +223,8 @@ unsafe fn wake_private<S: UltSchedulerSystem>(ptr: *const ()) {
 }
 
 unsafe fn wake_by_ref_private<S: UltSchedulerSystem>(ptr: *const ()) {
-    let desc = ptr as *const UltDesc;
-    let refs = unsafe { (*desc).waker_refs.load(Ordering::Relaxed) };
-    if refs & EVER_SHARED != 0 {
+    let desc = ptr as *const BasicTaskDesc;
+    if unsafe { (*desc).is_ever_shared() } {
         // Transitioned to SHARED after construction; use SHARED wake logic.
         unsafe { wake_by_ref_shared::<S>(ptr) };
     } else {
@@ -286,9 +233,8 @@ unsafe fn wake_by_ref_private<S: UltSchedulerSystem>(ptr: *const ()) {
 }
 
 unsafe fn drop_private<S: UltSchedulerSystem>(ptr: *const ()) {
-    let desc = ptr as *const UltDesc;
-    let refs = unsafe { (*desc).waker_refs.load(Ordering::Relaxed) };
-    if refs & EVER_SHARED != 0 {
+    let desc = ptr as *const BasicTaskDesc;
+    if unsafe { (*desc).is_ever_shared() } {
         // The original waker is being dropped; treat like a SHARED drop.
         unsafe { drop_shared::<S>(ptr) };
     }
@@ -306,38 +252,11 @@ unsafe fn drop_private<S: UltSchedulerSystem>(ptr: *const ()) {
 
 /// Like `try_wake` but skips the ctx non-null assertion.  Used for async
 /// tasks where PARKED simply means "not in the deque", not "context saved".
-unsafe fn try_wake_async<S: UltSchedulerSystem>(desc: *const UltDesc) {
-    let desc = desc as *mut UltDesc;
-    loop {
-        let refs = unsafe { (*desc).waker_refs.load(Ordering::Acquire) };
-        let state = refs & STATE_MASK;
-        match state {
-            s if s == POLLING => {
-                let new = (refs & !STATE_MASK) | NOTIFIED;
-                match unsafe {
-                    (*desc).waker_refs.compare_exchange(refs, new, Ordering::AcqRel, Ordering::Acquire)
-                } {
-                    Ok(_) => return,
-                    Err(_) => continue,
-                }
-            }
-            s if s == PARKED => {
-                let new = (refs & !STATE_MASK) | POLLING;
-                match unsafe {
-                    (*desc).waker_refs.compare_exchange(refs, new, Ordering::AcqRel, Ordering::Acquire)
-                } {
-                    Ok(_) => {
-                        // No ctx to load for async tasks; just push to deque.
-                        unsafe { push_continuation::<S>(desc) };
-                        return;
-                    }
-                    Err(_) => continue,
-                }
-            }
-            s if s == NOTIFIED => return,
-            s if s == IDLE => return,
-            _ => unreachable!("unexpected waker_refs: {:#x}", refs),
-        }
+unsafe fn try_wake_async<S: UltSchedulerSystem>(desc: *const BasicTaskDesc) {
+    let desc = desc as *mut BasicTaskDesc;
+    if let WakeOutcome::ClaimedParked = unsafe { (*desc).try_wake_state() } {
+        // No ctx to load for async tasks; just push to deque.
+        unsafe { push_continuation::<S>(desc) };
     }
 }
 
@@ -366,23 +285,14 @@ pub(crate) fn async_task_private_vtable<S: UltSchedulerSystem>() -> &'static Raw
 }
 
 unsafe fn clone_async_private<S: UltSchedulerSystem>(ptr: *const ()) -> RawWaker {
-    let desc = ptr as *const UltDesc;
-    loop {
-        let old = unsafe { (*desc).waker_refs.load(Ordering::Relaxed) };
-        let new = EVER_SHARED | (2 * REF_ONE) | (old & STATE_MASK);
-        match unsafe {
-            (*desc).waker_refs.compare_exchange(old, new, Ordering::Release, Ordering::Relaxed)
-        } {
-            Ok(_) => break,
-            Err(_) => continue,
-        }
-    }
+    let desc = ptr as *const BasicTaskDesc;
+    unsafe { (*desc).transition_to_shared() };
     RawWaker::new(ptr, &AsyncSharedVtable::<S>::VTABLE)
 }
 
 unsafe fn clone_async_shared<S: UltSchedulerSystem>(ptr: *const ()) -> RawWaker {
-    let desc = ptr as *const UltDesc;
-    unsafe { (*desc).waker_refs.fetch_add(REF_ONE, Ordering::Relaxed) };
+    let desc = ptr as *const BasicTaskDesc;
+    unsafe { (*desc).incr_shared_ref() };
     RawWaker::new(ptr, &AsyncSharedVtable::<S>::VTABLE)
 }
 
@@ -392,9 +302,8 @@ unsafe fn wake_async_private<S: UltSchedulerSystem>(ptr: *const ()) {
 }
 
 unsafe fn wake_by_ref_async_private<S: UltSchedulerSystem>(ptr: *const ()) {
-    let desc = ptr as *const UltDesc;
-    let refs = unsafe { (*desc).waker_refs.load(Ordering::Relaxed) };
-    if refs & EVER_SHARED != 0 {
+    let desc = ptr as *const BasicTaskDesc;
+    if unsafe { (*desc).is_ever_shared() } {
         unsafe { wake_by_ref_async_shared::<S>(ptr) };
     } else {
         unsafe { try_wake_async::<S>(desc) };
@@ -402,9 +311,8 @@ unsafe fn wake_by_ref_async_private<S: UltSchedulerSystem>(ptr: *const ()) {
 }
 
 unsafe fn drop_async_private<S: UltSchedulerSystem>(ptr: *const ()) {
-    let desc = ptr as *const UltDesc;
-    let refs = unsafe { (*desc).waker_refs.load(Ordering::Relaxed) };
-    if refs & EVER_SHARED != 0 {
+    let desc = ptr as *const BasicTaskDesc;
+    if unsafe { (*desc).is_ever_shared() } {
         unsafe { drop_shared::<S>(ptr) };
     }
     // Pure PRIVATE: waker is owned by run_async_poll's stack frame; no action.
@@ -416,7 +324,7 @@ unsafe fn wake_async_shared<S: UltSchedulerSystem>(ptr: *const ()) {
 }
 
 unsafe fn wake_by_ref_async_shared<S: UltSchedulerSystem>(ptr: *const ()) {
-    unsafe { try_wake_async::<S>(ptr as *const UltDesc) };
+    unsafe { try_wake_async::<S>(ptr as *const BasicTaskDesc) };
 }
 
 // ---------------------------------------------------------------------------
@@ -424,9 +332,8 @@ unsafe fn wake_by_ref_async_shared<S: UltSchedulerSystem>(ptr: *const ()) {
 // ---------------------------------------------------------------------------
 
 unsafe fn clone_shared<S: UltSchedulerSystem>(ptr: *const ()) -> RawWaker {
-    let desc = ptr as *const UltDesc;
-    // Increment ref count (bits 2+) without touching state bits.
-    unsafe { (*desc).waker_refs.fetch_add(REF_ONE, Ordering::Relaxed) };
+    let desc = ptr as *const BasicTaskDesc;
+    unsafe { (*desc).incr_shared_ref() };
     RawWaker::new(ptr, shared_vtable::<S>())
 }
 
@@ -436,14 +343,14 @@ unsafe fn wake_shared<S: UltSchedulerSystem>(ptr: *const ()) {
 }
 
 unsafe fn wake_by_ref_shared<S: UltSchedulerSystem>(ptr: *const ()) {
-    unsafe { try_wake::<S>(ptr as *const UltDesc) };
+    unsafe { try_wake::<S>(ptr as *const BasicTaskDesc) };
 }
 
 unsafe fn drop_shared<S: UltSchedulerSystem>(ptr: *const ()) {
-    let desc = ptr as *const UltDesc;
-    // Decrement ref count.  If this was the last SHARED reference, the task
-    // is either still running (block_on not done) or has already finished
-    // (block_on returned with IDLE state).  Either way, no cleanup is needed:
-    // UltDesc lifetime is managed by the scheduler, not by waker refs.
-    unsafe { (*desc).waker_refs.fetch_sub(REF_ONE, Ordering::Release) };
+    let desc = ptr as *const BasicTaskDesc;
+    // If this was the last SHARED reference, the task is either still
+    // running (block_on not done) or has already finished (block_on
+    // returned with IDLE state).  Either way, no cleanup is needed:
+    // BasicTaskDesc lifetime is managed by the scheduler, not by waker refs.
+    unsafe { (*desc).decr_shared_ref() };
 }
