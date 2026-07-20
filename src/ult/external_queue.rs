@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::traits::thread_system::ThreadSystem;
 use crate::ult::desc::SuspendedUlt;
 use crate::ult::scheduler::Scheduler;
-use crate::ult::system::{UltSchedulerSystem, UltSystem};
+use crate::traits::ult_system::UltSystem;
+use crate::ult::system::UltSchedulerSystem;
 use crate::ult::thread::{ErasedBody, fork_parent_first};
 use crate::ult::worker::{LocalQueue, UltWorker, Worker};
 
@@ -104,7 +105,7 @@ impl Default for PollerUltQueue {
     }
 }
 
-impl<S: UltSystem> ExternalQueue<S> for PollerUltQueue {
+impl<S: UltSchedulerSystem + UltSystem> ExternalQueue<S> for PollerUltQueue {
     fn push(&self, cont: SuspendedUlt) {
         self.inner.lock().unwrap().push(cont);
     }

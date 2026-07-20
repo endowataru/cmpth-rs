@@ -1,7 +1,8 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::traits::DelegatorConsumer;
-use crate::ult::system::UltSystem;
+use crate::ult::system::UltSchedulerSystem;
+use crate::traits::UltSystem;
 use crate::ult::worker::Worker;
 
 use super::delegator::{Delegator, DelegatorNode, SyncQueue};
@@ -10,23 +11,23 @@ use super::delegator::{Delegator, DelegatorNode, SyncQueue};
 // RingBufQueue
 // ---------------------------------------------------------------------------
 
-pub struct RingBufQueue<S: UltSystem, C: DelegatorConsumer<S>, const N: usize> {
+pub struct RingBufQueue<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, const N: usize> {
     head:  AtomicUsize,
     tail:  AtomicUsize,
     nodes: Box<[RingSlot<S, C>; N]>,
 }
 
-struct RingSlot<S: UltSystem, C: DelegatorConsumer<S>> {
+struct RingSlot<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>> {
     ready: AtomicBool,
     node:  std::cell::UnsafeCell<DelegatorNode<S, C>>,
 }
 
-unsafe impl<S: UltSystem, C: DelegatorConsumer<S>, const N: usize> Send
+unsafe impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, const N: usize> Send
     for RingBufQueue<S, C, N> {}
-unsafe impl<S: UltSystem, C: DelegatorConsumer<S>, const N: usize> Sync
+unsafe impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, const N: usize> Sync
     for RingBufQueue<S, C, N> {}
 
-impl<S: UltSystem, C: DelegatorConsumer<S>, const N: usize> Default
+impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, const N: usize> Default
     for RingBufQueue<S, C, N>
 {
     fn default() -> Self {
@@ -48,7 +49,7 @@ impl<S: UltSystem, C: DelegatorConsumer<S>, const N: usize> Default
     }
 }
 
-impl<S: UltSystem, C: DelegatorConsumer<S>, const N: usize> RingBufQueue<S, C, N> {
+impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, const N: usize> RingBufQueue<S, C, N> {
     fn mask(idx: usize) -> usize { idx & (N - 1) }
 
     fn slot_node(&self, idx: usize) -> *mut DelegatorNode<S, C> {
@@ -56,7 +57,7 @@ impl<S: UltSystem, C: DelegatorConsumer<S>, const N: usize> RingBufQueue<S, C, N
     }
 }
 
-impl<S: UltSystem, C: DelegatorConsumer<S>, const N: usize> SyncQueue<S, C>
+impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, const N: usize> SyncQueue<S, C>
     for RingBufQueue<S, C, N>
 {
     fn start_lock(
@@ -135,7 +136,7 @@ impl<S: UltSystem, C: DelegatorConsumer<S>, const N: usize> SyncQueue<S, C>
     }
 }
 
-impl<S: UltSystem, C: DelegatorConsumer<S>, const N: usize> RingBufQueue<S, C, N> {
+impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, const N: usize> RingBufQueue<S, C, N> {
     fn slot_index(&self, node: *mut DelegatorNode<S, C>) -> usize {
         let base = self.nodes[0].node.get() as usize;
         let size = std::mem::size_of::<RingSlot<S, C>>();

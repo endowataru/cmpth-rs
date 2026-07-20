@@ -2,19 +2,20 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::traits::{Delegator as DelegatorTrait, DelegatorConsumer, Resumable, StackfulResumable};
-use crate::ult::system::UltSystem;
+use crate::ult::system::UltSchedulerSystem;
+use crate::traits::UltSystem;
 use crate::ult::thread;
 
 // ---------------------------------------------------------------------------
 // DelegatorNode — content of each queue node
 // ---------------------------------------------------------------------------
 
-pub struct DelegatorNode<S: UltSystem, C: DelegatorConsumer<S>> {
+pub struct DelegatorNode<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>> {
     pub(super) sth:  S::SuspendedThread,
     pub(super) work: C::Work,
 }
 
-impl<S: UltSystem, C: DelegatorConsumer<S>> Default for DelegatorNode<S, C> {
+impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>> Default for DelegatorNode<S, C> {
     fn default() -> Self {
         DelegatorNode { sth: Default::default(), work: Default::default() }
     }
@@ -25,7 +26,7 @@ impl<S: UltSystem, C: DelegatorConsumer<S>> Default for DelegatorNode<S, C> {
 // ---------------------------------------------------------------------------
 
 /// Queue backend for [`Delegator`].  Not part of the public API.
-pub trait SyncQueue<S: UltSystem, C: DelegatorConsumer<S>>: Send + Sync {
+pub trait SyncQueue<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>>: Send + Sync {
     /// Try to acquire the lock or enqueue.
     /// Returns `(is_locked, prev_node, cur_node)`.
     /// `prev_node` is null when the queue was empty (i.e. is_locked == true).
@@ -51,7 +52,7 @@ pub trait SyncQueue<S: UltSystem, C: DelegatorConsumer<S>>: Send + Sync {
 // Delegator<S, C, Q>
 // ---------------------------------------------------------------------------
 
-pub struct Delegator<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> {
+pub struct Delegator<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> {
     queue:        Q,
     consumer:     std::cell::UnsafeCell<C>,
     consumer_sth: S::SuspendedThread,
@@ -63,12 +64,12 @@ pub struct Delegator<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> 
     consumer_started: AtomicBool,
 }
 
-unsafe impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Send
+unsafe impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Send
     for Delegator<S, C, Q> {}
-unsafe impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Sync
+unsafe impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Sync
     for Delegator<S, C, Q> {}
 
-impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default>
+impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default>
     Delegator<S, C, Q>
 {
     pub fn new(consumer: C) -> Self {
@@ -88,7 +89,7 @@ impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default>
 // Core algorithm (shared between MCS and ring-buffer variants)
 // ---------------------------------------------------------------------------
 
-impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Delegator<S, C, Q> {
+impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Delegator<S, C, Q> {
     fn consumer(&self) -> &mut C {
         unsafe { &mut *self.consumer.get() }
     }
@@ -337,7 +338,7 @@ impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Delegator<S, C, 
 // Delegator impl
 // ---------------------------------------------------------------------------
 
-impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default + 'static>
+impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default + 'static>
     DelegatorTrait<S, C> for Delegator<S, C, Q>
 {
     fn start(consumer: C) -> Self {

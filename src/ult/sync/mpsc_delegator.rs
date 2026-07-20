@@ -28,14 +28,15 @@ use std::sync::Arc;
 
 use crate::traits::{DelegatorConsumer, Resumable, StackfulResumable};
 use crate::ult::sync::delegator::SyncQueue;
-use crate::ult::system::UltSystem;
+use crate::ult::system::UltSchedulerSystem;
+use crate::traits::UltSystem;
 use crate::ult::thread;
 
 // ---------------------------------------------------------------------------
 // Inner
 // ---------------------------------------------------------------------------
 
-struct Inner<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> {
+struct Inner<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> {
     queue: Q,
     consumer: std::cell::UnsafeCell<C>,
     consumer_sth: S::SuspendedThread,
@@ -44,10 +45,10 @@ struct Inner<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> {
     consumer_th: std::cell::UnsafeCell<Option<thread::JoinHandle<S, ()>>>,
 }
 
-unsafe impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Send for Inner<S, C, Q> {}
-unsafe impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Sync for Inner<S, C, Q> {}
+unsafe impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Send for Inner<S, C, Q> {}
+unsafe impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Sync for Inner<S, C, Q> {}
 
-impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default> Inner<S, C, Q> {
+impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default> Inner<S, C, Q> {
     fn new(consumer: C) -> Self {
         Inner {
             queue: Q::default(),
@@ -65,7 +66,7 @@ impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default> Inner<
 // delegator.rs (see that file's comments for the four-bugs-found history).
 // ---------------------------------------------------------------------------
 
-impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Inner<S, C, Q> {
+impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Inner<S, C, Q> {
     fn consumer(&self) -> &mut C {
         unsafe { &mut *self.consumer.get() }
     }
@@ -254,7 +255,7 @@ impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Inner<S, C, Q> {
 // lock_wait() first.
 // ---------------------------------------------------------------------------
 
-impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Drop for Inner<S, C, Q> {
+impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Drop for Inner<S, C, Q> {
     fn drop(&mut self) {
         self.lock_wait();
         self.finished.store(true, Ordering::Release);
@@ -275,15 +276,15 @@ impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Drop for Inner<S
 // Producer — Clone, mpsc::Sender-like
 // ---------------------------------------------------------------------------
 
-pub struct Producer<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>>(Arc<Inner<S, C, Q>>);
+pub struct Producer<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>>(Arc<Inner<S, C, Q>>);
 
-impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Clone for Producer<S, C, Q> {
+impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Clone for Producer<S, C, Q> {
     fn clone(&self) -> Self {
         Producer(Arc::clone(&self.0))
     }
 }
 
-impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Producer<S, C, Q> {
+impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Producer<S, C, Q> {
     /// Runs `imm` inline if uncontended, otherwise delegates via `del` and
     /// waits for the result. Blocks only on the caller's own work; any
     /// backlog left behind by other callers is handed to the consumer ULT
@@ -314,7 +315,7 @@ impl<S: UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Producer<S, C, Q
 /// [`crate::ult::thread::spawn`]).
 pub fn delegator<S, C, Q>(consumer: C) -> Producer<S, C, Q>
 where
-    S: UltSystem,
+    S: UltSchedulerSystem + UltSystem,
     C: DelegatorConsumer<S>,
     Q: SyncQueue<S, C> + Default + 'static,
 {

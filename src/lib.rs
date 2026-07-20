@@ -93,10 +93,10 @@ pub mod default {
     //! Import with `use cmpth::default::*` to bring the default-system API
     //! into scope.  The explicit module path signals that you are using the
     //! *default* ULT scheduler; code that needs a different system should
-    //! call [`UltSystem::run`](crate::UltSystem::run), etc. directly.
+    //! call `MySystem::run(...)`, etc. directly on its own marker struct.
 
-    use crate::UltSystem as _;
     use crate::traits::ThreadSystem as _;
+    use crate::traits::UltSystem as _;
 
     /// Start the default scheduler with `num_workers` OS threads and run
     /// `root` as the first task.  Returns when `root` and every task it

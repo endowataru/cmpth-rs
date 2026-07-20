@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::traits::thread_system::{JoinHandleLike, TlsSlot, ThreadSystem};
 use crate::ult::external_queue::ExternalQueue;
 use crate::ult::pool::DescPool;
-use crate::ult::system::{UltSchedulerSystem, UltSystem};
+use crate::ult::system::UltSchedulerSystem;
 use crate::ult::thread::fork_parent_first;
 use crate::ult::worker::{LocalQueue, UltWorker, Worker};
 
@@ -26,7 +26,7 @@ unsafe impl<S: UltSchedulerSystem> Sync for Scheduler<S> {}
 /// task, and return when `root` completes and all workers have shut down.
 pub fn run<S, F>(num_workers: usize, root: F)
 where
-    S: UltSystem,
+    S: UltSchedulerSystem,
     F: FnOnce() + Send + 'static,
 {
     assert!(num_workers >= 1, "need at least one worker");
@@ -71,7 +71,7 @@ where
     }
 }
 
-fn worker_loop<S: UltSystem>(wk: &UltWorker<S>) {
+fn worker_loop<S: UltSchedulerSystem>(wk: &UltWorker<S>) {
     S::worker_tls().set(wk as *const UltWorker<S> as *mut UltWorker<S>);
     wk.cur_task.set(wk.root_desc() as *const _ as *mut _);
 
