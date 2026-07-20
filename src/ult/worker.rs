@@ -20,7 +20,6 @@
 use std::cell::Cell;
 use std::mem::ManuallyDrop;
 use std::ptr;
-use std::sync::atomic::Ordering;
 
 use std::task::{RawWaker, Waker};
 
@@ -29,7 +28,9 @@ use crate::ult::deque::WorkerDeque;
 use crate::ult::pool::DescPool;
 use crate::ult::scheduler::Scheduler;
 use crate::ult::system::UltSchedulerSystem;
-use crate::ult::desc::{SuspendedUlt, UltDesc, NOTIFIED, PARKED, POLLING, STATE_MASK};
+use crate::ult::desc::{
+    AsyncTaskDesc, BasicTaskDesc, StackfulTaskDesc, SuspendedUlt, TaskDesc,
+};
 use crate::ult::waker::async_task_private_vtable;
 
 // ---------------------------------------------------------------------------
@@ -61,7 +62,7 @@ pub trait ContextSwitcher: Sized {
     /// Save the current context, switch to a **fresh** stack at `stack_top`,
     /// run `f(wk, prev)` there.  Used for child-first fork; `f` must never
     /// return.
-    fn suspend_to_new<F>(&self, stack_top: *mut u8, next: *mut UltDesc, f: F) -> &Self
+    fn suspend_to_new<F>(&self, stack_top: *mut u8, next: *mut BasicTaskDesc, f: F) -> &Self
     where
         F: FnOnce(&Self, SuspendedUlt);
 
@@ -77,13 +78,13 @@ pub trait ContextSwitcher: Sized {
 
 /// Task-descriptor allocation with a per-worker free list.
 pub trait TaskPool {
-    fn alloc_task(&self, has_handle: bool) -> *mut UltDesc;
+    fn alloc_task(&self, has_handle: bool) -> *mut BasicTaskDesc;
 
     /// Return a dead descriptor to the pool.
     ///
     /// # Safety
     /// No other references to `desc` may exist after this call.
-    unsafe fn free_task(&self, desc: *mut UltDesc);
+    unsafe fn free_task(&self, desc: *mut BasicTaskDesc);
 }
 
 // ---------------------------------------------------------------------------
@@ -189,9 +190,9 @@ pub trait Worker: ContextSwitcher + TaskPool + LocalQueue + Send + Sync + 'stati
 pub struct UltWorker<S: UltSchedulerSystem> {
     num: usize,
     deque: S::Deque,
-    pub(crate) cur_task: Cell<*mut UltDesc>,
-    root_desc: UltDesc,
-    root_cont: Cell<*mut UltDesc>,
+    pub(crate) cur_task: Cell<*mut BasicTaskDesc>,
+    root_desc: BasicTaskDesc,
+    root_cont: Cell<*mut BasicTaskDesc>,
     steal_seed: Cell<usize>,
     pub(crate) shared: Cell<*const Scheduler<S>>,
 }
@@ -207,14 +208,14 @@ impl<S: UltSchedulerSystem> UltWorker<S> {
             num,
             deque: S::Deque::default(),
             cur_task: Cell::new(ptr::null_mut()),
-            root_desc: UltDesc::new_root(),
+            root_desc: BasicTaskDesc::new_root(),
             root_cont: Cell::new(ptr::null_mut()),
             steal_seed: Cell::new(num.wrapping_mul(0x9E37_79B9).wrapping_add(1)),
             shared: Cell::new(ptr::null()),
         }
     }
 
-    pub(crate) fn root_desc(&self) -> &UltDesc {
+    pub(crate) fn root_desc(&self) -> &BasicTaskDesc {
         &self.root_desc
     }
 
@@ -230,7 +231,7 @@ impl<S: UltSchedulerSystem> ContextSwitcher for UltWorker<S> {
     where
         F: FnOnce(&Self, SuspendedUlt),
     {
-        let next_ctx = Context(unsafe { (*next.desc()).ctx.swap(ptr::null_mut(), Ordering::Acquire) });
+        let next_ctx = Context(unsafe { (*next.desc()).claim_saved_context() });
         debug_assert!(!next_ctx.is_null(), "double-resume in suspend_to_cont (is_root={})", next.is_root());
         let mut payload = SuspendPayload::<S, F> {
             wk: self,
@@ -253,9 +254,7 @@ impl<S: UltSchedulerSystem> ContextSwitcher for UltWorker<S> {
         F: FnOnce(&Self, &mut Option<SuspendedUlt>),
     {
         let next_ctx = Context(unsafe {
-            (*next.as_ref().expect("cond_suspend without target").desc())
-                .ctx
-                .load(Ordering::Acquire)
+            (*next.as_ref().expect("cond_suspend without target").desc()).peek_saved_context()
         });
         debug_assert!(!next_ctx.is_null());
         let mut payload = CondSuspendPayload::<S, F> {
@@ -274,7 +273,7 @@ impl<S: UltSchedulerSystem> ContextSwitcher for UltWorker<S> {
         unsafe { &*(tr.0 as *const UltWorker<S>) }
     }
 
-    fn suspend_to_new<F>(&self, stack_top: *mut u8, next: *mut UltDesc, f: F) -> &Self
+    fn suspend_to_new<F>(&self, stack_top: *mut u8, next: *mut BasicTaskDesc, f: F) -> &Self
     where
         F: FnOnce(&Self, SuspendedUlt),
     {
@@ -294,7 +293,7 @@ impl<S: UltSchedulerSystem> ContextSwitcher for UltWorker<S> {
     where
         F: FnOnce(&Self),
     {
-        let next_ctx = Context(unsafe { (*next.desc()).ctx.swap(ptr::null_mut(), Ordering::Acquire) });
+        let next_ctx = Context(unsafe { (*next.desc()).claim_saved_context() });
         debug_assert!(!next_ctx.is_null(), "double-resume in exit_to_cont (is_root={})", next.is_root());
         let mut payload = ExitPayload::<S, F> {
             wk: self,
@@ -315,11 +314,11 @@ impl<S: UltSchedulerSystem> ContextSwitcher for UltWorker<S> {
 // --- TaskPool ---
 
 impl<S: UltSchedulerSystem> TaskPool for UltWorker<S> {
-    fn alloc_task(&self, has_handle: bool) -> *mut UltDesc {
+    fn alloc_task(&self, has_handle: bool) -> *mut BasicTaskDesc {
         self.shared().task_pool.alloc(self.num, has_handle)
     }
 
-    unsafe fn free_task(&self, desc: *mut UltDesc) {
+    unsafe fn free_task(&self, desc: *mut BasicTaskDesc) {
         unsafe { self.shared().task_pool.dealloc(self.num, desc) };
     }
 }
@@ -361,7 +360,7 @@ impl<S: UltSchedulerSystem> LocalQueue for UltWorker<S> {
 
     fn pop_or_root(&self) -> SuspendedUlt {
         if let Some(c) = self.deque.try_pop_top() {
-            if unsafe { (*c.desc()).poll_fn.is_some() } {
+            if unsafe { (*c.desc()).poll_fn().get().is_some() } {
                 // Async tasks have no saved context; they can only be executed
                 // by the scheduler loop via execute().  Push the async task back
                 // to the LIFO end and return root so the scheduler loop handles it.
@@ -399,7 +398,7 @@ impl<S: UltSchedulerSystem> Worker for UltWorker<S> {
 
     fn execute(&self, cont: SuspendedUlt) {
         let desc = cont.desc();
-        if let Some(poll_fn) = unsafe { (*desc).poll_fn } {
+        if let Some(poll_fn) = unsafe { (*desc).poll_fn().get() } {
             let _ = cont.into_raw(); // consumed; no context switch
             self.run_async_poll(desc, poll_fn);
         } else {
@@ -415,11 +414,11 @@ impl<S: UltSchedulerSystem> UltWorker<S> {
     /// `desc.poll_fn` is `Some`.
     fn run_async_poll(
         &self,
-        desc: *mut UltDesc,
-        poll_fn: for<'cx> unsafe fn(*mut UltDesc, &mut std::task::Context<'cx>) -> bool,
+        desc: *mut BasicTaskDesc,
+        poll_fn: for<'cx> unsafe fn(*mut BasicTaskDesc, &mut std::task::Context<'cx>) -> bool,
     ) {
         // Mark as POLLING so the waker's state machine works correctly.
-        unsafe { (*desc).waker_refs.store(POLLING, Ordering::Release) };
+        unsafe { (*desc).mark_polling() };
 
         let raw = RawWaker::new(desc as *const (), async_task_private_vtable::<S>());
         let waker = unsafe { Waker::from_raw(raw) };
@@ -432,36 +431,10 @@ impl<S: UltSchedulerSystem> UltWorker<S> {
         drop(waker);
 
         if !done {
-            // Pending: transition POLLING → PARKED, unless NOTIFIED during poll.
-            loop {
-                let refs = unsafe { (*desc).waker_refs.load(Ordering::Acquire) };
-                let state = refs & STATE_MASK;
-                if state == NOTIFIED {
-                    // Wake fired during poll; re-queue immediately.
-                    let new = (refs & !STATE_MASK) | POLLING;
-                    if unsafe {
-                        (*desc).waker_refs.compare_exchange(
-                            refs, new, Ordering::AcqRel, Ordering::Acquire,
-                        )
-                    }
-                    .is_ok()
-                    {
-                        self.push_local_top(SuspendedUlt(desc));
-                        break;
-                    }
-                } else {
-                    // POLLING → PARKED: waker will re-push when ready.
-                    let new = (refs & !STATE_MASK) | PARKED;
-                    if unsafe {
-                        (*desc).waker_refs.compare_exchange(
-                            refs, new, Ordering::AcqRel, Ordering::Acquire,
-                        )
-                    }
-                    .is_ok()
-                    {
-                        break;
-                    }
-                }
+            // Pending: park, unless a wake raced in during poll() -- then
+            // re-queue immediately instead.
+            if !unsafe { (*desc).park_after_poll() } {
+                self.push_local_top(SuspendedUlt(desc));
             }
         }
         // done=true: async_poll_fn handled everything; desc may have been freed.
@@ -486,7 +459,7 @@ pub fn current_worker<S: UltSchedulerSystem>() -> Option<&'static UltWorker<S>> 
 
 struct SuspendPayload<S: UltSchedulerSystem, F> {
     wk: *const UltWorker<S>,
-    next: *mut UltDesc,
+    next: *mut BasicTaskDesc,
     f: ManuallyDrop<F>,
 }
 
@@ -500,14 +473,11 @@ where
         (&*payload.wk, payload.next, ManuallyDrop::take(&mut payload.f))
     };
     let prev_desc = wk.cur_task.get();
-    let old = unsafe { (*prev_desc).ctx.swap(prev.0, Ordering::Release) };
-    debug_assert!(old.is_null(), "suspend over live ctx in suspend_shim (is_root={})", unsafe { (*prev_desc).is_root });
+    let old = unsafe { (*prev_desc).publish_saved_context(prev.0) };
+    debug_assert!(old.is_null(), "suspend over live ctx in suspend_shim (is_root={})", unsafe { (*prev_desc).is_root() });
     wk.cur_task.set(next);
     let wkp = wk as *const UltWorker<S> as *const ();
-    unsafe { (*next).worker.set(wkp) };
-    if let Some(slot) = unsafe { (*next).slot } {
-        unsafe { (*slot).worker.set(wkp) };
-    }
+    unsafe { (*next).mark_resumed_on(wkp) };
     f(wk, SuspendedUlt(prev_desc));
     Transfer(wk as *const UltWorker<S> as *mut ())
 }
@@ -529,27 +499,24 @@ where
         (&*payload.wk, payload.next, next_cont, ManuallyDrop::take(&mut payload.f))
     };
     let prev_desc = wk.cur_task.get();
-    let old = unsafe { (*prev_desc).ctx.swap(prev.0, Ordering::Release) };
-    debug_assert!(old.is_null(), "suspend over live ctx in cond_suspend_shim (is_root={})", unsafe { (*prev_desc).is_root });
+    let old = unsafe { (*prev_desc).publish_saved_context(prev.0) };
+    debug_assert!(old.is_null(), "suspend over live ctx in cond_suspend_shim (is_root={})", unsafe { (*prev_desc).is_root() });
     wk.cur_task.set(next_cont.desc());
     let wkp = wk as *const UltWorker<S> as *const ();
-    unsafe { (*next_cont.desc()).worker.set(wkp) };
-    if let Some(slot) = unsafe { (*next_cont.desc()).slot } {
-        unsafe { (*slot).worker.set(wkp) };
-    }
+    unsafe { (*next_cont.desc()).mark_resumed_on(wkp) };
 
     let mut prev_cont = Some(SuspendedUlt(prev_desc));
     f(wk, &mut prev_cont);
 
     match prev_cont {
         None => {
-            unsafe { (*next_cont.desc()).ctx.store(ptr::null_mut(), Ordering::Relaxed) };
+            unsafe { (*next_cont.desc()).clear_saved_context() };
             let _ = next_cont.into_raw();
             CondTransfer { value: wk as *const UltWorker<S> as *mut (), flag: 1 }
         }
         Some(c) => {
             debug_assert!(std::ptr::eq(c.desc(), prev_desc));
-            unsafe { (*prev_desc).ctx.store(ptr::null_mut(), Ordering::Relaxed) };
+            unsafe { (*prev_desc).clear_saved_context() };
             let _ = c.into_raw();
             wk.cur_task.set(prev_desc);
             unsafe { *next_slot = Some(next_cont) };
@@ -560,7 +527,7 @@ where
 
 struct ExitPayload<S: UltSchedulerSystem, F> {
     wk: *const UltWorker<S>,
-    next: *mut UltDesc,
+    next: *mut BasicTaskDesc,
     f: ManuallyDrop<F>,
 }
 
@@ -575,10 +542,7 @@ where
     };
     wk.cur_task.set(next);
     let wkp = wk as *const UltWorker<S> as *const ();
-    unsafe { (*next).worker.set(wkp) };
-    if let Some(slot) = unsafe { (*next).slot } {
-        unsafe { (*slot).worker.set(wkp) };
-    }
+    unsafe { (*next).mark_resumed_on(wkp) };
     f(wk);
     Transfer(wk as *const UltWorker<S> as *mut ())
 }

@@ -58,7 +58,7 @@ use crate::ult::worker::{LocalQueue, UltWorker, Worker};
 //   UltSystem                 user-facing high-level primitives
 // ---------------------------------------------------------------------------
 
-/// Minimal system interface required by [`UltDesc`](crate::ult::desc::UltDesc)
+/// Minimal system interface required by [`BasicTaskDesc`](crate::ult::desc::BasicTaskDesc)
 /// and the context-switch shims.
 ///
 /// Carries only the stack-allocation policy; everything else lives at a higher

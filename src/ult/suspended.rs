@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::traits::{Resumable, StackfulResumable};
 use crate::ult::system::UltSystem;
-use crate::ult::desc::{SuspendedUlt, UltDesc};
+use crate::ult::desc::{SuspendedUlt, BasicTaskDesc};
 use crate::ult::worker::{ContextSwitcher, LocalQueue, UltWorker, Worker};
 
 /// ULT-layer interface for parked-continuation slots.
@@ -30,7 +30,7 @@ pub trait UltSuspendedThread: Send + Default {
     /// `Acquire` swap.  On weakly-ordered machines (AArch64) a plain store
     /// here can become visible before the saved context does, letting the
     /// notifier resume a continuation whose frame is not yet written.
-    fn cont(&self) -> &AtomicPtr<UltDesc>;
+    fn cont(&self) -> &AtomicPtr<BasicTaskDesc>;
 
     // --- helpers ------------------------------------------------------------
 
@@ -54,7 +54,7 @@ pub trait UltSuspendedThread: Send + Default {
     }
 
     fn wait_with_impl<F: FnOnce()>(&self, f: F) {
-        let slot = self.cont() as *const AtomicPtr<UltDesc>;
+        let slot = self.cont() as *const AtomicPtr<BasicTaskDesc>;
         Self::wk().suspend_to_sched(move |_wk, prev| {
             // Release: publishes the context saved just before this callback.
             unsafe { (*slot).store(prev.into_raw(), Ordering::Release) };
@@ -63,7 +63,7 @@ pub trait UltSuspendedThread: Send + Default {
     }
 
     fn wait_with_cond_impl<F: FnOnce() -> bool>(&self, f: F) {
-        let slot = self.cont() as *const AtomicPtr<UltDesc>;
+        let slot = self.cont() as *const AtomicPtr<BasicTaskDesc>;
         Self::wk().cond_suspend_to_sched(move |_wk, prev| {
             unsafe {
                 (*slot).store(prev.take().unwrap().into_raw(), Ordering::Release)
@@ -91,7 +91,7 @@ pub trait UltSuspendedThread: Send + Default {
         debug_assert!(!self.is_set_impl());
         let wk = Self::wk();
         let c = next.take_cont();
-        let slot = self.cont() as *const AtomicPtr<UltDesc>;
+        let slot = self.cont() as *const AtomicPtr<BasicTaskDesc>;
         wk.suspend_to_cont(c, move |_wk, prev| {
             unsafe { (*slot).store(prev.into_raw(), Ordering::Release) };
         });
@@ -117,7 +117,7 @@ impl<T: UltSuspendedThread> StackfulResumable<T::UltSystem> for T {
 /// [`UltSuspendedThread`] by providing just the `cont()` accessor; all
 /// behaviour comes from the default methods.
 pub struct BasicSuspendedThread<S: UltSystem> {
-    cont: AtomicPtr<UltDesc>,
+    cont: AtomicPtr<BasicTaskDesc>,
     _marker: PhantomData<S>,
 }
 
@@ -135,5 +135,5 @@ impl<S: UltSystem> BasicSuspendedThread<S> {
 
 impl<S: UltSystem> UltSuspendedThread for BasicSuspendedThread<S> {
     type UltSystem = S;
-    fn cont(&self) -> &AtomicPtr<UltDesc> { &self.cont }
+    fn cont(&self) -> &AtomicPtr<BasicTaskDesc> { &self.cont }
 }

@@ -10,6 +10,7 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::traits::thread_system::TlsSlot;
+use crate::ult::desc::TaskDesc;
 use crate::ult::system::UltSystem;
 use crate::ult::worker::{UltWorker, Worker};
 
@@ -49,7 +50,7 @@ impl<S: UltSystem, T: 'static> TlsSlot<T> for UltTls<S, T> {
         let wk = UltWorker::<S>::current()
             .expect("cmpth: ULT-local storage accessed outside a worker");
         let desc = wk.cur_task.get();
-        let map = unsafe { &*(*desc).tls.get() };
+        let map = unsafe { &*(*desc).tls().get() };
         map.as_ref()
             .and_then(|m| m.get(&self.key()).copied())
             .unwrap_or(std::ptr::null_mut())
@@ -60,7 +61,7 @@ impl<S: UltSystem, T: 'static> TlsSlot<T> for UltTls<S, T> {
         let wk = UltWorker::<S>::current()
             .expect("cmpth: ULT-local storage accessed outside a worker");
         let desc = wk.cur_task.get();
-        let map = unsafe { &mut *(*desc).tls.get() };
+        let map = unsafe { &mut *(*desc).tls().get() };
         map.get_or_insert_with(HashMap::new).insert(self.key(), p.cast());
     }
 }

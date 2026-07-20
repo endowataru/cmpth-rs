@@ -15,14 +15,14 @@ use std::marker::PhantomData;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::ult::desc::UltDesc;
+use crate::ult::desc::{BasicTaskDesc, TaskDesc};
 use crate::ult::stack::{HeapStack, StackAlloc};
 
 // ---------------------------------------------------------------------------
 // Trait
 // ---------------------------------------------------------------------------
 
-/// Pluggable pool for [`UltDesc`] allocation / deallocation.
+/// Pluggable pool for [`BasicTaskDesc`] allocation / deallocation.
 ///
 /// The pool lives in the
 /// [`Scheduler`](crate::ult::scheduler::Scheduler) and is shared across all
@@ -35,13 +35,13 @@ pub trait DescPool: Send + Sync + 'static {
     fn new_pool(num_workers: usize, stack_size: usize) -> Self;
 
     /// Allocate a task descriptor for worker `wk_num`.
-    fn alloc(&self, wk_num: usize, has_handle: bool) -> *mut UltDesc;
+    fn alloc(&self, wk_num: usize, has_handle: bool) -> *mut BasicTaskDesc;
 
     /// Return a finished descriptor from worker `wk_num` back to the pool.
     ///
     /// # Safety
     /// No other references to `desc` may exist after this call.
-    unsafe fn dealloc(&self, wk_num: usize, desc: *mut UltDesc);
+    unsafe fn dealloc(&self, wk_num: usize, desc: *mut BasicTaskDesc);
 }
 
 // ---------------------------------------------------------------------------
@@ -61,7 +61,7 @@ pub trait DescPool: Send + Sync + 'static {
 /// descriptors are freed immediately.
 pub struct SimplePool<A: StackAlloc = HeapStack, const CAP: usize = 256> {
     stack_size: usize,
-    lists: Box<[UnsafeCell<Vec<*mut UltDesc>>]>,
+    lists: Box<[UnsafeCell<Vec<*mut BasicTaskDesc>>]>,
     _alloc: PhantomData<A>,
 }
 
@@ -77,7 +77,7 @@ impl<A: StackAlloc, const CAP: usize> DescPool for SimplePool<A, CAP> {
         SimplePool { stack_size, lists, _alloc: PhantomData }
     }
 
-    fn alloc(&self, wk_num: usize, has_handle: bool) -> *mut UltDesc {
+    fn alloc(&self, wk_num: usize, has_handle: bool) -> *mut BasicTaskDesc {
         let list = unsafe { &mut *self.lists[wk_num].get() };
         match list.pop() {
             Some(desc) => {
@@ -85,19 +85,19 @@ impl<A: StackAlloc, const CAP: usize> DescPool for SimplePool<A, CAP> {
                 desc
             }
             None => {
-                let desc = UltDesc::alloc_with(A::alloc_stack(self.stack_size).into(), has_handle);
-                unsafe { (*desc).alloc_wk = wk_num };
+                let desc = BasicTaskDesc::alloc_with(A::alloc_stack(self.stack_size).into(), has_handle);
+                unsafe { (*desc).alloc_wk().set(wk_num) };
                 desc
             }
         }
     }
 
-    unsafe fn dealloc(&self, wk_num: usize, desc: *mut UltDesc) {
+    unsafe fn dealloc(&self, wk_num: usize, desc: *mut BasicTaskDesc) {
         let list = unsafe { &mut *self.lists[wk_num].get() };
         if list.len() < CAP {
             list.push(desc);
         } else {
-            unsafe { UltDesc::free(desc) };
+            unsafe { BasicTaskDesc::free(desc) };
         }
     }
 }
@@ -106,7 +106,7 @@ impl<A: StackAlloc, const CAP: usize> Drop for SimplePool<A, CAP> {
     fn drop(&mut self) {
         for cell in self.lists.iter() {
             for &desc in unsafe { &*cell.get() }.iter() {
-                unsafe { UltDesc::free(desc) };
+                unsafe { BasicTaskDesc::free(desc) };
             }
         }
     }
@@ -119,8 +119,8 @@ impl<A: StackAlloc, const CAP: usize> Drop for SimplePool<A, CAP> {
 /// Per-producer staging list: descriptors headed back to a specific home
 /// worker, accumulated before a batch flush to avoid per-item lock overhead.
 struct ProList {
-    first: *mut UltDesc,
-    last: *mut UltDesc,
+    first: *mut BasicTaskDesc,
+    last: *mut BasicTaskDesc,
     num: usize,
 }
 
@@ -137,7 +137,7 @@ impl ProList {
 struct LocalHalf {
     /// Head of the local free list.  Lock-free: only the owning worker reads
     /// or writes this.
-    con_local: UnsafeCell<*mut UltDesc>,
+    con_local: UnsafeCell<*mut BasicTaskDesc>,
 }
 
 /// "Remote" half of a worker pool entry: written by other workers.
@@ -149,7 +149,7 @@ struct RemoteHalf {
     /// Head of the remote free list.  Other workers prepend full batches here
     /// under the spinlock; the owning worker drains it into `con_local` in a
     /// single bulk move.
-    con_remote: UnsafeCell<*mut UltDesc>,
+    con_remote: UnsafeCell<*mut BasicTaskDesc>,
 }
 
 struct WorkerEntry {
@@ -175,10 +175,10 @@ unsafe impl Sync for WorkerEntry {}
 /// ```text
 /// WorkerEntry
 /// ├── local (cache line 0) — owned by this worker, no sync
-/// │   └── con_local: *mut UltDesc   — local free list
+/// │   └── con_local: *mut BasicTaskDesc   — local free list
 /// └── remote (cache line 1) — shared, spinlock-protected
 ///     ├── lock: AtomicBool
-///     └── con_remote: *mut UltDesc  — remote mailbox
+///     └── con_remote: *mut BasicTaskDesc  — remote mailbox
 ///
 /// pro_arrays[cur_wk][alloc_wk]      — staging lists, owned by cur_wk
 /// ```
@@ -195,7 +195,7 @@ unsafe impl Sync for WorkerEntry {}
 /// 1. Pop from `con_local` (no lock — fast path).
 /// 2. If empty, drain `con_remote` into `con_local` under one spinlock, then
 ///    pop from the newly-filled local list.
-/// 3. If still empty, allocate fresh with `UltDesc::alloc`.
+/// 3. If still empty, allocate fresh with `BasicTaskDesc::alloc`.
 pub struct ReturnPool<A: StackAlloc = HeapStack, const THRESHOLD: usize = 16> {
     stack_size: usize,
     workers: Box<[WorkerEntry]>,
@@ -248,14 +248,14 @@ impl<A: StackAlloc, const THRESHOLD: usize> DescPool for ReturnPool<A, THRESHOLD
         ReturnPool { stack_size, workers, pro_arrays, _alloc: PhantomData }
     }
 
-    fn alloc(&self, wk_num: usize, has_handle: bool) -> *mut UltDesc {
+    fn alloc(&self, wk_num: usize, has_handle: bool) -> *mut BasicTaskDesc {
         let we = &self.workers[wk_num];
         let con_local = unsafe { &mut *we.local.con_local.get() };
 
         // Fast path: take from lock-free local list.
         if !con_local.is_null() {
             let desc = *con_local;
-            *con_local = unsafe { (*desc).pool_next };
+            *con_local = unsafe { (*desc).pool_next().get() };
             unsafe { (*desc).reinit(has_handle) };
             return desc;
         }
@@ -271,25 +271,25 @@ impl<A: StackAlloc, const THRESHOLD: usize> DescPool for ReturnPool<A, THRESHOLD
         };
         if !head.is_null() {
             // Bulk move: return head, the rest become the new local list.
-            *con_local = unsafe { (*head).pool_next };
+            *con_local = unsafe { (*head).pool_next().get() };
             unsafe { (*head).reinit(has_handle) };
             return head;
         }
 
         // Miss: allocate fresh and record the home worker.
-        let desc = UltDesc::alloc_with(A::alloc_stack(self.stack_size).into(), has_handle);
-        unsafe { (*desc).alloc_wk = wk_num };
+        let desc = BasicTaskDesc::alloc_with(A::alloc_stack(self.stack_size).into(), has_handle);
+        unsafe { (*desc).alloc_wk().set(wk_num) };
         desc
     }
 
-    unsafe fn dealloc(&self, cur_wk: usize, desc: *mut UltDesc) {
-        let alloc_wk = unsafe { (*desc).alloc_wk };
+    unsafe fn dealloc(&self, cur_wk: usize, desc: *mut BasicTaskDesc) {
+        let alloc_wk = unsafe { (*desc).alloc_wk().get() };
 
         if alloc_wk == cur_wk {
             // Home worker: push directly to the lock-free local list.
             let we = &self.workers[cur_wk];
             let con_local = unsafe { &mut *we.local.con_local.get() };
-            unsafe { (*desc).pool_next = *con_local };
+            unsafe { (*desc).pool_next().set(*con_local) };
             *con_local = desc;
             return;
         }
@@ -301,7 +301,7 @@ impl<A: StackAlloc, const THRESHOLD: usize> DescPool for ReturnPool<A, THRESHOLD
 
         if old_num < THRESHOLD {
             // Accumulate: prepend desc to the staging list.
-            unsafe { (*desc).pool_next = pro.first };
+            unsafe { (*desc).pool_next().set(pro.first) };
             if old_num == 0 {
                 pro.last = desc; // first item also becomes the tail
             }
@@ -317,12 +317,12 @@ impl<A: StackAlloc, const THRESHOLD: usize> DescPool for ReturnPool<A, THRESHOLD
             spin_lock(&alloc_we.remote.lock);
             let cr = unsafe { &mut *alloc_we.remote.con_remote.get() };
             // Prepend batch: batch_tail → old head of con_remote.
-            unsafe { (*old_last).pool_next = *cr };
+            unsafe { (*old_last).pool_next().set(*cr) };
             *cr = old_first;
             spin_unlock(&alloc_we.remote.lock);
 
             // Start fresh batch with only desc.
-            unsafe { (*desc).pool_next = null_mut() };
+            unsafe { (*desc).pool_next().set(null_mut()) };
             pro.first = desc;
             pro.last = desc;
             pro.num = 1;
@@ -331,10 +331,10 @@ impl<A: StackAlloc, const THRESHOLD: usize> DescPool for ReturnPool<A, THRESHOLD
 }
 
 /// Free every descriptor in a `pool_next`-threaded linked list.
-unsafe fn free_list(mut p: *mut UltDesc) {
+unsafe fn free_list(mut p: *mut BasicTaskDesc) {
     while !p.is_null() {
-        let next = unsafe { (*p).pool_next };
-        unsafe { UltDesc::free(p) };
+        let next = unsafe { (*p).pool_next().get() };
+        unsafe { BasicTaskDesc::free(p) };
         p = next;
     }
 }
