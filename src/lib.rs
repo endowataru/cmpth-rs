@@ -6,7 +6,7 @@
 //! implemented by a concrete struct.  Three layers:
 //!
 //! * **`traits/`** — interface layer, no implementations:
-//!   [`ThreadSystem`], [`SuspendedThread`], [`traits::Mutex`], [`traits::Barrier`], …
+//!   [`ThreadSystem`], [`traits::Resumable`], [`traits::Mutex`], [`traits::Barrier`], …
 //! * **`ult/`** — ULT implementation layer (parametric over [`UltSystem`]):
 //!   [`UltWorker<S>`], [`BasicSuspendedThread<S>`], sync primitives, scheduler.
 //! * **`lib.rs`** — instantiations: [`DefaultUltSystem`], [`DefaultUltUltSystem`].
@@ -23,7 +23,7 @@ pub mod future;
 pub mod ult;
 
 pub use context::{CondTransfer, Context, ContextPolicy, NativeContext, Transfer};
-pub use traits::{BarrierWaitResult, DelegatorConsumer, Delegator, JoinHandleLike, Poller, SuspendedThread, TlsAnchor, TlsSlot, ThreadSystem};
+pub use traits::{BarrierWaitResult, DelegatorConsumer, Delegator, DualBarrier, DualMutex, JoinHandleLike, Poller, Resumable, StackfulResumable, TlsAnchor, TlsSlot, ThreadSystem};
 pub use os::{OsBarrier, OsCondvar, OsMutex, OsPoller, OsSystem, OsTls};
 pub use ult::waker::UltPoller;
 pub use ult::deque::{CrossbeamDeque, SpinDeque, WorkerDeque};
@@ -31,9 +31,12 @@ pub use ult::external_queue::{ExternalQueue, PollerUltQueue, StealPathQueue};
 pub use ult::lookup::{CurrentLookup, SpCurrent, TlsCurrent};
 pub use ult::pool::{DescPool, ReturnPool, SimplePool};
 pub use ult::stack::{ArenaStack, HeapStack, StackAlloc};
+pub use ult::async_wait::SuspendedFuture;
+pub use ult::dual_wait::SuspendedTask;
 pub use ult::suspended::{BasicSuspendedThread, UltSuspendedThread};
-pub use ult::sync::{Barrier as UltBarrier, McsDelegator, McsMutex, McsMutexGuard, McsCondvar, BarrierCore, MutexCore};
-pub use ult::system::{UltContextSystem, UltSchedulerSystem, UltSystem};
+pub use ult::sync::{Barrier as UltBarrier, McsDelegator, McsMutex, McsMutexGuard, McsCondvar, BarrierCore, MutexCore, DualBarrier as UltDualBarrier, DualMutex as UltDualMutex, DualMutexGuard as UltDualMutexGuard};
+pub use ult::sync::{delegator, Producer as DelegatorProducer};
+pub use ult::system::{AsyncWorkerSystem, UltContextSystem, UltSchedulerSystem, UltSystem};
 pub use ult::tls::UltTls;
 pub use ult::worker::{ContextSwitcher, LocalQueue, TaskPool, UltWorker, Worker, current_worker};
 
@@ -59,6 +62,22 @@ crate::ult_system! {
         deque:      crate::CrossbeamDeque,
         stack_size: 64 * 1024,
     }
+}
+
+// Both default systems can also host stackless spawn_async-style tasks.
+// See `ult::system::AsyncWorkerSystem` — kept separate from the
+// `ult_system!` macro deliberately (see docs/sync-async-unification.md).
+// `Mutex`/`Barrier` here are bound to `DualMutex`/`DualBarrier` over
+// `SuspendedTask` (not the `BasicSuspendedThread`-based ones `UltSystem`
+// gets from the macro) so stackless callers get real, contended-together-
+// with-ULTs capability, not just a marker.
+impl ult::system::AsyncWorkerSystem for DefaultUltSystem {
+    type Mutex<T: Send> = UltDualMutex<Self, T, SuspendedTask<Self>>;
+    type Barrier = UltDualBarrier<Self, SuspendedTask<Self>>;
+}
+impl ult::system::AsyncWorkerSystem for DefaultUltUltSystem {
+    type Mutex<T: Send> = UltDualMutex<Self, T, SuspendedTask<Self>>;
+    type Barrier = UltDualBarrier<Self, SuspendedTask<Self>>;
 }
 
 // ---------------------------------------------------------------------------

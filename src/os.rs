@@ -176,6 +176,22 @@ impl<T: Send> Mutex<T> for OsMutex<T> {
     }
 }
 
+impl<T: Send> crate::traits::StackfulMutex<T> for OsMutex<T> {
+    type Guard<'a>
+        = std::sync::MutexGuard<'a, T>
+    where
+        Self: 'a,
+        T: 'a;
+
+    fn new(val: T) -> Self {
+        OsMutex(std::sync::Mutex::new(val))
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, T> {
+        self.0.lock().unwrap()
+    }
+}
+
 pub struct OsCondvar(std::sync::Condvar);
 
 impl<T: Send> Condvar<OsMutex<T>, T> for OsCondvar {
@@ -203,6 +219,16 @@ impl<T: Send> Condvar<OsMutex<T>, T> for OsCondvar {
 pub struct OsBarrier(std::sync::Barrier);
 
 impl Barrier for OsBarrier {
+    fn new(count: usize) -> Self {
+        OsBarrier(std::sync::Barrier::new(count))
+    }
+
+    fn wait(&self) -> BarrierWaitResult {
+        BarrierWaitResult { is_leader: self.0.wait().is_leader() }
+    }
+}
+
+impl crate::traits::StackfulBarrier for OsBarrier {
     fn new(count: usize) -> Self {
         OsBarrier(std::sync::Barrier::new(count))
     }

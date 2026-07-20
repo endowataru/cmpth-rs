@@ -30,14 +30,18 @@ unsafe impl<S: UltSystem, C: DelegatorConsumer<S>> Sync for McsQueue<S, C> {}
 
 impl<S: UltSystem, C: DelegatorConsumer<S>> Default for McsQueue<S, C> {
     fn default() -> Self {
-        // Allocate a sentinel head node so start_lock always has a cur to return.
-        let sentinel = Box::into_raw(Box::new(McsEntry {
-            next: AtomicPtr::new(null_mut()),
-            node: DelegatorNode::default(),
-        }));
+        // No sentinel: `tail`/`head` start genuinely null, matching the C++
+        // reference (`basic_mcs_core.hpp`: `tail_{nullptr}`, `head_` defaults
+        // null). A prior version pre-allocated a sentinel and compared
+        // against it in `start_lock`/`try_unlock` instead of against null —
+        // that's a different (and wrong) condition: it let a second caller
+        // "win" the lock immediately by coincidentally matching the
+        // sentinel's address, and it never let a fully-drained queue return
+        // to a state where a future caller *could* win immediately. See
+        // `start_lock`/`try_unlock` below.
         McsQueue {
-            tail: AtomicPtr::new(sentinel),
-            head: std::cell::Cell::new(sentinel),
+            tail: AtomicPtr::new(null_mut()),
+            head: std::cell::Cell::new(null_mut()),
         }
     }
 }
@@ -63,7 +67,11 @@ impl<S: UltSystem, C: DelegatorConsumer<S>> SyncQueue<S, C> for McsQueue<S, C> {
             node: DelegatorNode::default(),
         }));
         let prev_tail = self.tail.swap(new_entry, Ordering::AcqRel);
-        let is_locked = prev_tail == self.head.get();
+        // Win immediately iff the queue was genuinely empty (tail was null),
+        // matching `basic_mcs_core.hpp::start_lock`'s `prev == nullptr` — NOT
+        // "prev happens to equal the current head", which is a different,
+        // incorrect condition (see the comment on `Default` above).
+        let is_locked = prev_tail.is_null();
         let prev_node = if is_locked {
             null_mut()
         } else {
@@ -93,9 +101,29 @@ impl<S: UltSystem, C: DelegatorConsumer<S>> SyncQueue<S, C> for McsQueue<S, C> {
 
     fn try_unlock(&self, head: *mut DelegatorNode<S, C>) -> bool {
         let head_entry = entry_of(head);
-        self.tail
-            .compare_exchange(head_entry, head_entry, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+        // Standard MCS unlock (`basic_mcs_core.hpp::try_unlock`): CAS `tail`
+        // from `head_entry` to *null* (not to `head_entry` again — a
+        // same-value CAS never actually releases the queue, so no future
+        // caller could ever win the fast path again after the first
+        // lock/unlock cycle, which was the second half of this bug).
+        // `self.head` is proactively cleared first and restored on failure,
+        // matching C++ exactly — `try_follow_head` unconditionally reads and
+        // frees whatever `self.head` currently holds, so it must be correct
+        // (either null, meaning "fully unlocked", or the original
+        // `head_entry`) by the time either function is next called.
+        self.head.set(null_mut());
+        match self.tail.compare_exchange(
+            head_entry,
+            null_mut(),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => true,
+            Err(_) => {
+                self.head.set(head_entry);
+                false
+            }
+        }
     }
 
     fn try_follow_head(

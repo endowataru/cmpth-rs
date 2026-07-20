@@ -4,7 +4,7 @@ use std::task::Context;
 
 /// Drives a single `block_on` invocation.
 ///
-/// `Poller` is to `block_on` what `SuspendedThread` is to `wait_with`: a thin
+/// `Poller` is to `block_on` what a wait-slot (`StackfulResumable`) is to `wait_with`: a thin
 /// type that encapsulates the system-specific park/wake mechanism, leaving the
 /// poll loop itself as a generic default on [`ThreadSystem`].
 ///

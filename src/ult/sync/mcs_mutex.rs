@@ -5,7 +5,7 @@ use std::ptr::null_mut;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::spin::SpinLock;
-use crate::traits::{Condvar as CondvarTrait, Mutex as MutexTrait, SuspendedThread};
+use crate::traits::{Condvar as CondvarTrait, Mutex as MutexTrait, Resumable, StackfulMutex, StackfulResumable};
 use crate::ult::system::UltSystem;
 
 // ---------------------------------------------------------------------------
@@ -95,6 +95,18 @@ impl<S: UltSystem, T: Send> MutexTrait<T> for McsMutex<S, T> {
     }
 }
 
+impl<S: UltSystem, T: Send> StackfulMutex<T> for McsMutex<S, T> {
+    type Guard<'a> = McsMutexGuard<'a, S, T> where Self: 'a, T: 'a;
+
+    fn new(val: T) -> Self {
+        <Self as MutexTrait<T>>::new(val)
+    }
+
+    fn lock(&self) -> McsMutexGuard<'_, S, T> {
+        MutexTrait::lock(self)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // McsCondvar
 // ---------------------------------------------------------------------------
@@ -132,7 +144,7 @@ impl<S: UltSystem, T: Send> CondvarTrait<McsMutex<S, T>, T> for McsCondvar<S> {
             drop(waiters);
             drop(guard);
         });
-        mutex.lock()
+        MutexTrait::lock(mutex)
     }
 
     fn notify_one(&self) { McsCondvar::notify_one(self); }

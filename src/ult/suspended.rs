@@ -1,10 +1,10 @@
-//! ULT-layer suspended-thread interface and default implementation.
+//! ULT-layer parked-continuation interface and default implementation.
 
 use std::marker::PhantomData;
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use crate::traits::SuspendedThread;
+use crate::traits::{Resumable, StackfulResumable};
 use crate::ult::system::UltSystem;
 use crate::ult::desc::{SuspendedUlt, UltDesc};
 use crate::ult::worker::{ContextSwitcher, LocalQueue, UltWorker, Worker};
@@ -16,8 +16,9 @@ use crate::ult::worker::{ContextSwitcher, LocalQueue, UltWorker, Worker};
 /// in a different struct (e.g. one with profiling counters) by implementing
 /// `cont()` and overriding whichever methods need customisation.
 ///
-/// The blanket `impl<T: UltSuspendedThread> SuspendedThread for T` then
-/// automatically satisfies the top-level [`SuspendedThread`] interface.
+/// The blanket `impl<T: UltSuspendedThread> Resumable/StackfulResumable for T`
+/// then automatically satisfies the top-level wait-slot interface
+/// (`docs/sync-async-unification.md`).
 pub trait UltSuspendedThread: Send + Default {
     type UltSystem: UltSystem;
 
@@ -37,13 +38,13 @@ pub trait UltSuspendedThread: Send + Default {
         // `swap` (not load+store) so that concurrent take/cancel pairs can
         // never both obtain the continuation.
         let c = self.cont().swap(ptr::null_mut(), Ordering::Acquire);
-        assert!(!c.is_null(), "SuspendedThread: no parked continuation");
+        assert!(!c.is_null(), "UltSuspendedThread: no parked continuation");
         SuspendedUlt(c)
     }
 
     fn wk() -> &'static UltWorker<Self::UltSystem> {
         UltWorker::<Self::UltSystem>::current()
-            .expect("cmpth: SuspendedThread operation called outside a worker")
+            .expect("cmpth: UltSuspendedThread operation called outside a worker")
     }
 
     // --- default implementations --------------------------------------------
@@ -97,15 +98,19 @@ pub trait UltSuspendedThread: Send + Default {
     }
 }
 
-/// Blanket: any `UltSuspendedThread` automatically implements `SuspendedThread`.
-impl<T: UltSuspendedThread> SuspendedThread for T {
-    type System = T::UltSystem;
+/// Blanket: any `UltSuspendedThread` automatically implements the top-level
+/// wait-slot traits (`enter`/`swap` always succeed here — `true` is
+/// type-guaranteed, unlike `SuspendedTask`, which may hold an async waiter).
+impl<T: UltSuspendedThread> Resumable<T::UltSystem> for T {
     fn is_set(&self) -> bool { self.is_set_impl() }
+    fn notify(&self) { self.notify_impl() }
+}
+
+impl<T: UltSuspendedThread> StackfulResumable<T::UltSystem> for T {
     fn wait_with<F: FnOnce()>(&self, f: F) { self.wait_with_impl(f) }
     fn wait_with_cond<F: FnOnce() -> bool>(&self, f: F) { self.wait_with_cond_impl(f) }
-    fn notify(&self) { self.notify_impl() }
-    fn enter(&self) { self.enter_impl() }
-    fn swap(&self, next: &Self) { self.swap_impl(next) }
+    fn enter(&self) -> bool { self.enter_impl(); true }
+    fn swap(&self, next: &Self) -> bool { self.swap_impl(next); true }
 }
 
 /// Single-slot parked-continuation implementation.  Implements

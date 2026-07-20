@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use crate::spin::SpinLock;
-use crate::traits::{Barrier as BarrierTrait, BarrierWaitResult, SuspendedThread};
+use crate::traits::{Barrier as BarrierTrait, BarrierWaitResult, Resumable, StackfulBarrier, StackfulResumable};
 use crate::ult::system::{UltSchedulerSystem, UltSystem};
 
 // ---------------------------------------------------------------------------
@@ -62,6 +62,11 @@ impl<S: UltSystem> BarrierCore for Barrier<S> {
 }
 
 impl<S: UltSystem> BarrierTrait for Barrier<S> {
+    fn new(count: usize) -> Self { Barrier::new(count) }
+    fn wait(&self) -> BarrierWaitResult { self.wait_impl() }
+}
+
+impl<S: UltSystem> StackfulBarrier for Barrier<S> {
     fn new(count: usize) -> Self { Barrier::new(count) }
     fn wait(&self) -> BarrierWaitResult { self.wait_impl() }
 }

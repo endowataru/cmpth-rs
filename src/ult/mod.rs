@@ -1,6 +1,8 @@
 //! The ULT scheduler modules.
 
+pub mod async_wait;
 pub mod deque;
+pub mod dual_wait;
 pub mod external_queue;
 pub mod lookup;
 pub mod pool;

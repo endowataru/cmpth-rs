@@ -10,7 +10,7 @@ use std::future::Future;
 use std::pin::pin;
 use std::task::{Poll, RawWaker, RawWakerVTable, Waker};
 
-use crate::traits::{Barrier, Delegator, DelegatorConsumer, Mutex, Poller};
+use crate::traits::{Delegator, DelegatorConsumer, Poller, StackfulBarrier, StackfulMutex};
 
 /// Threading system interface bundle — swap the entire backend by changing
 /// one type parameter.
@@ -60,10 +60,10 @@ pub trait ThreadSystem: Sized + Send + Sync + 'static {
         T: Send + 'static;
 
     /// Mutex type for this system.
-    type Mutex<T: Send>: Mutex<T> + Send + Sync;
+    type Mutex<T: Send>: StackfulMutex<T> + Send + Sync;
 
     /// Barrier type for this system.
-    type Barrier: Barrier + Send + Sync;
+    type Barrier: StackfulBarrier + Send + Sync;
 
     /// Parked-continuation handle for this system.
     type SuspendedThread: Send + Default;

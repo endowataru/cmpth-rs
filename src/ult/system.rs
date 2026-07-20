@@ -40,7 +40,7 @@
 //! ```
 
 use crate::context::ContextPolicy;
-use crate::traits::{Barrier, Delegator, DelegatorConsumer, Mutex};
+use crate::traits::DelegatorConsumer;
 use crate::traits::thread_system::ThreadSystem;
 use crate::ult::deque::WorkerDeque;
 use crate::ult::external_queue::ExternalQueue;
@@ -106,33 +106,9 @@ pub trait UltSchedulerSystem: UltContextSystem {
     fn worker_tls() -> &'static <Self::Base as ThreadSystem>::ThreadSpecific<UltWorker<Self>>;
 }
 
-/// Full ULT system configuration trait.
-///
-/// Implement this on a concrete marker struct to define a complete ULT system.
-/// The blanket `impl<S: UltSystem> ThreadSystem for S` automatically provides
-/// all threading-system methods; there is no need to write
-/// `impl ThreadSystem for …` separately.
-///
-/// Use [`ult_system!`](crate::ult_system) to implement this trait.
-pub trait UltSystem: UltSchedulerSystem {
-    /// Mutex type for this system.
-    type Mutex<T: Send>: Mutex<T> + Send + Sync;
-
-    /// Barrier type for this system.
-    type Barrier: Barrier + Send + Sync;
-
-    /// Delegator type for this system.
-    type Delegator<C: DelegatorConsumer<Self>>: Delegator<Self, C>;
-
-    /// Start `num_workers` workers on the base system and run `root` as the
-    /// first task.  Returns when `root` and all spawned tasks complete.
-    fn run<F>(num_workers: usize, root: F)
-    where
-        F: FnOnce() + Send + 'static,
-    {
-        crate::ult::scheduler::run::<Self, F>(num_workers, root)
-    }
-}
+// `UltSystem`/`AsyncWorkerSystem` now live in `crate::traits::ult_system` —
+// re-exported below for callers that still spell out `ult::system::UltSystem`.
+pub use crate::traits::ult_system::{AsyncWorkerSystem, UltSystem};
 
 // ---------------------------------------------------------------------------
 // Blanket ThreadSystem implementation for every UltSystem
@@ -273,8 +249,8 @@ macro_rules! ult_system {
         }
 
         impl $crate::UltSystem for $name {
-            type Mutex<T: Send>  = $crate::ult::sync::McsMutex<Self, T>;
-            type Barrier         = $crate::ult::sync::Barrier<Self>;
+            type Mutex<T: Send>  = $crate::ult::sync::DualMutex<Self, T, $crate::ult::suspended::BasicSuspendedThread<Self>>;
+            type Barrier         = $crate::ult::sync::DualBarrier<Self, $crate::ult::suspended::BasicSuspendedThread<Self>>;
             type Delegator<C: $crate::DelegatorConsumer<Self>> =
                 $crate::ult::sync::McsDelegator<Self, C>;
         }
