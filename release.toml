@@ -2,6 +2,7 @@
 # Run: cargo release patch / minor / major
 
 pre-release-commit-message = "chore: release {{version}}"
+consolidate-commits = false
 tag-message = ""
 push = true
 publish = true
