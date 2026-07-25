@@ -63,6 +63,38 @@ stack.  A suspended task's continuation therefore only comes into existence
 once its context is fully saved, which eliminates "saving in progress"
 flags and spin-wait handshakes throughout the scheduler.
 
+## Program against traits, not concrete systems
+
+User code should always reach a scheduler through its trait — `S:
+ThreadSystem`, `S: UltSystem`, `S: StackfulParallelInvoke`, etc. — never by
+naming a concrete system type directly. Naming a concrete type
+(`DefaultUltSystem::spawn(...)`, `ParallelInvokeSystem::parallel_invoke(...)`)
+inside code that isn't itself the "pick a system" call site locks that code
+to one scheduler, which defeats the entire point of the trait-based
+composition above: the same function stops being reusable with a different
+system.
+
+```rust
+// Good: generic over the trait, works with any StackfulParallelInvoke system.
+fn fib_good<S: cmpth::StackfulParallelInvoke>(n: u64) -> u64 {
+    if n <= 1 { return n; }
+    let (a, b) = S::parallel_invoke(|| fib_good::<S>(n - 1), || fib_good::<S>(n - 2));
+    a + b
+}
+
+// Bad: hardcodes one scheduler; can't be reused with a different system.
+use cmpth::StackfulParallelInvoke as _;
+fn fib_bad(n: u64) -> u64 {
+    if n <= 1 { return n; }
+    let (a, b) = cmpth::ParallelInvokeSystem::parallel_invoke(|| fib_bad(n - 1), || fib_bad(n - 2));
+    a + b
+}
+```
+
+The concrete system name should only ever appear at the top-level call site
+that picks which system to run, e.g. `S::run(4, || fib::<S>(34))` invoked
+with `S = MySystem`.
+
 ## Features
 
 - `spawn` / `JoinHandle` (also usable as a `Future`), detach on drop

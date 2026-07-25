@@ -37,16 +37,16 @@ fn bench_fib_async(group: &mut criterion::BenchmarkGroup<criterion::measurement:
 
 /// cmpth's independent rayon-`join`-like scheduler (`cmpth::parallel_invoke`)
 /// doesn't fit `BenchSystem` either (no `spawn`/`JoinHandle`, only scoped
-/// `parallel_invoke`).
-fn bench_fib_parallel_invoke(group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>) {
+/// `parallel_invoke`). Generic over `S: StackfulParallelInvoke`, not
+/// hardcoded to `cmpth::ParallelInvokeSystem` — see [`run_fib_parallel_invoke`].
+fn bench_fib_parallel_invoke<S: cmpth::StackfulParallelInvoke>(
+    group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>,
+    label: &str,
+) {
     for workers in [1, 2, 4] {
-        group.bench_with_input(
-            BenchmarkId::new("cmpth-parallel-invoke", workers),
-            &workers,
-            |b, &w| {
-                b.iter(|| assert_eq!(run_fib_parallel_invoke(w, 34), 5_702_887));
-            },
-        );
+        group.bench_with_input(BenchmarkId::new(label, workers), &workers, |b, &w| {
+            b.iter(|| assert_eq!(run_fib_parallel_invoke::<S>(w, 34), 5_702_887));
+        });
     }
 }
 
@@ -59,7 +59,7 @@ fn bench_fib(c: &mut Criterion) {
     bench_fib_system::<CmpthBench>(&mut group, "cmpth-dual");
     bench_fib_system::<StackfulOnlyBench>(&mut group, "cmpth-stackful-only");
     bench_fib_async(&mut group);
-    bench_fib_parallel_invoke(&mut group);
+    bench_fib_parallel_invoke::<cmpth::ParallelInvokeSystem>(&mut group, "cmpth-parallel-invoke");
     bench_fib_system::<RayonBench>(&mut group, "rayon");
     #[cfg(feature = "massivethreads")]
     bench_fib_system::<MythBench>(&mut group, "myth");
