@@ -599,7 +599,7 @@ fn spawn_async_yield() {
         let flag = Arc::new(AtomicBool::new(false));
         let flag2 = Arc::clone(&flag);
         let h = spawn_async(async move {
-            cmpth::future::yield_now().await;
+            <DefaultUltSystem as AsyncTaskSystem>::yield_now().await;
             flag2.store(true, Ordering::Release);
             42u32
         });

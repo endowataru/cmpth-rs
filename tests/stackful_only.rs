@@ -65,7 +65,7 @@ fn spawn_nested() {
 #[test]
 fn spawn_panic_propagates() {
     StackfulOnlySystem::run(1, || {
-        let h = cmpth::ult::thread::spawn::<StackfulOnlySystem, (), _>(|| panic!("boom"));
+        let h = StackfulOnlySystem::spawn::<(), _>(|| panic!("boom"));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.join()));
         assert!(result.is_err() || result.unwrap().is_err());
     });
