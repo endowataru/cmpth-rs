@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use cmpth::AsyncTaskSystem;
-use cmpth::ult::thread::spawn_async;
 
 cmpth::ult_async_system! {
     struct AsyncOnlySystem {
@@ -22,7 +21,7 @@ cmpth::ult_async_system! {
 #[test]
 fn spawn_async_await_basic() {
     AsyncOnlySystem::run_async(2, async {
-        let h = spawn_async::<AsyncOnlySystem, _, _, _>(|| async { 6 * 7 }).await;
+        let h = AsyncOnlySystem::spawn(|| async { 6 * 7 }).await;
         assert_eq!(h.await, 42);
     });
 }
@@ -35,7 +34,7 @@ fn spawn_async_many_parallel() {
         let mut handles = Vec::with_capacity(200);
         for i in 0..200u64 {
             let counter = Arc::clone(&counter);
-            let h = spawn_async::<AsyncOnlySystem, _, _, _>(move || async move {
+            let h = AsyncOnlySystem::spawn(move || async move {
                 counter.fetch_add(1, Ordering::Relaxed);
                 i * 2u64
             })
@@ -54,8 +53,8 @@ fn spawn_async_many_parallel() {
 #[test]
 fn spawn_async_nested() {
     AsyncOnlySystem::run_async(2, async {
-        let h = spawn_async::<AsyncOnlySystem, _, _, _>(|| async {
-            let inner = spawn_async::<AsyncOnlySystem, _, _, _>(|| async { 10 }).await;
+        let h = AsyncOnlySystem::spawn(|| async {
+            let inner = AsyncOnlySystem::spawn(|| async { 10 }).await;
             inner.await + 5
         })
         .await;
@@ -66,7 +65,7 @@ fn spawn_async_nested() {
 #[test]
 fn spawn_async_panic_propagates_via_await() {
     AsyncOnlySystem::run_async(1, async {
-        let h = spawn_async::<AsyncOnlySystem, (), _, _>(|| async { panic!("boom") }).await;
+        let h = AsyncOnlySystem::spawn::<(), _, _>(|| async { panic!("boom") }).await;
         let result = std::panic::AssertUnwindSafe(h.await_catch())
             .0
             .await;
@@ -118,7 +117,7 @@ fn async_task_system_yield_now() {
     let flag = Arc::new(AtomicU64::new(0));
     let flag2 = Arc::clone(&flag);
     AsyncOnlySystem::run_async(2, async move {
-        let h = spawn_async::<AsyncOnlySystem, _, _, _>(move || async move {
+        let h = AsyncOnlySystem::spawn(move || async move {
             flag2.store(1, Ordering::Release);
         })
         .await;
