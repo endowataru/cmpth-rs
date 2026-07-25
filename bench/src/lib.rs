@@ -28,6 +28,7 @@
 //! recursive benchmarks.  Use it only in `spawn_overhead` (non-recursive).
 
 use cmpth::JoinHandleLike as _;
+use cmpth::StackfulParallelInvoke as _;
 
 // ---------------------------------------------------------------------------
 // BenchSystem trait
@@ -333,25 +334,29 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// fib_forkjoin — cmpth::fork_join (the experimental rayon-style scheduler)
+// fib_parallel_invoke — cmpth::parallel_invoke (independent rayon-join-like
+// scheduler family)
 // ---------------------------------------------------------------------------
 
-/// Parallel Fibonacci via [`cmpth::fork_join::join`] — cmpth's experimental
-/// rayon-style scheduler (stack-resident jobs, a single-purpose latch, no
-/// `BasicTaskDesc`/pool/`Future` involved at all). Doesn't fit `BenchSystem`
-/// (no `spawn`/`JoinHandle` concept, only scoped `join`) — used directly
-/// with [`run_fib_forkjoin`], same as [`fib_async`]/[`run_fib_async`].
-pub fn fib_forkjoin(n: u64) -> u64 {
+/// Parallel Fibonacci via [`StackfulParallelInvoke::parallel_invoke`] —
+/// cmpth's independent, rayon-`join`-like scheduler (stack-resident jobs, a
+/// single-purpose latch, no `BasicTaskDesc`/pool/`Future` involved at all).
+/// Doesn't fit `BenchSystem` (no `spawn`/`JoinHandle` concept, only scoped
+/// `parallel_invoke`) — used directly with [`run_fib_parallel_invoke`], same
+/// as [`fib_async`]/[`run_fib_async`].
+pub fn fib_parallel_invoke(n: u64) -> u64 {
     if n <= 1 {
         return n;
     }
-    let (a, b) = cmpth::fork_join::join(|| fib_forkjoin(n - 1), || fib_forkjoin(n - 2));
+    let (a, b) =
+        cmpth::ParallelInvokeSystem::parallel_invoke(|| fib_parallel_invoke(n - 1), || fib_parallel_invoke(n - 2));
     a + b
 }
 
-/// Run [`fib_forkjoin`] to completion on `num_workers` and return the result.
-pub fn run_fib_forkjoin(num_workers: usize, n: u64) -> u64 {
-    cmpth::fork_join::run(num_workers, || fib_forkjoin(n))
+/// Run [`fib_parallel_invoke`] to completion on `num_workers` and return the
+/// result.
+pub fn run_fib_parallel_invoke(num_workers: usize, n: u64) -> u64 {
+    cmpth::ParallelInvokeSystem::run(num_workers, || fib_parallel_invoke(n))
 }
 
 /// Count N-Queens solutions for an n×n board.

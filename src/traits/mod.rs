@@ -3,6 +3,7 @@
 pub mod barrier;
 pub mod delegator;
 pub mod lock;
+pub mod scoped;
 pub mod poller;
 pub mod thread_system;
 pub mod ult_system;
@@ -11,6 +12,7 @@ pub mod wait;
 pub use barrier::{BarrierWaitResult, DualBarrier, StackfulBarrier, StacklessBarrier};
 pub use delegator::{Delegator, DelegatorConsumer};
 pub use lock::{DualMutex, StackfulMutex, StacklessMutex};
+pub use scoped::{StackfulParallelInvoke, StacklessParallelInvoke};
 pub use poller::Poller;
 pub use thread_system::{JoinHandleLike, TlsAnchor, TlsSlot, ThreadSystem};
 pub use ult_system::{AsyncWorkerSystem, UltSystem};

@@ -1,16 +1,4 @@
-//! A rayon-style fork-join scheduler: experimental, self-contained, and
-//! deliberately *not* built on the ULT (`SchedulerSystem`/`UltSchedulerSystem`)
-//! machinery in `ult/`.
-//!
-//! Where `spawn`/`spawn_async` represent a task as a separately allocated
-//! [`crate::BasicTaskDesc`] (pooled or arena-backed) with a general
-//! join-protocol (`join_state`/`waker_refs`) that supports sync joiners,
-//! async wakers, and async joiners all at once, [`join`] represents a task
-//! as a plain value on the *caller's own native stack frame*
-//! ([`StackJob`]), with a single-purpose completion flag ([`Latch`]) —
-//! sound only because `join`'s two branches are always waited on by
-//! exactly one, statically-known party (the `join` call itself), never
-//! handed out as a reusable handle.
+//! OS-thread-pool engine backing [`StackfulParallelInvoke`](crate::traits::StackfulParallelInvoke).
 //!
 //! Mirrors `rayon::join`: push the second branch as a stealable [`JobRef`],
 //! run the first branch as an ordinary nested call, then either pop our own
@@ -21,117 +9,23 @@
 //!
 //! # Why this is ~6-7x faster than `spawn`/`spawn_async` on `fib`
 //!
-//! Measured directly: for `fib(34)` (~9.2M `join()` calls), only 12-61 of
-//! them (2-4 workers) ever actually got stolen — under 0.001%. `spawn`'s
-//! child-first design does a real context switch *unconditionally*, on
-//! every call, whether or not the pushed continuation is ever stolen;
-//! `spawn_async` similarly registers every call as a fully-fledged pollable
-//! task. `join` only pays for the deque/latch/help-first machinery on the
-//! handful of calls a steal actually happens to — the other 99.999%+
+//! Measured directly (original `fork_join` prototype, `docs/stackless-perf-investigation.md`):
+//! for `fib(34)` (~9.2M `parallel_invoke()` calls), only 12-61 of them (2-4
+//! workers) ever actually got stolen — under 0.001%. `spawn`'s child-first
+//! design does a real context switch *unconditionally*, on every call,
+//! whether or not the pushed continuation is ever stolen; `spawn_async`
+//! similarly registers every call as a fully-fledged pollable task.
+//! `parallel_invoke` only pays for the deque/latch/help-first machinery on
+//! the handful of calls a steal actually happens to — the other 99.999%+
 //! degrade to two ordinary nested function calls plus one uncontended local
-//! deque push/pop. For a workload this recursion-heavy, that "pay only
-//! when it's real" property dominates over any other difference between
-//! the two designs.
+//! deque push/pop.
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker as Deque};
-use std::cell::{Cell, UnsafeCell};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-// ---------------------------------------------------------------------------
-// Latch — single-purpose completion flag (not the general join_state/
-// waker_refs protocol `ult::desc` uses: `join`'s waiter is always exactly
-// one, known statically, so there is nothing to encode beyond "done yet?").
-// ---------------------------------------------------------------------------
-
-struct Latch(AtomicBool);
-
-impl Latch {
-    fn new() -> Self {
-        Latch(AtomicBool::new(false))
-    }
-    #[inline]
-    fn set(&self) {
-        self.0.store(true, Ordering::Release);
-    }
-    #[inline]
-    fn probe(&self) -> bool {
-        self.0.load(Ordering::Acquire)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// JobRef / StackJob — a stealable reference to a stack-resident job.
-// ---------------------------------------------------------------------------
-
-/// Type-erased, two-word reference to a job living on someone's native
-/// stack frame. Never separately allocated — the analogue of
-/// `SuspendedUlt<D>`, but pointing at a stack value instead of a pooled
-/// descriptor.
-#[derive(Clone, Copy)]
-struct JobRef {
-    data: *const (),
-    execute_fn: unsafe fn(*const ()),
-}
-
-unsafe impl Send for JobRef {}
-
-impl JobRef {
-    #[inline]
-    unsafe fn execute(self) {
-        unsafe { (self.execute_fn)(self.data) }
-    }
-}
-
-/// A `join()` call's second branch. Lives on the caller's own stack; never
-/// pooled, never boxed. `Sync` so a thief on another thread can read
-/// `func`/`result` through `&StackJob` — synchronized entirely by `latch`
-/// (the thief's pre-`set()` writes happen-before the pusher's post-`probe()`
-/// reads, and only one side ever touches `func`/`result` at a time: either
-/// the pusher, inline, if never stolen, or the thief, exclusively, once
-/// `execute` has been dispatched to it).
-struct StackJob<F, R> {
-    latch: Latch,
-    func: UnsafeCell<Option<F>>,
-    result: UnsafeCell<Option<R>>,
-}
-
-unsafe impl<F: Send, R: Send> Sync for StackJob<F, R> {}
-
-impl<F, R> StackJob<F, R>
-where
-    F: FnOnce() -> R + Send,
-    R: Send,
-{
-    fn new(f: F) -> Self {
-        StackJob { latch: Latch::new(), func: UnsafeCell::new(Some(f)), result: UnsafeCell::new(None) }
-    }
-
-    fn as_job_ref(&self) -> JobRef {
-        JobRef { data: self as *const Self as *const (), execute_fn: Self::execute_trampoline }
-    }
-
-    unsafe fn execute_trampoline(this: *const ()) {
-        let this = unsafe { &*(this as *const Self) };
-        let f = unsafe { (*this.func.get()).take() }.expect("cmpth: StackJob executed twice");
-        let r = f();
-        unsafe { *this.result.get() = Some(r) };
-        // Publishes the result write above (Release) — a waiter's Acquire
-        // probe()==true is guaranteed to see it.
-        this.latch.set();
-    }
-
-    /// Run inline: we (the pusher) popped this job back off ourselves,
-    /// unstolen. No latch involved — nobody else could have touched it.
-    fn run_inline(&self) -> R {
-        let f = unsafe { (*self.func.get()).take() }.expect("cmpth: StackJob run twice");
-        f()
-    }
-
-    fn take_result(&self) -> R {
-        unsafe { (*self.result.get()).take() }.expect("cmpth: StackJob latch set without a result")
-    }
-}
+use super::job::{JobRef, StackJob};
 
 // ---------------------------------------------------------------------------
 // Registry / worker context
@@ -155,15 +49,15 @@ thread_local! {
 
 fn current_context() -> &'static WorkerContext {
     let p = CURRENT.with(|c| c.get());
-    assert!(!p.is_null(), "cmpth: fork_join::join called outside fork_join::run");
+    assert!(!p.is_null(), "cmpth: scoped::parallel_invoke called outside scoped::run");
     unsafe { &*p }
 }
 
 /// Try to make progress once: pop our own local job, else steal from
 /// another worker, else check the global injector. Returns `false` if
 /// nothing was found anywhere right now. Shared by the idle worker loop
-/// and `join`'s help-while-waiting loop — the same "what do I do when I
-/// have nothing of my own to run" logic either way.
+/// and `parallel_invoke`'s help-while-waiting loop — the same "what do I do
+/// when I have nothing of my own to run" logic either way.
 fn try_execute_one(wk: &WorkerContext) -> bool {
     if let Some(job) = wk.deque.pop() {
         unsafe { job.execute() };
@@ -196,17 +90,17 @@ fn try_execute_one(wk: &WorkerContext) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// join — the public primitive
+// parallel_invoke — the public primitive
 // ---------------------------------------------------------------------------
 
 /// Work-first fork-join, mirroring `rayon::join`. `a` and `b` are borrowed
 /// only for the duration of this call (both are guaranteed complete before
-/// `join` returns), so — unlike `spawn`/`spawn_async` — neither needs
+/// this returns), so — unlike `spawn`/`spawn_async` — neither needs
 /// `'static`.
 ///
 /// Must be called from within [`run`] (on one of its worker threads,
-/// possibly nested inside another `join`'s `a`/`b`).
-pub fn join<Fa, Fb, Ra, Rb>(a: Fa, b: Fb) -> (Ra, Rb)
+/// possibly nested inside another call's `a`/`b`).
+pub(crate) fn parallel_invoke<Fa, Fb, Ra, Rb>(a: Fa, b: Fb) -> (Ra, Rb)
 where
     Fa: FnOnce() -> Ra + Send,
     Fb: FnOnce() -> Rb + Send,
@@ -228,9 +122,9 @@ where
         }
         popped => {
             // `popped` should only ever be `None` here (properly nested
-            // join() calls always leave the deque exactly as they found
-            // it, aside from `job_b` itself) — but if something else
-            // somehow came back, put it back rather than dropping work.
+            // calls always leave the deque exactly as they found it, aside
+            // from `job_b` itself) — but if something else somehow came
+            // back, put it back rather than dropping work.
             if let Some(other) = popped {
                 wk.deque.push(other);
             }
@@ -252,8 +146,8 @@ where
 
 /// Start `num_workers` OS threads (the calling thread becomes worker 0),
 /// run `f` as the root job, and block until it (and everything it
-/// transitively `join`s) completes.
-pub fn run<F, R>(num_workers: usize, f: F) -> R
+/// transitively `parallel_invoke`s) completes.
+pub(crate) fn run<F, R>(num_workers: usize, f: F) -> R
 where
     F: FnOnce() -> R + Send,
     R: Send,
@@ -300,7 +194,7 @@ where
 
     registry.shutdown.store(true, Ordering::Release);
     for h in handles {
-        h.join().expect("cmpth: fork_join worker thread panicked");
+        h.join().expect("cmpth: parallel_invoke worker thread panicked");
     }
 
     root.take_result()
@@ -314,7 +208,7 @@ mod tests {
         if n <= 1 {
             return n;
         }
-        let (a, b) = join(|| fib(n - 1), || fib(n - 2));
+        let (a, b) = parallel_invoke(|| fib(n - 1), || fib(n - 2));
         a + b
     }
 
@@ -341,7 +235,7 @@ mod tests {
                     return s.first().copied().unwrap_or(0);
                 }
                 let mid = s.len() / 2;
-                let (a, b) = join(|| rec(&s[..mid]), || rec(&s[mid..]));
+                let (a, b) = parallel_invoke(|| rec(&s[..mid]), || rec(&s[mid..]));
                 a + b
             }
             rec(&data)

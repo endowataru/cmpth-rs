@@ -21,10 +21,11 @@ mod os;
 mod spin;
 pub mod future;
 pub mod ult;
-pub mod fork_join;
+pub mod scoped;
 
 pub use context::{CondTransfer, Context, ContextPolicy, NativeContext, Transfer};
-pub use traits::{BarrierWaitResult, DelegatorConsumer, Delegator, DualBarrier, DualMutex, JoinHandleLike, Poller, Resumable, StackfulResumable, TlsAnchor, TlsSlot, ThreadSystem};
+pub use traits::{BarrierWaitResult, DelegatorConsumer, Delegator, DualBarrier, DualMutex, JoinHandleLike, Poller, Resumable, StackfulParallelInvoke, StacklessParallelInvoke, StackfulResumable, TlsAnchor, TlsSlot, ThreadSystem};
+pub use scoped::ParallelInvokeSystem;
 pub use os::{OsBarrier, OsCondvar, OsMutex, OsPoller, OsSystem, OsTls};
 pub use ult::waker::UltPoller;
 pub use ult::deque::{CrossbeamDeque, SpinDeque, WorkerDeque};
