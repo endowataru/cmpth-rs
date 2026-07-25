@@ -136,6 +136,16 @@ Because every `StackfulSystem` is itself a `ThreadSystem`, schedulers
 of ULTs. Nesting doubles as a correctness check for the abstraction
 boundaries — the same code must work at every level.
 
+All three models' traits share one root, `TaskSystem` — the declaration
+that a system provides an efficient (work-stealing) scheduler as its
+execution model. `ThreadSystem` (stackful spawn/join),
+`ScopedStackfulTaskSystem`/`ScopedStacklessTaskSystem` (`parallel_call`),
+and `StacklessTaskSystem` (`spawn_async`/`recurse`) each build on it with
+their own capability. `StackfulTaskSystem`/`StacklessTaskSystem` are
+empty *bundles* on top of those — "everything a complete stackful/
+stackless system offers" as one bound — blanket-derived automatically
+for any system with the right pieces; nothing implements them by hand.
+
 The key internal design, inherited from ComposableThreads: every context
 switch takes a callback that runs *after* the switch, on the destination
 stack.  A suspended task's continuation therefore only comes into existence
@@ -150,11 +160,11 @@ single "pick a system" call site (`main`). The stackless and scoped
 examples take a shortcut and call `MyAsyncSystem`/`ScopedTaskSystem`
 directly throughout, for brevity — fine for a quickstart, but write
 reusable library code the stackful example's way: generic over the trait
-(`S: ThreadSystem`, `S: StackfulSystem`, `S: ScopedStackfulTaskSystem`,
-etc.), never against a concrete system directly. Naming a concrete system
-inside code that isn't itself the "pick a system" call site locks that
-code to one scheduler, defeating the entire point of the trait-based
-composition above:
+(`S: ThreadSystem`, `S: ScopedStackfulTaskSystem`, or `S:
+StackfulTaskSystem` for both together, etc.), never against a concrete
+system directly. Naming a concrete system inside code that isn't itself
+the "pick a system" call site locks that code to one scheduler,
+defeating the entire point of the trait-based composition above:
 
 ```rust
 // Good: generic over the trait, works with any ScopedStackfulTaskSystem system.
