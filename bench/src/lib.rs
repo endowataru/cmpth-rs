@@ -28,7 +28,6 @@
 //! recursive benchmarks.  Use it only in `spawn_overhead` (non-recursive).
 
 use cmpth::JoinHandleLike as _;
-use cmpth::StackfulParallelInvoke as _;
 
 // ---------------------------------------------------------------------------
 // BenchSystem trait
@@ -344,19 +343,24 @@ where
 /// Doesn't fit `BenchSystem` (no `spawn`/`JoinHandle` concept, only scoped
 /// `parallel_invoke`) — used directly with [`run_fib_parallel_invoke`], same
 /// as [`fib_async`]/[`run_fib_async`].
-pub fn fib_parallel_invoke(n: u64) -> u64 {
+///
+/// Generic over `S: StackfulParallelInvoke`, not hardcoded to
+/// `cmpth::ParallelInvokeSystem` — user code must always reach a scheduler
+/// through its trait, never a concrete system type, or it becomes locked to
+/// that one implementation (see the "program against traits" principle in
+/// README.md / CLAUDE.md).
+pub fn fib_parallel_invoke<S: cmpth::StackfulParallelInvoke>(n: u64) -> u64 {
     if n <= 1 {
         return n;
     }
-    let (a, b) =
-        cmpth::ParallelInvokeSystem::parallel_invoke(|| fib_parallel_invoke(n - 1), || fib_parallel_invoke(n - 2));
+    let (a, b) = S::parallel_invoke(|| fib_parallel_invoke::<S>(n - 1), || fib_parallel_invoke::<S>(n - 2));
     a + b
 }
 
 /// Run [`fib_parallel_invoke`] to completion on `num_workers` and return the
 /// result.
-pub fn run_fib_parallel_invoke(num_workers: usize, n: u64) -> u64 {
-    cmpth::ParallelInvokeSystem::run(num_workers, || fib_parallel_invoke(n))
+pub fn run_fib_parallel_invoke<S: cmpth::StackfulParallelInvoke>(num_workers: usize, n: u64) -> u64 {
+    S::run(num_workers, || fib_parallel_invoke::<S>(n))
 }
 
 /// Count N-Queens solutions for an n×n board.
