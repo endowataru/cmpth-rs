@@ -161,7 +161,7 @@ pub trait TlsSlot<T: 'static>: Sync + 'static {
     /// Eagerly resolve whatever one-time internal state this slot needs
     /// (e.g. `OsTls`'s array index) before the hot path ever calls
     /// `get`/`set`/`get_inline`. Called once, single-threaded, at scheduler
-    /// construction (see `Scheduler::new`'s callers in `ult::scheduler`) —
+    /// construction (see `Scheduler::new`'s callers in `resumable::scheduler`) —
     /// well before any worker OS thread starts, so the real first-use
     /// assignment race this guards against in [`get`](Self::get)'s slow
     /// path never actually happens in practice.

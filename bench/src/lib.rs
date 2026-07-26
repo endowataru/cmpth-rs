@@ -295,7 +295,7 @@ pub fn fib<S: BenchSystem>(n: u64) -> u64 {
 /// in contrast, really is held across this future's own suspend points
 /// whenever it doesn't finish synchronously (its subtasks got stolen),
 /// which is exactly the case `async fn` recursion can't express without
-/// heap indirection (E0733) — [`cmpth::ult::thread::recurse`] provides
+/// heap indirection (E0733) — [`cmpth::resumable::stackless::thread::recurse`] provides
 /// that indirection from a per-worker pool instead of `Box::pin`, since
 /// this recursive call is never a schedulable task (only ever awaited by
 /// its immediate caller, right here).

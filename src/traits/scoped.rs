@@ -24,7 +24,7 @@
 //! never uses "fork-join"; `scope`'s does).
 //!
 //! Implemented by [`crate::scoped`], a scheduler family deliberately
-//! independent of [`crate::ult`]'s `SchedulerSystem`/`UltWorker` machinery
+//! independent of [`crate::resumable`]'s `SchedulerSystem`/`UltWorker` machinery
 //! — see that module's docs for why.
 
 use std::future::Future;
@@ -68,8 +68,8 @@ pub trait StackfulParallelInvoke: Sized + Send + Sync + 'static {
 /// binary primitive's stackless flavor safely cancellable.
 ///
 /// Takes **thunks** (`mk_a`/`mk_b`), not already-constructed futures —
-/// same reason [`crate::ult::thread::spawn_async`]/
-/// [`crate::ult::thread::recurse`] do: a directly self-recursive `async fn`
+/// same reason [`crate::resumable::stackless::thread::spawn_async`]/
+/// [`crate::resumable::stackless::thread::recurse`] do: a directly self-recursive `async fn`
 /// (`fib(n) = ...parallel_invoke(fib(n-1), fib(n-2))...`) can't pass its own
 /// opaque return type as a bare generic argument to anything without
 /// hitting E0733, regardless of what the callee does with it internally —

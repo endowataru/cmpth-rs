@@ -45,7 +45,7 @@ use super::job::JobRef;
 // branch may still be running when the pusher wants to wait on it (unlike
 // the sync engine, which only ever busy-polls a bool), so late registration
 // must be race-free against a concurrent `set()`. Same CAS discipline as
-// `ult::desc::WakerTaskDesc::try_register_waker` — check-already-done and
+// `resumable::common::desc::WakerTaskDesc::try_register_waker` — check-already-done and
 // install-the-waiter are one atomic step, so a `set()` that races a
 // `register()` can never be missed.
 // ---------------------------------------------------------------------------

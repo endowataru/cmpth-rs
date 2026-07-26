@@ -9,7 +9,7 @@
 
 use std::time::Instant;
 
-use cmpth::ult::system::UltSystem;
+use cmpth::resumable::stackful::system::UltSystem;
 use cmpth::{JoinHandleLike, ThreadSystem};
 
 cmpth::ult_system! {
