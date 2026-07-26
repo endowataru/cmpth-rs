@@ -1,4 +1,4 @@
-//! OS-thread-pool engine backing [`StackfulParallelInvoke`](crate::traits::StackfulParallelInvoke).
+//! OS-thread-pool engine backing [`ScopedStackfulTaskSystem`](crate::traits::ScopedStackfulTaskSystem).
 //!
 //! Mirrors `rayon::join`: push the second branch as a stealable [`JobRef`],
 //! run the first branch as an ordinary nested call, then either pop our own
@@ -10,12 +10,12 @@
 //! # Why this is ~6-7x faster than `spawn`/`spawn_async` on `fib`
 //!
 //! Measured directly (original `fork_join` prototype, `docs/stackless-perf-investigation.md`):
-//! for `fib(34)` (~9.2M `parallel_invoke()` calls), only 12-61 of them (2-4
+//! for `fib(34)` (~9.2M `parallel_call()` calls), only 12-61 of them (2-4
 //! workers) ever actually got stolen — under 0.001%. `spawn`'s child-first
 //! design does a real context switch *unconditionally*, on every call,
 //! whether or not the pushed continuation is ever stolen; `spawn_async`
 //! similarly registers every call as a fully-fledged pollable task.
-//! `parallel_invoke` only pays for the deque/latch/help-first machinery on
+//! `parallel_call` only pays for the deque/latch/help-first machinery on
 //! the handful of calls a steal actually happens to — the other 99.999%+
 //! degrade to two ordinary nested function calls plus one uncontended local
 //! deque push/pop.
@@ -49,14 +49,30 @@ thread_local! {
 
 fn current_context() -> &'static WorkerContext {
     let p = CURRENT.with(|c| c.get());
-    assert!(!p.is_null(), "cmpth: scoped::parallel_invoke called outside scoped::run");
+    assert!(!p.is_null(), "cmpth: scoped::parallel_call called outside scoped::run");
     unsafe { &*p }
+}
+
+/// Non-panicking counterpart of [`current_context`], for `TaskSystem`'s
+/// `worker_num`/`num_workers` (which must report *something* even when
+/// called from outside a worker, unlike `parallel_call`/`run`).
+fn try_current_context() -> Option<&'static WorkerContext> {
+    let p = CURRENT.with(|c| c.get());
+    if p.is_null() { None } else { Some(unsafe { &*p }) }
+}
+
+pub(crate) fn current_worker_num() -> Option<usize> {
+    try_current_context().map(|wk| wk.index)
+}
+
+pub(crate) fn current_num_workers() -> Option<usize> {
+    try_current_context().map(|wk| wk.registry.stealers.len())
 }
 
 /// Try to make progress once: pop our own local job, else steal from
 /// another worker, else check the global injector. Returns `false` if
 /// nothing was found anywhere right now. Shared by the idle worker loop
-/// and `parallel_invoke`'s help-while-waiting loop — the same "what do I do
+/// and `parallel_call`'s help-while-waiting loop — the same "what do I do
 /// when I have nothing of my own to run" logic either way.
 fn try_execute_one(wk: &WorkerContext) -> bool {
     if let Some(job) = wk.deque.pop() {
@@ -90,7 +106,7 @@ fn try_execute_one(wk: &WorkerContext) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// parallel_invoke — the public primitive
+// parallel_call — the public primitive
 // ---------------------------------------------------------------------------
 
 /// Work-first fork-join, mirroring `rayon::join`. `a` and `b` are borrowed
@@ -100,7 +116,7 @@ fn try_execute_one(wk: &WorkerContext) -> bool {
 ///
 /// Must be called from within [`run`] (on one of its worker threads,
 /// possibly nested inside another call's `a`/`b`).
-pub(crate) fn parallel_invoke<Fa, Fb, Ra, Rb>(a: Fa, b: Fb) -> (Ra, Rb)
+pub(crate) fn parallel_call<Fa, Fb, Ra, Rb>(a: Fa, b: Fb) -> (Ra, Rb)
 where
     Fa: FnOnce() -> Ra + Send,
     Fb: FnOnce() -> Rb + Send,
@@ -146,7 +162,7 @@ where
 
 /// Start `num_workers` OS threads (the calling thread becomes worker 0),
 /// run `f` as the root job, and block until it (and everything it
-/// transitively `parallel_invoke`s) completes.
+/// transitively `parallel_call`s) completes.
 pub(crate) fn run<F, R>(num_workers: usize, f: F) -> R
 where
     F: FnOnce() -> R + Send,
@@ -194,7 +210,7 @@ where
 
     registry.shutdown.store(true, Ordering::Release);
     for h in handles {
-        h.join().expect("cmpth: parallel_invoke worker thread panicked");
+        h.join().expect("cmpth: parallel_call worker thread panicked");
     }
 
     root.take_result()
@@ -208,7 +224,7 @@ mod tests {
         if n <= 1 {
             return n;
         }
-        let (a, b) = parallel_invoke(|| fib(n - 1), || fib(n - 2));
+        let (a, b) = parallel_call(|| fib(n - 1), || fib(n - 2));
         a + b
     }
 
@@ -235,7 +251,7 @@ mod tests {
                     return s.first().copied().unwrap_or(0);
                 }
                 let mid = s.len() / 2;
-                let (a, b) = parallel_invoke(|| rec(&s[..mid]), || rec(&s[mid..]));
+                let (a, b) = parallel_call(|| rec(&s[..mid]), || rec(&s[mid..]));
                 a + b
             }
             rec(&data)

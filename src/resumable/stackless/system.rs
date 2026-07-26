@@ -1,30 +1,32 @@
-//! [`StacklessTaskSystem`] — the blanket-implemented async-task capability
-//! trait, and the [`ult_async_system!`](crate::ult_async_system) macro
-//! that generates a stackless-only system.
+//! The blanket [`StacklessTaskSystem`]/[`ScopedStacklessTaskSystem`] impls
+//! for every async-capable [`SchedulerSystem`], and the
+//! [`ult_async_system!`](crate::ult_async_system) macro that generates a
+//! stackless-only system.
+//!
+//! The trait declarations themselves live in [`crate::traits::system`]/
+//! [`crate::traits::scoped`] (pure interface, no `resumable`-layer types in
+//! their own signatures); this module only supplies the bodies, which is
+//! where naming `SchedulerSystem` and concrete resumable types
+//! (`JoinHandle`, `spawn_async`, `recurse`, `run_async`) is fine.
 
 use std::future::Future;
 
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::stackless::desc::AsyncTaskDesc;
+use crate::traits::scoped::ScopedStacklessTaskSystem;
 
-// `StacklessSystem` now lives in `crate::traits::system` —
-// re-exported below for callers that still spell out
-// `resumable::stackless::system::StacklessSystem`.
-pub use crate::traits::system::StacklessSystem;
+// `StacklessSystem`/`StacklessTaskSystem` now live in `crate::traits::system`
+// — re-exported below for callers that still spell out
+// `resumable::stackless::system::StacklessSystem`/`StacklessTaskSystem`.
+pub use crate::traits::system::{StacklessSystem, StacklessTaskSystem};
 
-/// `S::spawn(...)`/`S::recurse(...)` associated-function form of
-/// [`crate::resumable::stackless::thread::spawn_async`]/[`crate::resumable::stackless::thread::recurse`].
-///
-/// Blanket-implemented for every [`SchedulerSystem`] whose `Desc` supports
-/// async tasks, exactly like [`ThreadSystem`](crate::ThreadSystem)'s blanket derivation from
-/// [`StackfulSystem`](crate::resumable::stackful::system::StackfulSystem) — no concrete system ever writes `impl
-/// StacklessTaskSystem for ...` by hand.
-pub trait StacklessTaskSystem: SchedulerSystem
+impl<S: SchedulerSystem> StacklessTaskSystem for S
 where
-    Self::Desc: AsyncTaskDesc,
+    S::Desc: AsyncTaskDesc,
 {
-    /// See [`crate::resumable::stackless::thread::spawn_async`].
-    fn spawn<T, F, Mk>(mk: Mk) -> crate::resumable::stackless::thread::SpawnAction<Self, T>
+    type SpawnHandle<T: Send + 'static> = crate::resumable::common::thread::JoinHandle<S, T>;
+
+    fn spawn<T, F, Mk>(mk: Mk) -> impl Future<Output = Self::SpawnHandle<T>> + Send
     where
         F: Future<Output = T> + Send + 'static,
         Mk: FnOnce() -> F + Send + 'static,
@@ -33,18 +35,28 @@ where
         crate::resumable::stackless::thread::spawn_async::<Self, T, F, Mk>(mk)
     }
 
-    /// See [`crate::resumable::stackless::thread::recurse`].
-    fn recurse<F, Mk>(mk: Mk) -> crate::resumable::stackless::thread::RecursionFrame<Self, F>
+    fn recurse<F, Mk>(mk: Mk) -> impl Future<Output = F::Output> + Send
     where
-        F: Future,
+        F: Future + Send,
         Mk: FnOnce() -> F,
     {
         crate::resumable::stackless::thread::recurse::<Self, F, Mk>(mk)
     }
+}
 
-    /// See [`crate::resumable::stackless::scheduler::run_async`]. Named `run_async`, not
-    /// `run`, so it never collides with [`StackfulSystem::run`](crate::StackfulSystem::run)
-    /// on a dual system that implements both.
+/// `parallel_call` for a system that already has `StacklessTaskSystem`'s
+/// `spawn`: strictly cheaper capability, satisfied trivially by spawning
+/// one branch and awaiting the other inline — same relationship as
+/// `resumable::stackful::system`'s `ScopedStackfulTaskSystem` blanket. Calls
+/// the same `spawn_async` free function `StacklessTaskSystem::spawn`'s
+/// blanket does directly (rather than going through `S::spawn`) so this
+/// impl doesn't need a `StacklessTaskSystem` bound of its own — the two
+/// blankets are independent, both satisfied by the same `SchedulerSystem +
+/// AsyncTaskDesc` condition.
+impl<S: SchedulerSystem> ScopedStacklessTaskSystem for S
+where
+    S::Desc: AsyncTaskDesc,
+{
     fn run_async<F>(num_workers: usize, root: F)
     where
         F: Future<Output = ()> + Send + 'static,
@@ -52,28 +64,20 @@ where
         crate::resumable::stackless::scheduler::run_async::<Self, F>(num_workers, root)
     }
 
-    /// Yield once to the executor from inside an async task on this system
-    /// — see [`crate::future::yield_now`], which this just forwards to.
-    /// Not generic over `Self` at all (unlike `spawn`/`recurse`/`run_async`):
-    /// provided here purely so generic code bounded by `S: StacklessTaskSystem`
-    /// can write `S::yield_now().await` instead of a separate
-    /// `cmpth::future` import, matching this trait's other methods.
-    ///
-    /// Deliberately shares its name with
-    /// [`ThreadSystem::yield_now`](crate::ThreadSystem::yield_now) (the
-    /// stackful, synchronous, whole-ULT-suspending version) rather than being
-    /// renamed to dodge the collision — on a dual system implementing both
-    /// traits, calling `Concrete::yield_now()` is ambiguous by design (same
-    /// resolution as `spawn` above) and must be disambiguated with
-    /// `<Concrete as StacklessTaskSystem>::yield_now()` /
-    /// `<Concrete as ThreadSystem>::yield_now()`; a generic caller bounded by
-    /// only one of the two traits never sees the ambiguity.
-    fn yield_now() -> impl Future<Output = ()> {
-        crate::future::yield_now()
+    async fn parallel_call<Fa, Fb, Ra, Rb, MkA, MkB>(mk_a: MkA, mk_b: MkB) -> (Ra, Rb)
+    where
+        MkA: FnOnce() -> Fa + Send + 'static,
+        MkB: FnOnce() -> Fb + Send + 'static,
+        Fa: Future<Output = Ra> + Send + 'static,
+        Fb: Future<Output = Rb> + Send + 'static,
+        Ra: Send + 'static,
+        Rb: Send + 'static,
+    {
+        let h = crate::resumable::stackless::thread::spawn_async::<Self, Ra, Fa, MkA>(mk_a).await;
+        let rb = mk_b().await;
+        (h.await, rb)
     }
 }
-
-impl<S: SchedulerSystem> StacklessTaskSystem for S where S::Desc: AsyncTaskDesc {}
 
 // ---------------------------------------------------------------------------
 // ult_async_system! macro
@@ -95,7 +99,7 @@ impl<S: SchedulerSystem> StacklessTaskSystem for S where S::Desc: AsyncTaskDesc 
 ///
 /// ```
 /// use cmpth::SuspendedUlt;
-/// use cmpth::resumable::stackless::system::StacklessTaskSystem;
+/// use cmpth::{ScopedStacklessTaskSystem, StacklessTaskSystem};
 ///
 /// cmpth::ult_async_system! {
 ///     struct MyAsyncSystem {

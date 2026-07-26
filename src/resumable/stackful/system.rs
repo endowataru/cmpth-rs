@@ -8,12 +8,12 @@
 //! # Nesting
 //!
 //! Because the blanket gives every `StackfulSystem` a full `ThreadSystem`, setting
-//! `type Base = DefaultUltSystem` in a second `StackfulSystem` stacks one ULT
+//! `type Base = DualTaskSystem` in a second `StackfulSystem` stacks one ULT
 //! scheduler on top of another without any extra boilerplate:
 //!
 //! ```ignore
 //! cmpth::ult_system! {
-//!     pub struct DefaultUltSystem {
+//!     pub struct DualTaskSystem {
 //!         base:       cmpth::OsSystem,
 //!         context:    cmpth::NativeContext,
 //!         deque:      cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>,
@@ -22,8 +22,8 @@
 //! }
 //!
 //! cmpth::ult_system! {
-//!     pub struct DefaultUltUltSystem {
-//!         base:       DefaultUltSystem,   // runs on ULTs, not OS threads
+//!     pub struct NestedDualTaskSystem {
+//!         base:       DualTaskSystem,   // runs on ULTs, not OS threads
 //!         context:    cmpth::NativeContext,
 //!         deque:      cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>,
 //!         stack_size: 64 * 1024,
@@ -38,11 +38,11 @@ use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::desc::SuspendedUlt;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::stackful::suspended::UltSuspendedThread;
-use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
+use crate::resumable::common::worker::{UltWorker, Worker};
 
 // `StackfulSystem` now lives in `crate::traits::system` — re-exported below
 // for callers that still spell out `resumable::stackful::system::StackfulSystem`.
-pub use crate::traits::system::StackfulSystem;
+pub use crate::traits::system::{StackfulSystem, StackfulTaskSystem};
 
 /// Extends [`SchedulerSystem`] with real-stack context-switch machinery:
 /// context-switch policy, stack allocator, stack size, and the
@@ -115,13 +115,49 @@ where
     type SuspendedThread = S::SuspendedThread;
     type Delegator<C: DelegatorConsumer<Self>> = <S as StackfulSystem>::Delegator<C>;
     type ThreadSpecific<T: 'static> = crate::resumable::stackful::tls::UltTls<S, T>;
+}
 
-    fn num_workers() -> usize {
-        match UltWorker::<S>::current() {
-            Some(wk) => wk.num_workers(),
-            None => 1,
-        }
+// ---------------------------------------------------------------------------
+// Blanket ScopedStackfulTaskSystem/StackfulTaskSystem for every StackfulSystem
+// ---------------------------------------------------------------------------
+
+/// `parallel_call`'s "nothing outlives this call" constraint is strictly
+/// stricter than `spawn`/`join`'s (a spawned task may outlive the caller),
+/// so anything with `ThreadSystem` capability trivially satisfies it too —
+/// spawn `a`, run `b` inline, join. Same shape as
+/// `bench/src/lib.rs`'s `BenchSystem::par_join` default body, which this
+/// predates and mirrors.
+impl<S: StackfulSystem + StackfulSchedulerSystem> crate::traits::scoped::ScopedStackfulTaskSystem for S
+where
+    S::Desc: StackfulTaskDesc + crate::resumable::common::desc::WakerTaskDesc,
+{
+    fn run<F, R>(num_workers: usize, f: F) -> R
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        crate::resumable::stackful::scheduler::run_with_result::<S, F, R>(num_workers, f)
     }
+
+    fn parallel_call<Fa, Fb, Ra, Rb>(a: Fa, b: Fb) -> (Ra, Rb)
+    where
+        Fa: FnOnce() -> Ra + Send + 'static,
+        Fb: FnOnce() -> Rb + Send + 'static,
+        Ra: Send + 'static,
+        Rb: Send + 'static,
+    {
+        let h = <S as ThreadSystem>::spawn(a);
+        let rb = b();
+        (crate::traits::thread_system::JoinHandleLike::join(h), rb)
+    }
+}
+
+/// Empty bundle: everything a `StackfulTaskSystem` needs comes from its two
+/// supertraits, both already blanket-derived above/from `StackfulSystem`
+/// alone.
+impl<S: crate::traits::scoped::ScopedStackfulTaskSystem + ThreadSystem> crate::traits::system::StackfulTaskSystem
+    for S
+{
 }
 
 // ---------------------------------------------------------------------------
@@ -135,7 +171,7 @@ where
 /// implementation is provided automatically by the blanket.
 ///
 /// ```
-/// use cmpth::{ThreadSystem, StackfulSystem, JoinHandleLike};
+/// use cmpth::{ThreadSystem, ScopedStackfulTaskSystem, JoinHandleLike};
 ///
 /// cmpth::ult_system! {
 ///     struct MySystem {
@@ -166,7 +202,7 @@ where
 ///         lookup:      cmpth::SpCurrent,   // worker from the stack pointer
 ///     }
 /// }
-/// # use cmpth::StackfulSystem;
+/// # use cmpth::ScopedStackfulTaskSystem;
 /// # GuardedSystem::run(1, || {});
 /// ```
 #[macro_export]
@@ -257,13 +293,6 @@ macro_rules! ult_system {
             type Barrier         = $crate::resumable::common::sync::DualBarrier<Self, $crate::resumable::stackful::suspended::BasicSuspendedThread<Self>>;
             type Delegator<C: $crate::DelegatorConsumer<Self>> =
                 $crate::resumable::stackful::sync::McsDelegator<Self, C>;
-
-            fn run<F>(num_workers: usize, root: F)
-            where
-                F: FnOnce() + Send + 'static,
-            {
-                $crate::resumable::stackful::scheduler::run::<Self, F>(num_workers, root)
-            }
         }
     };
 }

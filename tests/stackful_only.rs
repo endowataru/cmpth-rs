@@ -9,7 +9,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use cmpth::{JoinHandleLike, ThreadSystem, StackfulSystem};
+use cmpth::{JoinHandleLike, ScopedStackfulTaskSystem, ThreadSystem};
 
 cmpth::ult_system! {
     struct StackfulOnlySystem {

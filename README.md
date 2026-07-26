@@ -32,7 +32,8 @@ for stealing (the Cilk discipline), which keeps the working set depth-first
 and bounds memory.
 
 ```rust
-use cmpth::{DefaultUltSystem, JoinHandleLike as _, StackfulSystem as _, ThreadSystem};
+use cmpth::DualTaskSystem;
+use cmpth::traits::stackful::*; // ThreadSystem, JoinHandleLike, StackfulSystem, ...
 
 fn fib<S: ThreadSystem>(n: u64) -> u64 {
     if n <= 1 { return n; }
@@ -42,14 +43,17 @@ fn fib<S: ThreadSystem>(n: u64) -> u64 {
 }
 
 fn main() {
-    DefaultUltSystem::run(4, || assert_eq!(fib::<DefaultUltSystem>(34), 5_702_887));
+    DualTaskSystem::run(4, || assert_eq!(fib::<DualTaskSystem>(34), 5_702_887));
 }
 ```
 
-`DefaultUltSystem` is cmpth's ready-made stackful system — see
+`DualTaskSystem` is cmpth's ready-made stackful system — see
 [Trait-based components](#trait-based-components-not-monoliths) below for
 why the example calls it through `S: ThreadSystem` rather than naming
-`DefaultUltSystem` inside `fib` itself.
+`DualTaskSystem` inside `fib` itself. `cmpth::traits::stackful::*` /
+`cmpth::traits::stackless::*` pull in every trait for that model in one
+line, so you don't have to track down which single trait a given method
+lives on.
 
 ### Stackless — `spawn_async` / `.await`
 
@@ -57,7 +61,7 @@ A task is a `Future`, driven by polling in place: no stack allocation, no
 context switch per poll.
 
 ```rust
-use cmpth::resumable::stackless::system::StacklessTaskSystem;
+use cmpth::traits::stackless::*;
 
 cmpth::ult_async_system! {
     struct MyAsyncSystem {
@@ -76,23 +80,23 @@ fn main() {
 
 ### Scoped — binary divide-and-conquer
 
-`parallel_invoke` runs two closures, potentially in parallel, and returns
+`parallel_call` runs two closures, potentially in parallel, and returns
 once both finish — like Rayon's `join`. Unlike `spawn`, the caller's own
 continuation is never exposed as stealable work (nothing outlives the
 call), so there's no task descriptor, no pool, and no heap allocation on
 the un-stolen path — the cheapest of the three models.
 
 ```rust
-use cmpth::StackfulParallelInvoke as _;
+use cmpth::ScopedStackfulTaskSystem as _;
 
 fn fib(n: u64) -> u64 {
     if n <= 1 { return n; }
-    let (a, b) = cmpth::ParallelInvokeSystem::parallel_invoke(|| fib(n - 1), || fib(n - 2));
+    let (a, b) = cmpth::ScopedTaskSystem::parallel_call(move || fib(n - 1), move || fib(n - 2));
     a + b
 }
 
 fn main() {
-    let r = cmpth::ParallelInvokeSystem::run(4, || fib(34));
+    let r = cmpth::ScopedTaskSystem::run(4, move || fib(34));
     assert_eq!(r, 5_702_887);
 }
 ```
@@ -141,36 +145,36 @@ flags and spin-wait handshakes throughout the scheduler.
 ### Program against the trait, not the concrete system
 
 The stackful example above already follows this rule: `fib` is generic
-over `S: ThreadSystem`, and `DefaultUltSystem` only ever appears at the
+over `S: ThreadSystem`, and `DualTaskSystem` only ever appears at the
 single "pick a system" call site (`main`). The stackless and scoped
-examples take a shortcut and call `MyAsyncSystem`/`ParallelInvokeSystem`
+examples take a shortcut and call `MyAsyncSystem`/`ScopedTaskSystem`
 directly throughout, for brevity — fine for a quickstart, but write
 reusable library code the stackful example's way: generic over the trait
-(`S: ThreadSystem`, `S: StackfulSystem`, `S: StackfulParallelInvoke`,
+(`S: ThreadSystem`, `S: StackfulSystem`, `S: ScopedStackfulTaskSystem`,
 etc.), never against a concrete system directly. Naming a concrete system
 inside code that isn't itself the "pick a system" call site locks that
 code to one scheduler, defeating the entire point of the trait-based
 composition above:
 
 ```rust
-// Good: generic over the trait, works with any StackfulParallelInvoke system.
-fn fib_good<S: cmpth::StackfulParallelInvoke>(n: u64) -> u64 {
+// Good: generic over the trait, works with any ScopedStackfulTaskSystem system.
+fn fib_good<S: cmpth::ScopedStackfulTaskSystem>(n: u64) -> u64 {
     if n <= 1 { return n; }
-    let (a, b) = S::parallel_invoke(|| fib_good::<S>(n - 1), || fib_good::<S>(n - 2));
+    let (a, b) = S::parallel_call(move || fib_good::<S>(n - 1), move || fib_good::<S>(n - 2));
     a + b
 }
 
 // Bad: hardcodes one scheduler; can't be reused with a different system.
-use cmpth::StackfulParallelInvoke as _;
+use cmpth::ScopedStackfulTaskSystem as _;
 fn fib_bad(n: u64) -> u64 {
     if n <= 1 { return n; }
-    let (a, b) = cmpth::ParallelInvokeSystem::parallel_invoke(|| fib_bad(n - 1), || fib_bad(n - 2));
+    let (a, b) = cmpth::ScopedTaskSystem::parallel_call(move || fib_bad(n - 1), move || fib_bad(n - 2));
     a + b
 }
 ```
 
 The concrete system name should only ever appear at the top-level call
-site that picks which system to run, e.g. `S::run(4, || fib::<S>(34))`
+site that picks which system to run, e.g. `S::run(4, move || fib::<S>(34))`
 invoked with `S = MySystem`.
 
 ## Features
@@ -179,10 +183,10 @@ invoked with `S = MySystem`.
   stackful
 - `spawn_async`: run a `Future` as a task without allocating a stack —
   stackless
-- `parallel_invoke`: binary divide-and-conquer with no task descriptor and
+- `parallel_call`: binary divide-and-conquer with no task descriptor and
   no heap allocation on the un-stolen path — scoped, in both a blocking
-  (`StackfulParallelInvoke`) and an `.await`-based
-  (`StacklessParallelInvoke`) flavor
+  (`ScopedStackfulTaskSystem`) and an `.await`-based
+  (`ScopedStacklessTaskSystem`) flavor
 - `block_on` integration for driving futures from ULT context
 - Mutex, condvar, barrier, and MCS-based delegation primitives, all generic
   over the threading system
