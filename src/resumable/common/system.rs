@@ -5,7 +5,8 @@
 //! [`StacklessTaskSystem`](crate::resumable::stackless::system::StacklessTaskSystem)
 //! (async-task capability).
 
-use crate::traits::thread_system::{TaskSystem, ThreadSystem};
+use crate::traits::common::TaskSystem;
+use crate::traits::stackful::ThreadSystem;
 use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::external_queue::ExternalQueue;
 use crate::resumable::common::desc::{SuspendedUlt, TaskDescAlloc};

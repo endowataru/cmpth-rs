@@ -3,7 +3,7 @@
 //! `stackful::lookup` ([`SpCurrent`](crate::resumable::stackful::lookup::SpCurrent))
 //! and `stackless::lookup` ([`InlineTlsCurrent`](crate::resumable::stackless::lookup::InlineTlsCurrent)).
 
-use crate::traits::thread_system::TlsSlot;
+use crate::traits::common::TlsSlot;
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::worker::UltWorker;
 

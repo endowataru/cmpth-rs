@@ -6,7 +6,7 @@
 //! [`stackful::lookup::SpCurrent`](crate::resumable::stackful::lookup::SpCurrent)'s
 //! stack-pointer trick).
 
-use crate::traits::thread_system::TlsSlot;
+use crate::traits::common::TlsSlot;
 use crate::resumable::common::lookup::{system_id, CurrentLookup};
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::worker::UltWorker;

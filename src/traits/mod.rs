@@ -1,37 +1,22 @@
 //! Interface traits — no implementations live here.
+//!
+//! Organized by calling convention, not by component: [`common`] (shared
+//! by both flavors), [`stackful`] (real-ULT, blocking-call), [`stackless`]
+//! (`spawn_async`, `.await`-based), [`scoped`] (the `parallel_call` family,
+//! which spans both flavors in one file since it's historically its own
+//! independent unit — see that module's docs). A caller working in one
+//! flavor gets everything they need from one bulk import:
+//! `use cmpth::traits::stackful::*;` or `use cmpth::traits::stackless::*;`.
 
-pub mod barrier;
-pub mod delegator;
-pub mod lock;
+pub mod common;
 pub mod scoped;
-pub mod poller;
-pub mod system;
-pub mod thread_system;
-pub mod wait;
+pub mod stackful;
+pub mod stackless;
 
-pub use barrier::{BarrierWaitResult, DualBarrier, StackfulBarrier, StacklessBarrier};
-pub use delegator::{Delegator, DelegatorConsumer};
-pub use lock::{DualMutex, StackfulMutex, StacklessMutex};
+pub use common::{BarrierWaitResult, DualBarrier, DualMutex, Resumable, TaskSystem, TlsAnchor, TlsSlot};
 pub use scoped::{ScopedStackfulTaskSystem, ScopedStacklessTaskSystem};
-pub use poller::Poller;
-pub use system::{StackfulTaskSystem, StacklessTaskSystem};
-pub use thread_system::{JoinHandleLike, TaskSystem, TlsAnchor, TlsSlot, ThreadSystem};
-pub use wait::{Resumable, StackfulResumable, StacklessResumable};
-
-/// Bulk import for stackful (real-ULT, blocking-call) code:
-/// `use cmpth::traits::stackful::*;`.
-pub mod stackful {
-    pub use crate::traits::{
-        Delegator, DelegatorConsumer, JoinHandleLike, Resumable, ScopedStackfulTaskSystem, StackfulBarrier,
-        StackfulMutex, StackfulResumable, StackfulTaskSystem, TaskSystem, ThreadSystem,
-    };
-}
-
-/// Bulk import for stackless (`spawn_async`, `.await`-based) code:
-/// `use cmpth::traits::stackless::*;`.
-pub mod stackless {
-    pub use crate::traits::{
-        Resumable, ScopedStacklessTaskSystem, StacklessBarrier, StacklessMutex, StacklessResumable,
-        StacklessTaskSystem, TaskSystem,
-    };
-}
+pub use stackful::{
+    Delegator, DelegatorConsumer, JoinHandleLike, Poller, StackfulBarrier, StackfulMutex,
+    StackfulResumable, StackfulTaskSystem, ThreadSystem,
+};
+pub use stackless::{StacklessBarrier, StacklessMutex, StacklessResumable, StacklessTaskSystem};

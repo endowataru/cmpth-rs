@@ -1,22 +1,17 @@
-//! The threading-system interface (ComposableThreads' `ult_itf` equivalent).
-//!
-//! [`ThreadSystem`] is the single interface bundle implemented both by the
-//! bottom layer (`OsSystem`) and by every ULT scheduler layered on top of it.
-//! Because the interface is identical at every level, a ULT scheduler can be
-//! nested on top of another ULT scheduler for verification
-//! (`OsSystem` -> `DualTaskSystem` -> `NestedDualTaskSystem`).
+//! Shared root types used by both the stackful and stackless flavors:
+//! [`TaskSystem`], [`Resumable`], [`DualMutex`]/[`DualBarrier`],
+//! [`TlsAnchor`]/[`TlsSlot`].
 
-use std::future::Future;
-use std::pin::pin;
-use std::task::{Poll, RawWaker, RawWakerVTable, Waker};
+use std::sync::atomic::AtomicUsize;
 
-use crate::traits::{Delegator, DelegatorConsumer, Poller, StackfulBarrier, StackfulMutex};
+use crate::traits::stackful::{StackfulBarrier, StackfulMutex};
+use crate::traits::stackless::{StacklessBarrier, StacklessMutex};
 
 /// Declares that a system provides an efficient (work-stealing) scheduler
-/// as its execution model — the shared foundation both [`ThreadSystem`]
-/// (spawn/join) and the `scoped` family
-/// (`ScopedStackfulTaskSystem`/`ScopedStacklessTaskSystem`, in
-/// [`crate::traits::scoped`]) build on: both assume the same efficient
+/// as its execution model — the shared foundation both
+/// [`ThreadSystem`](crate::traits::stackful::ThreadSystem) (spawn/join) and
+/// the `scoped` family (`ScopedStackfulTaskSystem`/`ScopedStacklessTaskSystem`,
+/// in [`crate::traits::scoped`]) build on: both assume the same efficient
 /// scheduling underneath, just expose different capabilities on top of it.
 pub trait TaskSystem: Sized + Send + Sync + 'static {
     /// This worker's own index among its `num_workers()` peers (stable for
@@ -30,76 +25,47 @@ pub trait TaskSystem: Sized + Send + Sync + 'static {
     fn num_workers() -> usize;
 }
 
-/// Threading system interface bundle — swap the entire backend by changing
-/// one type parameter.
-pub trait ThreadSystem: TaskSystem {
-    /// Drives a single `block_on` call; the customisation point for async
-    /// integration.  See [`Poller`].
-    type Poller: Poller;
+/// The durable capability every wait-slot has, regardless of what kind of
+/// waiter (if any) is currently parked: a real ULT continuation, a
+/// registered async [`Waker`](std::task::Waker), or nothing. Unlike
+/// `is_set`'s answer, which changes per instance over time, this trait
+/// itself is a fixed property of the type — same spirit as `Send`/`Sync`.
+pub trait Resumable<S>: Default {
+    /// True if a waiter is currently parked here.
+    fn is_set(&self) -> bool;
 
-    /// Block the current thread/ULT until `future` completes.
-    ///
-    /// On a ULT system this suspends only the calling ULT; the OS thread
-    /// underneath keeps running other tasks.
-    ///
-    /// ```
-    /// use cmpth::ThreadSystem;
-    ///
-    /// cmpth::default::run(2, || {
-    ///     let x = cmpth::DualTaskSystem::block_on(async { 6 * 7 });
-    ///     assert_eq!(x, 42);
-    /// });
-    /// ```
-    ///
-    /// The default implementation drives the future through [`Self::Poller`].
-    fn block_on<F, T>(f: F) -> T
-    where
-        F: Future<Output = T> + Send,
-        T: Send,
-    {
-        let pol = Self::Poller::new();
-        let mut f = pin!(f);
-        loop {
-            match f.as_mut().poll(&mut pol.context()) {
-                Poll::Ready(v) => return v,
-                Poll::Pending => pol.wait(),
-            }
-        }
-    }
-
-    /// Yield the current thread/ULT so other tasks can run.
-    fn yield_now();
-
-    /// Spawn a new thread or ULT; returns a handle that can be joined.
-    type JoinHandle<T: Send + 'static>: JoinHandleLike<T>;
-    fn spawn<T, F>(f: F) -> Self::JoinHandle<T>
-    where
-        F: FnOnce() -> T + Send + 'static,
-        T: Send + 'static;
-
-    /// Mutex type for this system.
-    type Mutex<T: Send>: StackfulMutex<T> + Send + Sync;
-
-    /// Barrier type for this system.
-    type Barrier: StackfulBarrier + Send + Sync;
-
-    /// Parked-continuation handle for this system.
-    type SuspendedThread: Send + Default;
-
-    /// Delegator type for this system.
-    type Delegator<C: DelegatorConsumer<Self>>: Delegator<Self, C>;
-
-    /// Thread-specific storage slot: one `*mut T` per thread (or per ULT) of
-    /// this system.  A nested scheduler stores its per-worker pointer here,
-    /// which is why a single slot per level is enough — everything else is
-    /// reached through the worker pointer.
-    type ThreadSpecific<T: 'static>: TlsSlot<T>;
+    /// Wake whatever is parked here, if anything. Cheap and direct for a
+    /// real ULT continuation; goes through `Waker::wake` only when the slot
+    /// actually holds a registered async waiter.
+    fn notify(&self);
 }
 
-/// Common interface for join handles returned by [`ThreadSystem::spawn`].
-pub trait JoinHandleLike<T: Send + 'static>: Send {
-    fn join(self) -> T;
+/// Return value of [`StackfulBarrier::wait`], mirroring
+/// `std::sync::BarrierWaitResult`.
+pub struct BarrierWaitResult {
+    pub is_leader: bool,
 }
+
+impl BarrierWaitResult {
+    pub fn is_leader(&self) -> bool { self.is_leader }
+}
+
+/// A barrier usable from either calling convention — see [`DualMutex`] for
+/// the same pattern applied to mutexes. The interface owns the name here
+/// too: the concrete generic-over-N type
+/// (`resumable::common::sync::DualBarrier`) is re-exported under an alias
+/// (`UltDualBarrier`) at the crate root to make room.
+pub trait DualBarrier: Sized + Send + Sync + StackfulBarrier + StacklessBarrier {}
+
+impl<M: StackfulBarrier + StacklessBarrier> DualBarrier for M {}
+
+/// A mutex usable from either calling convention. Blanket-derived: any type
+/// implementing both flavors gets this for free, so it exists purely as a
+/// convenience bound for generic code that wants "works either way" as one
+/// name (`S::Mutex: DualMutex<T>`) instead of spelling out both traits.
+pub trait DualMutex<T: Send>: StackfulMutex<T> + StacklessMutex<T> {}
+
+impl<T: Send, M: StackfulMutex<T> + StacklessMutex<T>> DualMutex<T> for M {}
 
 /// The untyped storage behind a [`TlsSlot`]: a lazily assigned slot index.
 ///
@@ -117,7 +83,7 @@ pub trait JoinHandleLike<T: Send + 'static>: Send {
 /// }
 /// ```
 pub struct TlsAnchor {
-    pub(crate) index: std::sync::atomic::AtomicUsize,
+    pub(crate) index: AtomicUsize,
 }
 
 /// Sentinel for [`TlsAnchor::index`]: no slot assigned yet.
@@ -125,7 +91,7 @@ pub(crate) const TLS_ANCHOR_UNASSIGNED: usize = usize::MAX;
 
 impl TlsAnchor {
     pub const fn new() -> Self {
-        TlsAnchor { index: std::sync::atomic::AtomicUsize::new(TLS_ANCHOR_UNASSIGNED) }
+        TlsAnchor { index: AtomicUsize::new(TLS_ANCHOR_UNASSIGNED) }
     }
 }
 
@@ -185,16 +151,4 @@ pub trait TlsSlot<T: 'static>: Sync + 'static {
     /// hot path (e.g. `UltTls`, used far less often than a `spawn`/`join`
     /// hot loop) don't need to override this.
     fn warm_up(&self) {}
-}
-
-// ---------------------------------------------------------------------------
-// Shared no-op waker (used by OsPoller and UltPoller fallback)
-// ---------------------------------------------------------------------------
-
-/// A waker whose `wake()` is a no-op.  Used for busy-polling fallbacks where
-/// the poll loop drives re-polling itself (via `yield_now`).
-pub(crate) fn noop_waker() -> Waker {
-    static VTABLE: RawWakerVTable =
-        RawWakerVTable::new(|p| RawWaker::new(p, &VTABLE), |_| {}, |_| {}, |_| {});
-    unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
 }

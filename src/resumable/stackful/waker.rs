@@ -39,7 +39,7 @@ use std::sync::atomic::Ordering;
 use std::task::{Context, RawWaker, RawWakerVTable, Waker};
 
 use crate::traits::Poller;
-use crate::traits::thread_system::{noop_waker, ThreadSystem};
+use crate::traits::stackful::{noop_waker, ThreadSystem};
 use crate::resumable::common::desc::{WakeOutcome, WakerTaskDesc};
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::system::SchedulerSystem;
