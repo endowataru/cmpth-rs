@@ -50,7 +50,8 @@ pub trait SchedulerSystem: Sized + Send + Sync + 'static {
     /// `SchedulerSystem` (even stackful-only ones that never call
     /// `spawn_async`) purely so the type is nameable uniformly; an unused
     /// `AsyncPool` costs nothing beyond declaring it, matching the existing
-    /// precedent of stackless-only systems declaring an unused [`Pool`].
+    /// precedent of stackless-only systems declaring an unused
+    /// [`Pool`](Self::Pool).
     type AsyncPool: DescPool<Self::Desc>;
 
     /// Fixed slot size for [`AsyncPool`](Self::AsyncPool). Futures that fit

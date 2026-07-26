@@ -382,9 +382,9 @@ where
 
 /// Wrap a recursive async call's future, avoiding a `Box::pin` heap
 /// allocation. Storage comes from a per-worker free list keyed by size
-/// (see [`UltWorker::recursion_pool_take`]) instead of the global
-/// allocator, falling back to a raw allocation when called outside a
-/// worker.
+/// (see `Scheduler::recursion_pool`, reached via `wk.shared()`) instead of
+/// the global allocator, falling back to a raw allocation when called
+/// outside a worker.
 ///
 /// An `async fn` cannot directly recurse — the call `f(n - 1).await`
 /// inside `f`'s own body would need `f`'s state machine to embed another
