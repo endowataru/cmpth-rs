@@ -142,8 +142,9 @@ where
 // `impl SchedulerSystem`/`impl StackfulSchedulerSystem` block calls exactly one
 // of these from its own `execute`/`pop_or_root` method. No specialization is
 // involved — every concrete marker struct (DualTaskSystem, a
-// stackful-only `ult_system!` struct, ...) gets exactly one such `impl`
-// block, so this is ordinary static dispatch, monomorphized per system.
+// stackful-only `UltIdentity` implementor, ...) gets exactly one such
+// `impl` block, so this is ordinary static dispatch, monomorphized per
+// system.
 // ---------------------------------------------------------------------------
 
 /// `execute` body for stackful-only systems: `cont` is always a real ULT

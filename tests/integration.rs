@@ -682,29 +682,37 @@ fn float_regs_survive_yield() {
 // ArenaStack + SpCurrent configuration
 // ---------------------------------------------------------------------------
 
-cmpth::ult_system! {
-    /// Arena-allocated stacks + stack-pointer worker lookup.
-    pub struct ArenaUltSystem {
-        base:        OsSystem,
-        context:     NativeContext,
-        deque:       CrossbeamDeque<BasicTaskDesc>,
-        stack_size:  64 * 1024,
-        stack_alloc: cmpth::ArenaStack,
-        lookup:      cmpth::SpCurrent,
+/// Arena-allocated stacks + stack-pointer worker lookup.
+pub struct ArenaUltSystem;
+
+impl cmpth::UltIdentity for ArenaUltSystem {
+    type Base = OsSystem;
+    type Ctx = NativeContext;
+    type Deque = CrossbeamDeque<BasicTaskDesc>;
+    type Alloc = cmpth::ArenaStack;
+    type Lookup = cmpth::SpCurrent;
+
+    fn worker_tls_anchor() -> &'static <OsSystem as ThreadSystem>::ThreadSpecific<UltWorker<Self>> {
+        static A: TlsAnchor = TlsAnchor::new();
+        TlsSlot::from_anchor(&A)
     }
 }
 
-cmpth::ult_system! {
-    /// Nested on top of the arena system: exercises the system_id-mismatch
-    /// fallback in SpCurrent (an inner ULT's stack must not be mistaken for
-    /// an outer one).
-    pub struct ArenaUltUltSystem {
-        base:        ArenaUltSystem,
-        context:     NativeContext,
-        deque:       CrossbeamDeque<BasicTaskDesc>,
-        stack_size:  64 * 1024,
-        stack_alloc: cmpth::ArenaStack,
-        lookup:      cmpth::SpCurrent,
+/// Nested on top of the arena system: exercises the system_id-mismatch
+/// fallback in SpCurrent (an inner ULT's stack must not be mistaken for
+/// an outer one).
+pub struct ArenaUltUltSystem;
+
+impl cmpth::UltIdentity for ArenaUltUltSystem {
+    type Base = ArenaUltSystem;
+    type Ctx = NativeContext;
+    type Deque = CrossbeamDeque<BasicTaskDesc>;
+    type Alloc = cmpth::ArenaStack;
+    type Lookup = cmpth::SpCurrent;
+
+    fn worker_tls_anchor() -> &'static <ArenaUltSystem as ThreadSystem>::ThreadSpecific<UltWorker<Self>> {
+        static A: TlsAnchor = TlsAnchor::new();
+        TlsSlot::from_anchor(&A)
     }
 }
 
@@ -783,14 +791,15 @@ fn arena_external_block_on() {
 }
 
 // ---------------------------------------------------------------------------
-// ThreadSystem implemented by hand (no ult_system! macro)
+// ThreadSystem implemented by hand (no UltIdentity blanket)
 // ---------------------------------------------------------------------------
 
-/// The ult_system! macro is convenience, not architecture: everything it
-/// generates can be written as a plain trait impl.  The only part that
-/// cannot be defaulted away on stable Rust is the per-system TLS static
-/// (generic statics do not exist; a static inside a default trait method
-/// would be shared across ALL systems, breaking nested schedulers).
+/// `UltIdentity`'s blanket impl is convenience, not architecture: everything
+/// it generates can be written as a plain trait impl, as this does. The
+/// only part that cannot be defaulted away on stable Rust is the
+/// per-system TLS static (generic statics do not exist; a static inside a
+/// default trait method would be shared across ALL systems, breaking
+/// nested schedulers).
 struct ManualSystem;
 
 impl cmpth::SchedulerSystem for ManualSystem {

@@ -71,7 +71,8 @@ impl<T: Send, M: StackfulMutex<T> + StacklessMutex<T>> DualMutex<T> for M {}
 ///
 /// Statics inside associated functions cannot mention `Self` or generic
 /// parameters, which is what forces per-system TLS slots to be spelled out
-/// concretely (by hand or by the `ult_system!` macro).  `TlsAnchor` breaks
+/// concretely (by hand, or in each concrete `UltIdentity`/`UltAsyncIdentity`
+/// implementor's own `worker_tls_anchor`).  `TlsAnchor` breaks
 /// that constraint: the static is untyped, and [`TlsSlot::from_anchor`]
 /// views it as the typed slot.  `worker_tls` then becomes the same two
 /// lines for every system:

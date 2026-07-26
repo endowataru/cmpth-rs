@@ -59,14 +59,18 @@ mod tests {
     use crate::ThreadSystem;
     use crate::ScopedStackfulTaskSystem;
 
-    crate::ult_system! {
-        struct SpTestSystem {
-            base:        crate::OsSystem,
-            context:     crate::NativeContext,
-            deque:       crate::CrossbeamDeque<crate::BasicTaskDesc>,
-            stack_size:  64 * 1024,
-            stack_alloc: crate::ArenaStack,
-            lookup:      crate::SpCurrent,
+    struct SpTestSystem;
+
+    impl crate::UltIdentity for SpTestSystem {
+        type Base = crate::OsSystem;
+        type Ctx = crate::NativeContext;
+        type Deque = crate::CrossbeamDeque<crate::BasicTaskDesc>;
+        type Alloc = crate::ArenaStack;
+        type Lookup = crate::SpCurrent;
+
+        fn worker_tls_anchor() -> &'static <crate::OsSystem as ThreadSystem>::ThreadSpecific<crate::UltWorker<Self>> {
+            static A: crate::TlsAnchor = crate::TlsAnchor::new();
+            crate::TlsSlot::from_anchor(&A)
         }
     }
 
