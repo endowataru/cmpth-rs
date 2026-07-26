@@ -9,30 +9,30 @@ use std::sync::Arc;
 
 use cmpth::default::*;
 use cmpth::resumable::stackful::sync::mcs_delegator::McsQueue;
-use cmpth::{delegator, BasicSuspendedThread, DualTaskSystem, DelegatorConsumer};
+use cmpth::{delegator, BasicSuspendedThread, DefaultDualTaskSystem, DelegatorConsumer};
 
 #[derive(Default)]
 struct AddWork {
     amount: u64,
-    sth: BasicSuspendedThread<DualTaskSystem>,
+    sth: BasicSuspendedThread<DefaultDualTaskSystem>,
 }
 
 struct Counter {
     total: Arc<AtomicU64>,
 }
 
-impl DelegatorConsumer<DualTaskSystem> for Counter {
+impl DelegatorConsumer<DefaultDualTaskSystem> for Counter {
     type Work = AddWork;
 
     fn execute(
         &mut self,
         work: &mut AddWork,
-    ) -> (bool, Option<BasicSuspendedThread<DualTaskSystem>>) {
+    ) -> (bool, Option<BasicSuspendedThread<DefaultDualTaskSystem>>) {
         self.total.fetch_add(work.amount, Ordering::SeqCst);
         (true, Some(std::mem::take(&mut work.sth)))
     }
 
-    fn progress(&mut self) -> Option<BasicSuspendedThread<DualTaskSystem>> {
+    fn progress(&mut self) -> Option<BasicSuspendedThread<DefaultDualTaskSystem>> {
         None
     }
 
@@ -42,9 +42,9 @@ impl DelegatorConsumer<DualTaskSystem> for Counter {
 }
 
 type TestProducer = cmpth::DelegatorProducer<
-    DualTaskSystem,
+    DefaultDualTaskSystem,
     Counter,
-    McsQueue<DualTaskSystem, Counter>,
+    McsQueue<DefaultDualTaskSystem, Counter>,
 >;
 
 #[test]

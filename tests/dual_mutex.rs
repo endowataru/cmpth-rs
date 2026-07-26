@@ -6,12 +6,12 @@ use std::sync::Arc;
 
 use cmpth::default::*;
 use cmpth::traits::{StackfulMutex, StacklessMutex};
-use cmpth::{BasicSuspendedThread, DualTaskSystem, SuspendedFuture, SuspendedTask, ThreadSystem, UltDualMutex};
+use cmpth::{BasicSuspendedThread, DefaultDualTaskSystem, SuspendedFuture, SuspendedTask, ThreadSystem, UltDualMutex};
 
 #[test]
 fn sync_only_flavor() {
     run(4, || {
-        let m: Arc<UltDualMutex<DualTaskSystem, u64, BasicSuspendedThread<DualTaskSystem>>> =
+        let m: Arc<UltDualMutex<DefaultDualTaskSystem, u64, BasicSuspendedThread<DefaultDualTaskSystem>>> =
             Arc::new(UltDualMutex::new(0));
         let handles: Vec<_> = (0..8)
             .map(|_| {
@@ -41,7 +41,7 @@ fn async_only_flavor() {
     // parallel scheduling; keep the contention high so a regression is
     // caught quickly again rather than passing by luck.
     run(4, || {
-        let m: Arc<UltDualMutex<DualTaskSystem, u64, SuspendedFuture<DualTaskSystem>>> =
+        let m: Arc<UltDualMutex<DefaultDualTaskSystem, u64, SuspendedFuture<DefaultDualTaskSystem>>> =
             Arc::new(UltDualMutex::new(0));
         let handles: Vec<_> = (0..32)
             .map(|_| {
@@ -56,7 +56,7 @@ fn async_only_flavor() {
         for h in handles {
             h.join().unwrap();
         }
-        let total = DualTaskSystem::block_on(async { *StacklessMutex::lock(&*m).await });
+        let total = DefaultDualTaskSystem::block_on(async { *StacklessMutex::lock(&*m).await });
         assert_eq!(total, 32 * 200);
     });
 }
@@ -69,7 +69,7 @@ fn dual_flavor_from_both_sync_and_async() {
     // SuspendedTask implements both StackfulResumable and StacklessResumable, so
     // `.lock()` alone would be ambiguous if both traits were `use`d.
     run(4, || {
-        let m: Arc<UltDualMutex<DualTaskSystem, u64, SuspendedTask<DualTaskSystem>>> =
+        let m: Arc<UltDualMutex<DefaultDualTaskSystem, u64, SuspendedTask<DefaultDualTaskSystem>>> =
             Arc::new(UltDualMutex::new(0));
 
         let sync_handles: Vec<_> = (0..16)
@@ -116,7 +116,7 @@ fn sync_wait_from_inside_async_poll_panics_cleanly() {
     use cmpth::traits::StackfulResumable;
     run(1, || {
         let h = spawn_async(async {
-            let slot: SuspendedTask<DualTaskSystem> = Default::default();
+            let slot: SuspendedTask<DefaultDualTaskSystem> = Default::default();
             // Misuse: this must panic, not attempt a real context switch on
             // top of run_async_poll's shared stack.
             StackfulResumable::wait_with(&slot, || {});

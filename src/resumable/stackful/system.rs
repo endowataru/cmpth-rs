@@ -11,11 +11,11 @@
 //! any extra boilerplate:
 //!
 //! ```ignore
-//! pub struct DualTaskSystem;
-//! impl cmpth::UltIdentity for DualTaskSystem { type Base = cmpth::OsSystem; ... }
+//! pub struct DefaultDualTaskSystem;
+//! impl cmpth::UltIdentity for DefaultDualTaskSystem { type Base = cmpth::OsSystem; ... }
 //!
-//! pub struct NestedDualTaskSystem;
-//! impl cmpth::UltIdentity for NestedDualTaskSystem { type Base = DualTaskSystem; ... }
+//! pub struct DefaultNestedDualTaskSystem;
+//! impl cmpth::UltIdentity for DefaultNestedDualTaskSystem { type Base = DefaultDualTaskSystem; ... }
 //! ```
 
 use crate::context::ContextPolicy;

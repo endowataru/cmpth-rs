@@ -66,12 +66,12 @@ fn measure_stackful_switch(iters: u64) -> f64 {
         let counter2 = Arc::clone(&counter);
         let h = cmpth::default::spawn(move || {
             while counter2.load(Ordering::Relaxed) < iters {
-                cmpth::DualTaskSystem::yield_now();
+                cmpth::DefaultDualTaskSystem::yield_now();
             }
         });
         while counter.load(Ordering::Relaxed) < iters {
             counter.fetch_add(1, Ordering::Relaxed);
-            cmpth::DualTaskSystem::yield_now();
+            cmpth::DefaultDualTaskSystem::yield_now();
         }
         h.join().unwrap();
     });

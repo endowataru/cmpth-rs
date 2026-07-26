@@ -24,7 +24,7 @@ use std::task::Poll;
 /// use cmpth::ThreadSystem;
 ///
 /// cmpth::default::run(2, || {
-///     cmpth::DualTaskSystem::block_on(async {
+///     cmpth::DefaultDualTaskSystem::block_on(async {
 ///         cmpth::future::yield_now().await;
 ///     });
 /// });

@@ -411,7 +411,7 @@ where
 ///
 /// ```
 /// # use cmpth::resumable::stackless::thread::{recurse, spawn_async};
-/// # use cmpth::NestedDualTaskSystem as S;
+/// # use cmpth::DefaultNestedDualTaskSystem as S;
 /// fn fib(n: u64) -> impl std::future::Future<Output = u64> + Send {
 ///     async move {
 ///         if n <= 1 { return n; }

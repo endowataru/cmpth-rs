@@ -34,7 +34,7 @@ pub trait ThreadSystem: TaskSystem {
     /// use cmpth::ThreadSystem;
     ///
     /// cmpth::default::run(2, || {
-    ///     let x = cmpth::DualTaskSystem::block_on(async { 6 * 7 });
+    ///     let x = cmpth::DefaultDualTaskSystem::block_on(async { 6 * 7 });
     ///     assert_eq!(x, 42);
     /// });
     /// ```
@@ -254,7 +254,7 @@ pub trait StackfulResumable<S>: Resumable<S> {
 /// (rather than just writing `S: ScopedStackfulTaskSystem + ThreadSystem`
 /// at every call site) since it may grow members of its own later.
 ///
-/// There is no `DualTaskSystem` trait: a concrete system implementing both
+/// There is no `DefaultDualTaskSystem` trait: a concrete system implementing both
 /// this and [`StacklessTaskSystem`](crate::traits::stackless::StacklessTaskSystem)
 /// simply *is* dual, no separate marker needed.
 pub trait StackfulTaskSystem: ScopedStackfulTaskSystem + ThreadSystem {}
