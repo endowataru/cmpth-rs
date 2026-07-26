@@ -12,7 +12,7 @@
 //!
 //! Deliberately *not* built on [`crate::resumable`]'s `SchedulerSystem`/
 //! `UltWorker` machinery: a `parallel_call` branch is represented as a
-//! plain value on the caller's own native stack frame ([`job::JobRef`]),
+//! plain value on the caller's own native stack frame (`job::JobRef`),
 //! with a single-purpose completion latch, not a separately allocated,
 //! pooled task descriptor with a general join-protocol. That's what makes
 //! the common (unstolen) path cheap — see
@@ -22,11 +22,11 @@
 //! actually get stolen ever pay for deque/latch/help-first machinery at
 //! all).
 //!
-//! Two independent engines share [`job::JobRef`]'s stack-resident,
+//! Two independent engines share `job::JobRef`'s stack-resident,
 //! type-erased job representation:
-//! - [`sync_engine`] — OS threads, blocking `parallel_call`, mirrors the
+//! - `sync_engine` — OS threads, blocking `parallel_call`, mirrors the
 //!   original `fork_join.rs` almost exactly.
-//! - [`async_engine`] — OS threads that poll [`Future`](std::future::Future)
+//! - `async_engine` — OS threads that poll [`Future`]
 //!   bodies instead of calling plain closures; `parallel_call` itself
 //!   returns a future that only blocks its *own* worker thread while
 //!   driving the un-stolen fast path (same "pay only when it's real"

@@ -1,7 +1,7 @@
 //! Stackful thread functions: fork (child-first and parent-first), exit,
 //! blocking `.join()`. See
 //! [`common::thread`](crate::resumable::common::thread) for the shared
-//! [`JoinHandle`](crate::resumable::common::thread::JoinHandle) type both
+//! [`JoinHandle`] type both
 //! this and [`stackless::thread`](crate::resumable::stackless::thread)
 //! produce.
 

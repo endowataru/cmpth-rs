@@ -1,12 +1,12 @@
 //! `spawn_async`/`recurse` task storage: [`AsyncArenaStack`], the
-//! [`AsyncTaskArenaKind`] instantiation of the generic arena mechanism in
+//! `AsyncTaskArenaKind` instantiation of the generic arena mechanism in
 //! [`common::stack`](crate::resumable::common::stack) — see that module's
 //! docs for the shared machinery and cell layout this builds on, and
 //! [`crate::resumable::common::pool`] for how this storage is pooled.
 //!
 //! Same mechanism as
 //! [`stackful::stack::ArenaStack`](crate::resumable::stackful::stack::ArenaStack),
-//! but keyed by its own [`ArenaKind`] so its stride (sized for small
+//! but keyed by its own `ArenaKind` so its stride (sized for small
 //! `Future` payloads) can never collide with a stackful system's (much
 //! larger) `STACK_SIZE`.
 

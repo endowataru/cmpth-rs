@@ -39,10 +39,10 @@
 //! *both* `block_on` (stackful, via
 //! [`stackful::waker::UltPoller`](crate::resumable::stackful::waker::UltPoller))
 //! and `spawn_async` (stackless, via
-//! [`stackless::worker::run_async_poll`](crate::resumable::stackless::worker::run_async_poll)).
-//! [`StackfulTaskDesc`](crate::resumable::stackful::desc::StackfulTaskDesc)
+//! `stackless::worker::run_async_poll`).
+//! [`StackfulTaskDesc`]
 //! (real saved-context handling) and
-//! [`AsyncTaskDesc`](crate::resumable::stackless::desc::AsyncTaskDesc)
+//! [`AsyncTaskDesc`]
 //! (`poll_fn`) are the two genuinely flavor-specific extension traits, split
 //! out to `stackful::desc`/`stackless::desc`.
 //!
@@ -433,7 +433,7 @@ pub trait TaskDescAlloc: TaskDesc + Sized {
 /// [`std::task::Waker`] — both `block_on` (polling an arbitrary `Future`
 /// from a real ULT) and `spawn_async` tasks need this `waker_refs` state
 /// machine; `spawn_async` additionally needs
-/// [`AsyncTaskDesc`](crate::resumable::stackless::desc::AsyncTaskDesc) on
+/// [`AsyncTaskDesc`] on
 /// top for its `poll_fn` task representation. Kept separate from
 /// `AsyncTaskDesc` so that `ThreadSystem::block_on` (and anything generic
 /// over `S: ThreadSystem`, like `DelegatorConsumer`) doesn't drag in

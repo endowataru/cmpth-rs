@@ -43,7 +43,7 @@ use crate::resumable::common::stack::{HeapStack, StackAlloc};
 /// case: a request that fits the pool's configured slot size is served from
 /// the free list exactly as before; an oversized request bypasses the free
 /// list entirely with a one-off allocation (see
-/// [`TaskDesc::oversized`](crate::resumable::common::desc::TaskDesc::oversized)), and
+/// [`TaskDesc::oversized`]), and
 /// `dealloc` frees it directly instead of returning it to the pool. Fixed
 /// stack-size ULT callers (`spawn`) simply pass the same size every time, so
 /// this never affects them today — but it also means a future per-task
@@ -476,8 +476,8 @@ struct BlockHeader {
 
 /// [`StaticPool`] backed by the exact free-list mechanism [`ReturnPool`]
 /// uses for descriptors (`con_local`/`con_remote`/`pro_arrays`, batched
-/// cross-worker returns under a spinlock) — reusing [`WorkerEntry`]/
-/// [`ProList`] directly, just instantiated with [`BlockHeader`] instead of
+/// cross-worker returns under a spinlock) — reusing `WorkerEntry`/
+/// `ProList` directly, just instantiated with `BlockHeader` instead of
 /// a `D: TaskDescAlloc`. Each returned block is `header_layout.extend(payload_layout)`
 /// bytes; the header stays hidden before the pointer callers see.
 pub struct BlockPool<const THRESHOLD: usize = 16> {
