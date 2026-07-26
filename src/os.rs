@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Context;
 
 use crate::traits::{BarrierWaitResult, Delegator, DelegatorConsumer, StackfulBarrier, StackfulMutex, Poller};
-use crate::traits::thread_system::{JoinHandleLike, TaskSystem, TlsSlot, ThreadSystem, noop_waker};
+use crate::traits::common::{TaskSystem, TlsSlot};
+use crate::traits::stackful::{JoinHandleLike, ThreadSystem, noop_waker};
 
 // ---------------------------------------------------------------------------
 // OsPoller — busy-polling Poller for OsSystem
@@ -107,7 +108,7 @@ static NEXT_OS_TLS_SLOT: AtomicUsize = AtomicUsize::new(0);
 
 #[repr(transparent)]
 pub struct OsTls<T> {
-    anchor: crate::traits::thread_system::TlsAnchor,
+    anchor: crate::traits::common::TlsAnchor,
     _marker: PhantomData<fn(T) -> T>,
 }
 
@@ -120,7 +121,7 @@ impl<T> Default for OsTls<T> {
 impl<T> OsTls<T> {
     pub const fn new() -> Self {
         OsTls {
-            anchor: crate::traits::thread_system::TlsAnchor::new(),
+            anchor: crate::traits::common::TlsAnchor::new(),
             _marker: PhantomData,
         }
     }
@@ -132,7 +133,7 @@ impl<T> OsTls<T> {
     #[inline]
     fn slot(&self) -> usize {
         let s = self.anchor.index.load(Ordering::Relaxed);
-        if s != crate::traits::thread_system::TLS_ANCHOR_UNASSIGNED {
+        if s != crate::traits::common::TLS_ANCHOR_UNASSIGNED {
             s
         } else {
             self.assign_slot()
@@ -151,7 +152,7 @@ impl<T> OsTls<T> {
     fn assign_slot(&self) -> usize {
         loop {
             let cur = self.anchor.index.load(Ordering::Relaxed);
-            if cur != crate::traits::thread_system::TLS_ANCHOR_UNASSIGNED {
+            if cur != crate::traits::common::TLS_ANCHOR_UNASSIGNED {
                 return cur;
             }
             let candidate = NEXT_OS_TLS_SLOT.fetch_add(1, Ordering::Relaxed);
@@ -160,7 +161,7 @@ impl<T> OsTls<T> {
                 .anchor
                 .index
                 .compare_exchange(
-                    crate::traits::thread_system::TLS_ANCHOR_UNASSIGNED,
+                    crate::traits::common::TLS_ANCHOR_UNASSIGNED,
                     candidate,
                     Ordering::Relaxed,
                     Ordering::Relaxed,
@@ -176,7 +177,7 @@ impl<T> OsTls<T> {
 impl<T: 'static> TlsSlot<T> for OsTls<T> {
     const INIT: Self = OsTls::new();
 
-    fn from_anchor(anchor: &'static crate::traits::thread_system::TlsAnchor) -> &'static Self {
+    fn from_anchor(anchor: &'static crate::traits::common::TlsAnchor) -> &'static Self {
         // Sound: repr(transparent) over TlsAnchor (PhantomData is a ZST).
         unsafe { &*(anchor as *const _ as *const Self) }
     }

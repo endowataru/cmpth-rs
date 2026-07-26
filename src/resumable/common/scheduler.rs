@@ -6,7 +6,8 @@
 use std::alloc::Layout;
 use std::sync::atomic::Ordering;
 
-use crate::traits::thread_system::{ThreadSystem, TlsSlot};
+use crate::traits::common::TlsSlot;
+use crate::traits::stackful::ThreadSystem;
 use crate::resumable::common::external_queue::ExternalQueue;
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};

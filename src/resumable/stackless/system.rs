@@ -3,7 +3,7 @@
 //! [`ult_async_system!`](crate::ult_async_system) macro that generates a
 //! stackless-only system.
 //!
-//! The trait declarations themselves live in [`crate::traits::system`]/
+//! The trait declarations themselves live in [`crate::traits::stackless`]/
 //! [`crate::traits::scoped`] (pure interface, no `resumable`-layer types in
 //! their own signatures); this module only supplies the bodies, which is
 //! where naming `SchedulerSystem` and concrete resumable types
@@ -15,10 +15,10 @@ use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::stackless::desc::AsyncTaskDesc;
 use crate::traits::scoped::ScopedStacklessTaskSystem;
 
-// `StacklessTaskSystem` now lives in `crate::traits::system` — re-exported
-// below for callers that still spell out
+// `StacklessTaskSystem` now lives in `crate::traits::stackless` —
+// re-exported below for callers that still spell out
 // `resumable::stackless::system::StacklessTaskSystem`.
-pub use crate::traits::system::StacklessTaskSystem;
+pub use crate::traits::stackless::StacklessTaskSystem;
 
 impl<S: SchedulerSystem> StacklessTaskSystem for S
 where

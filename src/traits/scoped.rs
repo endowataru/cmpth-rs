@@ -18,7 +18,7 @@
 //! spawn/join (whose spawned task may outlive the caller) — so anything
 //! with `ThreadSystem`'s looser capability can trivially satisfy this one
 //! too (spawn one branch, run the other inline, join). See
-//! [`StackfulTaskSystem`](crate::traits::system::StackfulTaskSystem) for
+//! [`StackfulTaskSystem`](crate::traits::stackful::StackfulTaskSystem) for
 //! that blanket derivation.
 //!
 //! The method was originally named after Intel TBB's `tbb::parallel_invoke`
@@ -40,7 +40,7 @@
 
 use std::future::Future;
 
-use crate::traits::thread_system::TaskSystem;
+use crate::traits::common::TaskSystem;
 
 /// Stackful (blocking) flavor: `a`/`b` are plain closures, run to
 /// completion synchronously before [`parallel_call`](Self::parallel_call)

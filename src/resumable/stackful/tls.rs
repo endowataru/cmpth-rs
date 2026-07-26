@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::traits::thread_system::TlsSlot;
+use crate::traits::common::TlsSlot;
 use crate::resumable::common::desc::TaskDesc;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::system::SchedulerSystem;
@@ -20,17 +20,17 @@ static NEXT_ULT_TLS_KEY: AtomicUsize = AtomicUsize::new(0);
 
 #[repr(transparent)]
 pub struct UltTls<S, T> {
-    anchor: crate::traits::thread_system::TlsAnchor,
+    anchor: crate::traits::common::TlsAnchor,
     _marker: PhantomData<fn() -> (S, T)>,
 }
 
 impl<S, T> UltTls<S, T> {
     pub const fn new() -> Self {
-        UltTls { anchor: crate::traits::thread_system::TlsAnchor::new(), _marker: PhantomData }
+        UltTls { anchor: crate::traits::common::TlsAnchor::new(), _marker: PhantomData }
     }
 
     fn key(&self) -> usize {
-        use crate::traits::thread_system::TLS_ANCHOR_UNASSIGNED;
+        use crate::traits::common::TLS_ANCHOR_UNASSIGNED;
         let cur = self.anchor.index.load(Ordering::Relaxed);
         if cur != TLS_ANCHOR_UNASSIGNED {
             return cur;
@@ -62,7 +62,7 @@ impl<S, T> Default for UltTls<S, T> {
 }
 
 impl<S: StackfulSchedulerSystem, T: 'static> TlsSlot<T> for UltTls<S, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
-    fn from_anchor(anchor: &'static crate::traits::thread_system::TlsAnchor) -> &'static Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    fn from_anchor(anchor: &'static crate::traits::common::TlsAnchor) -> &'static Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
         // Sound: repr(transparent) over TlsAnchor (PhantomData is a ZST).
         unsafe { &*(anchor as *const _ as *const Self) }
     }

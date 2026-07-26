@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::traits::thread_system::ThreadSystem;
+use crate::traits::stackful::ThreadSystem;
 use crate::resumable::common::desc::SuspendedUlt;
 use crate::resumable::common::scheduler::Scheduler;
 use crate::resumable::common::system::SchedulerSystem;

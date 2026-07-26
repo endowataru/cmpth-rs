@@ -31,17 +31,17 @@
 //! ```
 
 use crate::context::ContextPolicy;
-use crate::traits::thread_system::ThreadSystem;
+use crate::traits::stackful::ThreadSystem;
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::desc::SuspendedUlt;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::stackful::suspended::UltSuspendedThread;
 use crate::resumable::common::worker::UltWorker;
 
-// `StackfulTaskSystem` now lives in `crate::traits::system` — re-exported
+// `StackfulTaskSystem` now lives in `crate::traits::stackful` — re-exported
 // below for callers that still spell out
 // `resumable::stackful::system::StackfulTaskSystem`.
-pub use crate::traits::system::StackfulTaskSystem;
+pub use crate::traits::stackful::StackfulTaskSystem;
 
 /// Extends [`SchedulerSystem`] with real-stack context-switch machinery:
 /// context-switch policy, stack allocator, stack size, and the
@@ -112,7 +112,7 @@ where
     {
         let h = <S as ThreadSystem>::spawn(a);
         let rb = b();
-        (crate::traits::thread_system::JoinHandleLike::join(h), rb)
+        (crate::traits::stackful::JoinHandleLike::join(h), rb)
     }
 }
 
@@ -120,7 +120,7 @@ where
 /// `ult_system!` macro or by hand); `ScopedStackfulTaskSystem` is
 /// blanket-derived from it just above. This impl just ties the two
 /// together as one bound.
-impl<S: crate::traits::scoped::ScopedStackfulTaskSystem + ThreadSystem> crate::traits::system::StackfulTaskSystem
+impl<S: crate::traits::scoped::ScopedStackfulTaskSystem + ThreadSystem> crate::traits::stackful::StackfulTaskSystem
     for S
 {
 }
