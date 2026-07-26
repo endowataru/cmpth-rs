@@ -1,6 +1,6 @@
 //! [`run`] — the stackful scheduler entry point. See
 //! [`crate::resumable::common::scheduler`] for the shared
-//! [`Scheduler`](crate::resumable::common::scheduler::Scheduler) struct and
+//! [`Scheduler`] struct and
 //! worker idle loop this drives.
 
 use std::any::Any;

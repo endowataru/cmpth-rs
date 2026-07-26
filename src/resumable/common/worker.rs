@@ -28,7 +28,7 @@ use crate::resumable::common::desc::{SuspendedUlt, TaskDescAlloc};
 /// Task-descriptor allocation with a per-worker free list.
 pub trait TaskPool<S: SchedulerSystem> {
     /// Allocate a descriptor with storage for at least `size` bytes (see
-    /// [`DescPool::alloc`](crate::resumable::common::pool::DescPool::alloc) — `spawn`
+    /// [`DescPool::alloc`] — `spawn`
     /// always requests the same fixed `S::STACK_SIZE`, but the size
     /// parameter is here so a future per-task custom stack size needs no
     /// further interface change).

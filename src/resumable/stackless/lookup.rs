@@ -1,7 +1,7 @@
 //! Poll-safe worker lookups for stackless code: [`InlineTlsCurrent`] (an
 //! inlinable TLS read, sound only because a stackless-only system never
 //! migrates a task across OS threads mid-poll) and
-//! [`worker_from_async_arena_addr`] (derive the worker from an address
+//! `worker_from_async_arena_addr` (derive the worker from an address
 //! inside `spawn_async`/`recurse` arena storage — the async analogue of
 //! [`stackful::lookup::SpCurrent`](crate::resumable::stackful::lookup::SpCurrent)'s
 //! stack-pointer trick).

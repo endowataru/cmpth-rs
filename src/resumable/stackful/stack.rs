@@ -1,4 +1,4 @@
-//! Real ULT stack allocation: [`ArenaStack`] (the [`UltStackArenaKind`]
+//! Real ULT stack allocation: [`ArenaStack`] (the `UltStackArenaKind`
 //! instantiation of the generic arena mechanism in
 //! [`common::stack`](crate::resumable::common::stack) — see that module's
 //! docs for the shared machinery and cell layout this builds on, and that

@@ -57,7 +57,7 @@ pub trait ScopedStackfulTaskSystem: TaskSystem {
     /// joining internally, which does need it: spawned/stolen tasks there
     /// can genuinely run for an unbounded time after this call starts).
     /// Same "opaque trait bound can't conditionally relax" shape as
-    /// [`ScopedStacklessTaskSystem::parallel_call`](crate::traits::scoped::ScopedStacklessTaskSystem::parallel_call)'s
+    /// [`ScopedStacklessTaskSystem::parallel_call`]'s
     /// `MkA`/`MkB`. The non-`'static` capability is only exercised inside
     /// the crate today (`scoped::sync_engine`'s own tests) — its free
     /// functions aren't `pub`, so there's currently no way to reach the

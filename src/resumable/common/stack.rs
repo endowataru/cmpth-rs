@@ -1,8 +1,8 @@
 //! Shared task-stack allocation machinery: [`StackAlloc`] (the pluggable
 //! policy trait), [`StackMem`]/[`UltStackMemory`] (storage), and the generic
-//! arena mechanism ([`Arena`]/[`ArenaMeta`]/[`ArenaKind`]/`arena_init`/
+//! arena mechanism (`Arena`/`ArenaMeta`/`ArenaKind`/`arena_init`/
 //! `alloc_arena_cell`/`slot_from_addr`) parameterized over an
-//! [`ArenaKind`] so it can back two
+//! `ArenaKind` so it can back two
 //! independent arenas without collision — see
 //! [`stackful::stack`](crate::resumable::stackful::stack) for the real-ULT-stack
 //! kind (`HeapStack`/`ArenaStack`/`UltStackArenaKind`) and
@@ -32,10 +32,10 @@
 //! The region is reserved PROT_NONE and committed per cell with `mprotect`,
 //! so reserving gigabytes of address space costs no physical memory.
 //!
-//! # Multiple independent arenas ([`ArenaKind`])
+//! # Multiple independent arenas (`ArenaKind`)
 //!
 //! The arena machinery (`Arena`/`ArenaMeta`/`arena_init`/`slot_from_addr`) is
-//! parameterized by an [`ArenaKind`] — *not* a plain generic function with a
+//! parameterized by an `ArenaKind` — *not* a plain generic function with a
 //! function-local `static`: a `static` item nested inside a generic function
 //! is **not** duplicated per monomorphization when its own type/initializer
 //! doesn't mention the generic parameter (verified empirically; it is one

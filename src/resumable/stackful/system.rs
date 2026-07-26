@@ -1,5 +1,5 @@
 //! [`StackfulSchedulerSystem`] — extends
-//! [`SchedulerSystem`](crate::resumable::common::system::SchedulerSystem)
+//! [`SchedulerSystem`]
 //! with real-stack context-switch capability, and the [`UltIdentity`]
 //! config trait that assembles a complete stackful-only system from a
 //! handful of associated types.

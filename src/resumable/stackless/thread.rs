@@ -1,5 +1,5 @@
 //! Stackless thread functions: `spawn_async`, `recurse`, and
-//! `.await`-ing a [`JoinHandle`](crate::resumable::common::thread::JoinHandle)
+//! `.await`-ing a [`JoinHandle`]
 //! (shared with [`stackful::thread`](crate::resumable::stackful::thread) —
 //! see `common::thread` for the handle type itself).
 
@@ -169,7 +169,7 @@ where
 /// until it can be moved into the task's storage — exactly the
 /// infinitely-sized-embedding problem [`recurse`] exists to avoid (E0733)
 /// for a directly self-recursive `F`, just relocated one call outward.
-/// `mk()` runs exactly once, inside [`spawn_now`], once the descriptor
+/// `mk()` runs exactly once, inside `spawn_now`, once the descriptor
 /// it writes into already exists.
 ///
 /// Storage comes from `S::AsyncPool` (see [`SchedulerSystem::AsyncPool`]):
@@ -178,7 +178,7 @@ where
 /// allocation, freed directly rather than returned to the pool.
 ///
 /// The actual registration work happens *eagerly*, right here, not deferred
-/// into `SpawnAction::poll` — see [`spawn_now`]'s docs for why keeping that
+/// into `SpawnAction::poll` — see `spawn_now`'s docs for why keeping that
 /// work as a plain, ordinarily-called function (rather than embedded in a
 /// `Future::poll` body) matters for how well the compiler can optimize the
 /// enclosing `async fn`'s generated state machine. `SpawnAction` itself
@@ -266,7 +266,7 @@ where
 /// Returned by [`spawn_async`]; see its docs for why the one `.await` is
 /// mandatory rather than an implementation convenience.
 ///
-/// Not generic over `F`/`Mk`: by the time this is constructed, [`spawn_now`]
+/// Not generic over `F`/`Mk`: by the time this is constructed, `spawn_now`
 /// has already consumed both and produced the finished [`JoinHandle`] — see
 /// [`spawn_async`]'s docs for why that work happens eagerly rather than
 /// inside `poll`. Kept as a crate-owned type (not `std::future::ready`, whose
