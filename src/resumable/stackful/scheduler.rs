@@ -11,7 +11,7 @@ use crate::traits::thread_system::{JoinHandleLike, ThreadSystem, TlsSlot};
 use crate::resumable::common::external_queue::ExternalQueue;
 use crate::resumable::common::scheduler::{recursion_pool_threshold, worker_loop, Scheduler};
 use crate::resumable::common::pool::{DescPool, DynamicPool};
-use crate::resumable::stackful::system::UltSchedulerSystem;
+use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::stackful::thread::fork_parent_first;
 use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
 
@@ -19,7 +19,7 @@ use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
 /// task, and return when `root` completes and all workers have shut down.
 pub fn run<S, F>(num_workers: usize, root: F)
 where
-    S: UltSchedulerSystem,
+    S: StackfulSchedulerSystem,
     S::Desc: crate::resumable::stackful::desc::StackfulTaskDesc + crate::resumable::common::desc::WakerTaskDesc,
     F: FnOnce() + Send + 'static,
 {

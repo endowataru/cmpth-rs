@@ -22,7 +22,7 @@ use crate::resumable::common::worker::UltWorker;
 ///
 /// Only sound for systems that can never migrate a task across OS threads
 /// mid-poll, i.e. **stackless-only** systems (`ult_async_system!`'s output,
-/// which never implements `UltSchedulerSystem` and so never does a real
+/// which never implements `StackfulSchedulerSystem` and so never does a real
 /// context switch). `ult_async_system!` uses this as its default `Lookup`
 /// for exactly that reason. A stackful or dual config must keep using
 /// `TlsCurrent` — see `OsTls::get`'s doc comment for the CSE hazard this

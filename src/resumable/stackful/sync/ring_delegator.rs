@@ -4,9 +4,9 @@ use crate::traits::DelegatorConsumer;
 use crate::resumable::common::desc::WakerTaskDesc;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::system::SchedulerSystem;
-use crate::resumable::stackful::system::UltSchedulerSystem;
+use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::stackful::worker::StackfulWorker;
-use crate::traits::UltSystem;
+use crate::traits::StackfulSystem;
 use crate::resumable::common::worker::Worker;
 
 use super::delegator::{Delegator, DelegatorNode, SyncQueue};
@@ -15,23 +15,23 @@ use super::delegator::{Delegator, DelegatorNode, SyncQueue};
 // RingBufQueue
 // ---------------------------------------------------------------------------
 
-pub struct RingBufQueue<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, const N: usize> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+pub struct RingBufQueue<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, const N: usize> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     head:  AtomicUsize,
     tail:  AtomicUsize,
     nodes: Box<[RingSlot<S, C>; N]>,
 }
 
-struct RingSlot<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+struct RingSlot<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     ready: AtomicBool,
     node:  std::cell::UnsafeCell<DelegatorNode<S, C>>,
 }
 
-unsafe impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, const N: usize> Send
+unsafe impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, const N: usize> Send
     for RingBufQueue<S, C, N> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {}
-unsafe impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, const N: usize> Sync
+unsafe impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, const N: usize> Sync
     for RingBufQueue<S, C, N> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {}
 
-impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, const N: usize> Default
+impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, const N: usize> Default
     for RingBufQueue<S, C, N> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc
 {
     fn default() -> Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
@@ -53,7 +53,7 @@ impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, const N: usize>
     }
 }
 
-impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, const N: usize> RingBufQueue<S, C, N> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, const N: usize> RingBufQueue<S, C, N> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     fn mask(idx: usize) -> usize where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc { idx & (N - 1) }
 
     fn slot_node(&self, idx: usize) -> *mut DelegatorNode<S, C> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
@@ -61,7 +61,7 @@ impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, const N: usize>
     }
 }
 
-impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, const N: usize> SyncQueue<S, C>
+impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, const N: usize> SyncQueue<S, C>
     for RingBufQueue<S, C, N> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc
 {
     fn start_lock(
@@ -140,7 +140,7 @@ impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, const N: usize>
     }
 }
 
-impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, const N: usize> RingBufQueue<S, C, N> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, const N: usize> RingBufQueue<S, C, N> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     fn slot_index(&self, node: *mut DelegatorNode<S, C>) -> usize where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
         let base = self.nodes[0].node.get() as usize;
         let size = std::mem::size_of::<RingSlot<S, C>>();

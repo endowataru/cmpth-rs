@@ -4,13 +4,13 @@
 
 use crate::resumable::common::lookup::{system_id, CurrentLookup, TlsCurrent};
 use crate::resumable::stackful::stack::slot_from_sp;
-use crate::resumable::stackful::system::UltSchedulerSystem;
+use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::common::worker::UltWorker;
 
 /// Derive the worker from the stack pointer (requires
 /// [`ArenaStack`](crate::resumable::stackful::stack::ArenaStack); falls back to TLS
 /// otherwise). Inherently stackful: only implemented for
-/// `S: UltSchedulerSystem`, since a stackless-only system has no per-task
+/// `S: StackfulSchedulerSystem`, since a stackless-only system has no per-task
 /// stack pointer to derive a worker from.
 ///
 /// Has a structural advantage over TLS beyond speed: the lookup is safe to
@@ -34,7 +34,7 @@ fn current_sp() -> usize {
     sp
 }
 
-impl<S: UltSchedulerSystem> CurrentLookup<S> for SpCurrent
+impl<S: StackfulSchedulerSystem> CurrentLookup<S> for SpCurrent
 where
     S::Desc: crate::resumable::stackful::desc::StackfulTaskDesc,
 {

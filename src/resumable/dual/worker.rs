@@ -1,4 +1,4 @@
-//! Dual-only `SchedulerSystem::execute`/`UltSchedulerSystem::pop_or_root`/
+//! Dual-only `SchedulerSystem::execute`/`StackfulSchedulerSystem::pop_or_root`/
 //! `SchedulerSystem::free_finished_desc` bodies: a popped continuation may
 //! be either a real ULT or a `spawn_async` task, so dispatch needs the
 //! `poll_fn` tag check the stackful-only/stackless-only bodies don't pay
@@ -8,7 +8,7 @@
 
 use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker};
-use crate::resumable::stackful::system::UltSchedulerSystem;
+use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulLocalQueue};
 use crate::resumable::common::desc::SuspendedUlt;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
@@ -19,7 +19,7 @@ use crate::resumable::common::pool::DescPool;
 /// `poll_fn` first, and either poll inline or perform a real context switch.
 pub fn execute_dual<S>(wk: &UltWorker<S>, cont: SuspendedUlt<S::Desc>)
 where
-    S: UltSchedulerSystem,
+    S: StackfulSchedulerSystem,
     S::Desc: StackfulTaskDesc + AsyncTaskDesc,
 {
     let desc = cont.desc();
@@ -38,7 +38,7 @@ where
 /// it and fall back to the root (scheduler-loop) continuation instead.
 pub fn pop_or_root_dual<S>(wk: &UltWorker<S>) -> SuspendedUlt<S::Desc>
 where
-    S: UltSchedulerSystem,
+    S: StackfulSchedulerSystem,
     S::Desc: StackfulTaskDesc + AsyncTaskDesc,
 {
     if let Some(c) = wk.deque.try_pop_top() {
@@ -60,7 +60,7 @@ where
 /// everything else goes through the ULT-stack pool as usual.
 pub fn free_finished_desc_dual<S>(wk: &UltWorker<S>, desc: *mut S::Desc)
 where
-    S: UltSchedulerSystem,
+    S: StackfulSchedulerSystem,
     S::Desc: StackfulTaskDesc + AsyncTaskDesc,
 {
     if unsafe { (*desc).poll_fn().get().is_some() } {

@@ -9,7 +9,7 @@
 
 use std::time::Instant;
 
-use cmpth::resumable::stackful::system::UltSystem;
+use cmpth::resumable::stackful::system::StackfulSystem;
 use cmpth::{JoinHandleLike, ThreadSystem};
 
 cmpth::ult_system! {
@@ -46,7 +46,7 @@ fn fib<S: ThreadSystem>(n: u64) -> u64 {
     JoinHandleLike::join(h) + r2
 }
 
-fn bench_one<S: UltSystem + ThreadSystem>(label: &'static str) {
+fn bench_one<S: StackfulSystem + ThreadSystem>(label: &'static str) {
     S::run(1, move || {
         // Warm up the task pool and caches.
         assert_eq!(fib::<S>(20), 6765);

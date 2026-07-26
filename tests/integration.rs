@@ -599,7 +599,7 @@ fn spawn_async_yield() {
         let flag = Arc::new(AtomicBool::new(false));
         let flag2 = Arc::clone(&flag);
         let h = spawn_async(async move {
-            <DefaultUltSystem as AsyncTaskSystem>::yield_now().await;
+            <DefaultUltSystem as StacklessTaskSystem>::yield_now().await;
             flag2.store(true, Ordering::Release);
             42u32
         });
@@ -783,7 +783,7 @@ fn arena_external_block_on() {
 }
 
 // ---------------------------------------------------------------------------
-// UltSystem implemented by hand (no ult_system! macro)
+// StackfulSystem implemented by hand (no ult_system! macro)
 // ---------------------------------------------------------------------------
 
 /// The ult_system! macro is convenience, not architecture: everything it
@@ -824,7 +824,7 @@ impl cmpth::SchedulerSystem for ManualSystem {
     }
 }
 
-impl cmpth::UltSchedulerSystem for ManualSystem {
+impl cmpth::StackfulSchedulerSystem for ManualSystem {
     type Ctx   = NativeContext;
     type StackAlloc = HeapStack;
     const STACK_SIZE: usize = 64 * 1024;
@@ -832,7 +832,7 @@ impl cmpth::UltSchedulerSystem for ManualSystem {
     type SuspendedThread = BasicSuspendedThread<Self>;
 }
 
-impl UltSystem for ManualSystem {
+impl StackfulSystem for ManualSystem {
     type Mutex<T: Send> = cmpth::McsMutex<Self, T>;
     type Barrier        = cmpth::resumable::stackful::sync::Barrier<Self>;
     type Delegator<C: cmpth::DelegatorConsumer<Self>> =

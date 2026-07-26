@@ -78,7 +78,7 @@ impl BenchSystem for CmpthBench {
         <cmpth::DefaultUltSystem as cmpth::ThreadSystem>::JoinHandle<T>;
 
     fn run(num_workers: usize, f: impl FnOnce() + Send + 'static) {
-        use cmpth::UltSystem as _;
+        use cmpth::StackfulSystem as _;
         cmpth::DefaultUltSystem::run(num_workers, f);
     }
 
@@ -111,7 +111,7 @@ impl BenchSystem for StackfulOnlyBench {
         <StackfulOnlySystem as cmpth::ThreadSystem>::JoinHandle<T>;
 
     fn run(num_workers: usize, f: impl FnOnce() + Send + 'static) {
-        use cmpth::UltSystem as _;
+        use cmpth::StackfulSystem as _;
         StackfulOnlySystem::run(num_workers, f);
     }
 
@@ -125,7 +125,7 @@ impl BenchSystem for StackfulOnlyBench {
 
 // ---------------------------------------------------------------------------
 // AsyncOnlySystem — cmpth stackless-only system (ult_async_system!, no
-// UltSchedulerSystem at all). Doesn't fit BenchSystem (no blocking join);
+// StackfulSchedulerSystem at all). Doesn't fit BenchSystem (no blocking join);
 // used directly with `run_fib_async`/`fib_async` instead.
 // ---------------------------------------------------------------------------
 
@@ -300,7 +300,7 @@ pub fn fib<S: BenchSystem>(n: u64) -> u64 {
 /// its immediate caller, right here).
 pub fn fib_async<S>(n: u64) -> impl std::future::Future<Output = u64> + Send
 where
-    S: cmpth::SchedulerSystem + cmpth::AsyncTaskSystem,
+    S: cmpth::SchedulerSystem + cmpth::StacklessTaskSystem,
     S::Desc: cmpth::AsyncTaskDesc,
 {
     async move {
@@ -325,7 +325,7 @@ where
 
     let result = Arc::new(AtomicU64::new(0));
     let result2 = Arc::clone(&result);
-    use cmpth::AsyncTaskSystem;
+    use cmpth::StacklessTaskSystem;
     S::run_async(num_workers, async move {
         result2.store(fib_async::<S>(n).await, Ordering::Release);
     });

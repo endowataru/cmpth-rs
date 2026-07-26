@@ -6,32 +6,32 @@ use crate::spin::SpinLock;
 use crate::traits::{Resumable, StackfulMutex, StackfulResumable};
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::system::SchedulerSystem;
-use crate::resumable::stackful::system::UltSchedulerSystem;
+use crate::resumable::stackful::system::StackfulSchedulerSystem;
 
 // ---------------------------------------------------------------------------
 // MutexCore
 // ---------------------------------------------------------------------------
 
-pub struct MutexState<S: UltSchedulerSystem> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+pub struct MutexState<S: StackfulSchedulerSystem> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
     pub(super) locked: bool,
     pub(super) waiters: VecDeque<S::SuspendedThread>,
 }
 
-pub trait MutexCore: Send + Sync + Sized where <<Self as MutexCore>::UltSchedulerSystem as SchedulerSystem>::Desc: StackfulTaskDesc {
-    type UltSchedulerSystem: UltSchedulerSystem;
+pub trait MutexCore: Send + Sync + Sized where <<Self as MutexCore>::StackfulSchedulerSystem as SchedulerSystem>::Desc: StackfulTaskDesc {
+    type StackfulSchedulerSystem: StackfulSchedulerSystem;
     type Data: Send;
 
-    fn state(&self) -> &SpinLock<MutexState<Self::UltSchedulerSystem>>;
+    fn state(&self) -> &SpinLock<MutexState<Self::StackfulSchedulerSystem>>;
     fn data(&self) -> &UnsafeCell<Self::Data>;
 
-    fn lock_impl(&self) -> MutexGuard<'_, Self> where <<Self as MutexCore>::UltSchedulerSystem as SchedulerSystem>::Desc: StackfulTaskDesc {
+    fn lock_impl(&self) -> MutexGuard<'_, Self> where <<Self as MutexCore>::StackfulSchedulerSystem as SchedulerSystem>::Desc: StackfulTaskDesc {
         let mut s = self.state().lock();
         if !s.locked {
             s.locked = true;
             return MutexGuard { mutex: self };
         }
         s.waiters.push_back(Default::default());
-        let sth: *const <Self::UltSchedulerSystem as UltSchedulerSystem>::SuspendedThread = s.waiters.back().unwrap();
+        let sth: *const <Self::StackfulSchedulerSystem as StackfulSchedulerSystem>::SuspendedThread = s.waiters.back().unwrap();
         unsafe { &*sth }.wait_with(move || drop(s));
         MutexGuard { mutex: self }
     }
@@ -46,7 +46,7 @@ pub trait MutexCore: Send + Sync + Sized where <<Self as MutexCore>::UltSchedule
         }
     }
 
-    fn unlock_impl(&self) where <<Self as MutexCore>::UltSchedulerSystem as SchedulerSystem>::Desc: StackfulTaskDesc {
+    fn unlock_impl(&self) where <<Self as MutexCore>::StackfulSchedulerSystem as SchedulerSystem>::Desc: StackfulTaskDesc {
         let next = {
             let mut s = self.state().lock();
             match s.waiters.pop_front() {
@@ -85,22 +85,22 @@ impl<M: MutexCore> Drop for MutexGuard<'_, M> {
 // Mutex
 // ---------------------------------------------------------------------------
 
-pub struct Mutex<S: UltSchedulerSystem, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+pub struct Mutex<S: StackfulSchedulerSystem, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
     state: SpinLock<MutexState<S>>,
     data: UnsafeCell<T>,
 }
 
-unsafe impl<S: UltSchedulerSystem, T: Send> Send for Mutex<S, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {}
-unsafe impl<S: UltSchedulerSystem, T: Send> Sync for Mutex<S, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {}
+unsafe impl<S: StackfulSchedulerSystem, T: Send> Send for Mutex<S, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {}
+unsafe impl<S: StackfulSchedulerSystem, T: Send> Sync for Mutex<S, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {}
 
-impl<S: UltSchedulerSystem, T: Send> MutexCore for Mutex<S, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
-    type UltSchedulerSystem = S;
+impl<S: StackfulSchedulerSystem, T: Send> MutexCore for Mutex<S, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    type StackfulSchedulerSystem = S;
     type Data = T;
     fn state(&self) -> &SpinLock<MutexState<S>> where <S as SchedulerSystem>::Desc: StackfulTaskDesc { &self.state }
     fn data(&self) -> &UnsafeCell<T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc { &self.data }
 }
 
-impl<S: UltSchedulerSystem, T: Send> StackfulMutex<T> for Mutex<S, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem, T: Send> StackfulMutex<T> for Mutex<S, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
     type Guard<'a> = MutexGuard<'a, Mutex<S, T>> where Self: 'a, T: 'a;
 
     fn new(val: T) -> Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
@@ -117,14 +117,14 @@ impl<S: UltSchedulerSystem, T: Send> StackfulMutex<T> for Mutex<S, T> where <S a
 // Condvar
 // ---------------------------------------------------------------------------
 
-pub struct Condvar<S: UltSchedulerSystem> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+pub struct Condvar<S: StackfulSchedulerSystem> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
     waiters: SpinLock<VecDeque<S::SuspendedThread>>,
 }
 
-unsafe impl<S: UltSchedulerSystem> Send for Condvar<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {}
-unsafe impl<S: UltSchedulerSystem> Sync for Condvar<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {}
+unsafe impl<S: StackfulSchedulerSystem> Send for Condvar<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {}
+unsafe impl<S: StackfulSchedulerSystem> Sync for Condvar<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {}
 
-impl<S: UltSchedulerSystem> Condvar<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem> Condvar<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
     pub fn new() -> Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
         Condvar { waiters: SpinLock::new(VecDeque::new()) }
     }
@@ -152,6 +152,6 @@ impl<S: UltSchedulerSystem> Condvar<S> where <S as SchedulerSystem>::Desc: Stack
     }
 }
 
-impl<S: UltSchedulerSystem> Default for Condvar<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem> Default for Condvar<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
     fn default() -> Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc { Self::new() }
 }

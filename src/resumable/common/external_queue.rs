@@ -9,9 +9,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::traits::thread_system::ThreadSystem;
 use crate::resumable::common::desc::SuspendedUlt;
 use crate::resumable::common::scheduler::Scheduler;
-use crate::traits::ult_system::UltSystem;
+use crate::traits::system::StackfulSystem;
 use crate::resumable::common::system::SchedulerSystem;
-use crate::resumable::stackful::system::UltSchedulerSystem;
+use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::stackful::thread::{ErasedBody, fork_parent_first};
 use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
 
@@ -30,7 +30,7 @@ use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
 ///   steal-fail path.
 /// * [`PollerUltQueue`] — a dedicated poller ULT drains the queue; zero
 ///   overhead on the steal path, but consumes one ULT stack. Inherently
-///   stackful (it *is* a ULT), so only implemented for `S: UltSchedulerSystem`.
+///   stackful (it *is* a ULT), so only implemented for `S: StackfulSchedulerSystem`.
 pub trait ExternalQueue<S: SchedulerSystem>: Default + Send + Sync + 'static {
     /// Push a continuation from an external (non-worker) OS thread.
     fn push(&self, cont: SuspendedUlt<S::Desc>);
@@ -111,7 +111,7 @@ impl<D: crate::resumable::common::desc::TaskDesc> Default for PollerUltQueue<D> 
     }
 }
 
-impl<S: UltSchedulerSystem + UltSystem> ExternalQueue<S> for PollerUltQueue<S::Desc>
+impl<S: StackfulSchedulerSystem + StackfulSystem> ExternalQueue<S> for PollerUltQueue<S::Desc>
 where
     S::Desc: crate::resumable::stackful::desc::StackfulTaskDesc + crate::resumable::common::desc::WakerTaskDesc,
 {

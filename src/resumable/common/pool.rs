@@ -1,6 +1,6 @@
 //! Pluggable task-descriptor pool.
 //!
-//! The [`DescPool`] trait makes the pooling strategy a per-`UltSystem`
+//! The [`DescPool`] trait makes the pooling strategy a per-`StackfulSystem`
 //! configuration axis.  Two implementations are provided:
 //!
 //! * [`SimplePool`] — per-worker free list with no cross-worker return.  The
