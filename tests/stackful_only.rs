@@ -1,10 +1,10 @@
 //! End-to-end tests for a pure stackful-only system built via `ult_system!`:
 //! `execute`'s dispatch is `execute_stackful` (always a real context switch,
-//! no `poll_fn` tag check) rather than `execute_dual` — `Self::Desc` here
-//! never even needs to implement `AsyncTaskDesc`. `spawn_async` is simply
-//! not reachable for this system (there is no `StacklessSystem` impl), so
-//! this exercises exactly the branch-free path `execute_stackful`/
-//! `pop_or_root_stackful` were built for.
+//! no `poll_fn` tag check) rather than `execute_dual`. Nothing in these
+//! tests calls `spawn_async` on this system — its dispatch never checks the
+//! `poll_fn` tag, so an async task would be mis-handled if one ever landed
+//! here — so this exercises exactly the branch-free path
+//! `execute_stackful`/`pop_or_root_stackful` were built for.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

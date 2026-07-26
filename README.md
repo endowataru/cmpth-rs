@@ -33,7 +33,7 @@ and bounds memory.
 
 ```rust
 use cmpth::DualTaskSystem;
-use cmpth::traits::stackful::*; // ThreadSystem, JoinHandleLike, StackfulSystem, ...
+use cmpth::traits::stackful::*; // ThreadSystem, JoinHandleLike, StackfulTaskSystem, ...
 
 fn fib<S: ThreadSystem>(n: u64) -> u64 {
     if n <= 1 { return n; }
@@ -131,7 +131,7 @@ the underlying trait implementations yourself — the escape hatch for when
 a macro's fixed shape doesn't fit, since every component the macros wire
 up is a public trait you can implement directly.
 
-Because every `StackfulSystem` is itself a `ThreadSystem`, schedulers
+Every stackful system implements `ThreadSystem` directly, so schedulers
 **nest**: set `base: MySystem` in a second system and it runs ULTs on top
 of ULTs. Nesting doubles as a correctness check for the abstraction
 boundaries — the same code must work at every level.

@@ -71,8 +71,9 @@ where
     }
 }
 
-/// [`run`], but returns `root`'s result — the `StackfulSystem::run` trait
-/// method's actual body.
+/// [`run`], but returns `root`'s result — the
+/// [`ScopedStackfulTaskSystem::run`](crate::traits::scoped::ScopedStackfulTaskSystem::run)
+/// trait method's actual body.
 ///
 /// `run`'s root task is detached (no `JoinHandle`), and a detached task's
 /// descriptor is freed by the exit path the moment it finishes — there's no

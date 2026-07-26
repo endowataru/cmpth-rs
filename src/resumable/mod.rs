@@ -9,6 +9,5 @@ pub mod dual;
 pub mod stackful;
 pub mod stackless;
 
-pub use crate::traits::system::StackfulSystem;
 pub use crate::resumable::common::thread::JoinHandle;
 pub use crate::resumable::stackful::thread::spawn;

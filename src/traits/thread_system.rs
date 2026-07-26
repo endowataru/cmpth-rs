@@ -4,7 +4,7 @@
 //! bottom layer (`OsSystem`) and by every ULT scheduler layered on top of it.
 //! Because the interface is identical at every level, a ULT scheduler can be
 //! nested on top of another ULT scheduler for verification
-//! (`OsSystem` -> `StackfulSystem` -> `UltUltSystem`).
+//! (`OsSystem` -> `DualTaskSystem` -> `NestedDualTaskSystem`).
 
 use std::future::Future;
 use std::pin::pin;
