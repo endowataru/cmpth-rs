@@ -314,7 +314,17 @@ pub(crate) fn alloc_arena_cell<K: ArenaKind>(size: usize) -> ArenaStackMem {
     // (multiples of 3 cache lines on 128-byte-line machines, staying
     // within one L1 set-index window); the lookup slot stays at the
     // fixed cell offset.
-    let color = ((cell / ar.stride) % 31) * 384;
+    //
+    // Number of distinct offsets is capped by how many actually fit in
+    // `usable`, not a bare 31: for a kind with a small `usable` (e.g. the
+    // async-task arena's tiny per-cell payload on a 4 KiB-page system —
+    // `usable` there is far smaller than a stackful arena's), 31 slots of
+    // 384 bytes each (up to 11520 total) can exceed `usable` itself, which
+    // would underflow `usable - color` below and silently wrap to a huge
+    // `size`. `.max(1)` keeps the modulus valid (color 0) when even one
+    // slot doesn't fit.
+    let color_slots = (usable / 384).clamp(1, 31);
+    let color = ((cell / ar.stride) % color_slots) * 384;
 
     ArenaStackMem { ptr: (cell + page) as *mut u8, size: usable - color, stride: ar.stride }
 }
