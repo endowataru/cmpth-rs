@@ -12,9 +12,27 @@ use std::task::{Poll, RawWaker, RawWakerVTable, Waker};
 
 use crate::traits::{Delegator, DelegatorConsumer, Poller, StackfulBarrier, StackfulMutex};
 
+/// Declares that a system provides an efficient (work-stealing) scheduler
+/// as its execution model — the shared foundation both [`ThreadSystem`]
+/// (spawn/join) and the `scoped` family
+/// (`ScopedStackfulTaskSystem`/`ScopedStacklessTaskSystem`, in
+/// [`crate::traits::scoped`]) build on: both assume the same efficient
+/// scheduling underneath, just expose different capabilities on top of it.
+pub trait TaskSystem: Sized + Send + Sync + 'static {
+    /// This worker's own index among its `num_workers()` peers (stable for
+    /// the lifetime of the calling task/thread). Not meaningful outside a
+    /// managed worker pool — a system with no such pool (e.g. `OsSystem`,
+    /// whose "workers" are just whatever OS threads happen to be running)
+    /// always reports `0`.
+    fn worker_num() -> usize;
+
+    /// Number of parallel workers (OS threads or ULT worker threads).
+    fn num_workers() -> usize;
+}
+
 /// Threading system interface bundle — swap the entire backend by changing
 /// one type parameter.
-pub trait ThreadSystem: Sized + Send + Sync + 'static {
+pub trait ThreadSystem: TaskSystem {
     /// Drives a single `block_on` call; the customisation point for async
     /// integration.  See [`Poller`].
     type Poller: Poller;
@@ -28,7 +46,7 @@ pub trait ThreadSystem: Sized + Send + Sync + 'static {
     /// use cmpth::ThreadSystem;
     ///
     /// cmpth::default::run(2, || {
-    ///     let x = cmpth::DefaultUltSystem::block_on(async { 6 * 7 });
+    ///     let x = cmpth::DualTaskSystem::block_on(async { 6 * 7 });
     ///     assert_eq!(x, 42);
     /// });
     /// ```
@@ -76,9 +94,6 @@ pub trait ThreadSystem: Sized + Send + Sync + 'static {
     /// which is why a single slot per level is enough — everything else is
     /// reached through the worker pointer.
     type ThreadSpecific<T: 'static>: TlsSlot<T>;
-
-    /// Number of parallel workers (OS threads or ULT worker threads).
-    fn num_workers() -> usize;
 }
 
 /// Common interface for join handles returned by [`ThreadSystem::spawn`].

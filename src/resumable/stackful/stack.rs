@@ -57,7 +57,7 @@ pub(crate) fn slot_from_sp(sp: usize) -> Option<&'static CellSlot> {
 #[cfg(test)]
 mod tests {
     use crate::ThreadSystem;
-    use crate::StackfulSystem;
+    use crate::ScopedStackfulTaskSystem;
 
     crate::ult_system! {
         struct SpTestSystem {

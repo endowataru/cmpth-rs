@@ -3,7 +3,7 @@
 //! that guards it.
 //!
 //! Shared by [`sync_engine`](super::sync_engine): the whole point is that a
-//! `parallel_invoke` branch is a plain value on the caller's own stack
+//! `parallel_call` branch is a plain value on the caller's own stack
 //! frame, never separately allocated — unlike a `spawn`/`spawn_async` task,
 //! which is a pooled or arena-backed [`crate::BasicTaskDesc`] with a general
 //! join-protocol supporting sync joiners, async wakers, and async joiners
@@ -74,7 +74,7 @@ impl JobRef {
     }
 }
 
-/// A `parallel_invoke()` call's second branch. Lives on the caller's own
+/// A `parallel_call()` call's second branch. Lives on the caller's own
 /// stack; never pooled, never boxed. `Sync` so a thief on another thread
 /// can read `func`/`result` through `&StackJob` — synchronized entirely by
 /// `latch` (the thief's pre-`set()` writes happen-before the pusher's

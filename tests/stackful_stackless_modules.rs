@@ -6,25 +6,25 @@
 use std::sync::Arc;
 
 use cmpth::default::*;
-use cmpth::{DefaultUltSystem, SuspendedFuture, UltDualBarrier, UltDualMutex};
+use cmpth::{DualTaskSystem, SuspendedFuture, UltDualBarrier, UltDualMutex};
 
 #[test]
 fn stackful_module_unlocks_lock_and_wait() {
     use cmpth::traits::stackful::*;
 
     run(2, || {
-        let m: UltDualMutex<DefaultUltSystem, u64, cmpth::BasicSuspendedThread<DefaultUltSystem>> =
+        let m: UltDualMutex<DualTaskSystem, u64, cmpth::BasicSuspendedThread<DualTaskSystem>> =
             UltDualMutex::new(0);
         *m.lock() += 1;
         assert_eq!(*m.lock(), 1);
 
-        let b: Arc<UltDualBarrier<DefaultUltSystem, cmpth::BasicSuspendedThread<DefaultUltSystem>>> =
+        let b: Arc<UltDualBarrier<DualTaskSystem, cmpth::BasicSuspendedThread<DualTaskSystem>>> =
             Arc::new(UltDualBarrier::new(1));
         let r = b.wait();
         assert!(r.is_leader());
 
         // StackfulSystem/ThreadSystem also in scope via the same bulk import.
-        assert!(DefaultUltSystem::num_workers() >= 1);
+        assert!(DualTaskSystem::num_workers() >= 1);
     });
 }
 
@@ -34,12 +34,12 @@ fn stackless_module_unlocks_lock_and_wait() {
 
     run(2, || {
         let h = spawn_async(async {
-            let m: UltDualMutex<DefaultUltSystem, u64, SuspendedFuture<DefaultUltSystem>> =
+            let m: UltDualMutex<DualTaskSystem, u64, SuspendedFuture<DualTaskSystem>> =
                 UltDualMutex::new(0);
             *m.lock().await += 1;
             let v = *m.lock().await;
 
-            let b: UltDualBarrier<DefaultUltSystem, SuspendedFuture<DefaultUltSystem>> =
+            let b: UltDualBarrier<DualTaskSystem, SuspendedFuture<DualTaskSystem>> =
                 UltDualBarrier::new(1);
             let r = b.wait().await;
             assert!(r.is_leader());

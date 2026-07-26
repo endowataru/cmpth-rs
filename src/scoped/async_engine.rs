@@ -1,10 +1,10 @@
 //! Poll-based counterpart to [`sync_engine`](super::sync_engine) backing
-//! [`StacklessParallelInvoke`](crate::traits::StacklessParallelInvoke): same
+//! [`ScopedStacklessTaskSystem`](crate::traits::ScopedStacklessTaskSystem): same
 //! worker-pool/steal shape (reusing [`super::job::JobRef`]'s stack-resident,
 //! type-erased job representation), but bodies are [`Future`]s driven via
 //! polling instead of plain closures called once.
 //!
-//! The future returned by [`parallel_invoke`] never blocks the OS thread
+//! The future returned by [`parallel_call`] never blocks the OS thread
 //! polling *it* while `a` is still running — `a` is polled transparently
 //! (`Pending` propagates straight through, exactly like an ordinary nested
 //! `.await`). Only once `a` completes do we check on `b`: if it's still
@@ -15,11 +15,11 @@
 //! [`AsyncJob::latch`] and return `Pending` instead of busy-waiting.
 //!
 //! `b`'s storage is an `Arc<AsyncJob<Rb>>`, not a borrowed stack frame like
-//! [`super::job::StackJob`]: the future returned by [`parallel_invoke`] can
+//! [`super::job::StackJob`]: the future returned by [`parallel_call`] can
 //! be dropped (cancelled) at any poll boundary, including while `b` is
 //! still being driven by a thief on another worker thread, so its storage
 //! must be able to outlive the caller's own frame — see
-//! [`StacklessParallelInvoke`](crate::traits::StacklessParallelInvoke)'s
+//! [`ScopedStacklessTaskSystem`](crate::traits::ScopedStacklessTaskSystem)'s
 //! doc comment for why this is the one place this engine accepts a small
 //! heap allocation per call. A thief that actually steals a branch commits
 //! its own dedicated worker OS thread to driving it to completion via
@@ -232,8 +232,24 @@ thread_local! {
 
 fn current_context() -> &'static WorkerContext {
     let p = CURRENT.with(|c| c.get());
-    assert!(!p.is_null(), "cmpth: scoped::parallel_invoke (async) called outside run_async");
+    assert!(!p.is_null(), "cmpth: scoped::parallel_call (async) called outside run_async");
     unsafe { &*p }
+}
+
+/// Non-panicking counterpart of [`current_context`], for `TaskSystem`'s
+/// `worker_num`/`num_workers` (which must report *something* even when
+/// called from outside a worker, unlike `parallel_call`/`run_async`).
+fn try_current_context() -> Option<&'static WorkerContext> {
+    let p = CURRENT.with(|c| c.get());
+    if p.is_null() { None } else { Some(unsafe { &*p }) }
+}
+
+pub(crate) fn current_worker_num() -> Option<usize> {
+    try_current_context().map(|wk| wk.index)
+}
+
+pub(crate) fn current_num_workers() -> Option<usize> {
+    try_current_context().map(|wk| wk.registry.stealers.len())
 }
 
 fn try_execute_one(wk: &WorkerContext) -> bool {
@@ -268,7 +284,7 @@ fn try_execute_one(wk: &WorkerContext) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// parallel_invoke — the public primitive
+// parallel_call — the public primitive
 // ---------------------------------------------------------------------------
 
 enum State<Fa: Future> {
@@ -277,14 +293,14 @@ enum State<Fa: Future> {
     Done,
 }
 
-/// Returned by [`parallel_invoke`]. See the module docs for the state
+/// Returned by [`parallel_call`]. See the module docs for the state
 /// machine this drives.
 pub(crate) struct ParallelInvoke<Fa: Future, Fb: Future> {
     state: State<Fa>,
     job: Arc<AsyncJob<Fb>>,
     /// `job`'s `JobRef::data`, as a plain integer once pushed — lets
     /// `poll` tell "got our own job back unstolen" apart from "someone
-    /// else's job came back" the same way `sync_engine::parallel_invoke`
+    /// else's job came back" the same way `sync_engine::parallel_call`
     /// does, without a raw pointer field (which would otherwise make this
     /// struct not automatically `Send`).
     pushed: Option<usize>,
@@ -353,11 +369,11 @@ where
     }
 }
 
-/// See [`StacklessParallelInvoke::parallel_invoke`](crate::traits::StacklessParallelInvoke::parallel_invoke)
+/// See [`ScopedStacklessTaskSystem::parallel_call`](crate::traits::ScopedStacklessTaskSystem::parallel_call)
 /// for why this takes thunks rather than already-built futures. Both are
 /// called eagerly, right here — plain, ordinary evaluation, no `.await`
 /// involved on this side.
-pub(crate) fn parallel_invoke<Fa, Fb, MkA, MkB>(mk_a: MkA, mk_b: MkB) -> ParallelInvoke<Fa, Fb>
+pub(crate) fn parallel_call<Fa, Fb, MkA, MkB>(mk_a: MkA, mk_b: MkB) -> ParallelInvoke<Fa, Fb>
 where
     MkA: FnOnce() -> Fa,
     MkB: FnOnce() -> Fb,
@@ -415,7 +431,7 @@ where
 
     registry.shutdown.store(true, Ordering::Release);
     for h in handles {
-        h.join().expect("cmpth: parallel_invoke worker thread panicked");
+        h.join().expect("cmpth: parallel_call worker thread panicked");
     }
 }
 
@@ -426,15 +442,15 @@ mod tests {
 
     // Recursive `async fn`s can't pass their own opaque return type as a
     // bare generic argument to anything (E0733) — this is the actual proof
-    // that taking thunks (`parallel_invoke(mk_a, mk_b)`, not
-    // `parallel_invoke(a, b)`) really does dodge it, not just a claim in a
+    // that taking thunks (`parallel_call(mk_a, mk_b)`, not
+    // `parallel_call(a, b)`) really does dodge it, not just a claim in a
     // doc comment.
     fn fib(n: u64) -> impl Future<Output = u64> + Send {
         async move {
             if n <= 1 {
                 return n;
             }
-            let (a, b) = parallel_invoke(move || fib(n - 1), move || fib(n - 2)).await;
+            let (a, b) = parallel_call(move || fib(n - 1), move || fib(n - 2)).await;
             a + b
         }
     }
@@ -466,7 +482,7 @@ mod tests {
 
     #[test]
     fn many_independent_parallel_invokes() {
-        // Several independent parallel_invoke trees live on the pool at
+        // Several independent parallel_call trees live on the pool at
         // once, none of them the root future itself — checks that workers
         // correctly multiplex unrelated work via stealing/the injector,
         // not just a single tree.
@@ -477,7 +493,7 @@ mod tests {
                 let mut sum = 0u64;
                 for i in 0..50u64 {
                     let counter = Arc::clone(&counter);
-                    let (a, b) = parallel_invoke(
+                    let (a, b) = parallel_call(
                         move || async move {
                             counter.fetch_add(1, Ordering::Relaxed);
                             fib(15).await

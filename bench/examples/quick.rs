@@ -9,8 +9,7 @@
 
 use std::time::Instant;
 
-use cmpth::resumable::stackful::system::StackfulSystem;
-use cmpth::{JoinHandleLike, ThreadSystem};
+use cmpth::{JoinHandleLike, StackfulTaskSystem, ThreadSystem};
 
 cmpth::ult_system! {
     /// Arena stacks + sp-based worker lookup.
@@ -46,7 +45,7 @@ fn fib<S: ThreadSystem>(n: u64) -> u64 {
     JoinHandleLike::join(h) + r2
 }
 
-fn bench_one<S: StackfulSystem + ThreadSystem>(label: &'static str) {
+fn bench_one<S: StackfulTaskSystem>(label: &'static str) {
     S::run(1, move || {
         // Warm up the task pool and caches.
         assert_eq!(fib::<S>(20), 6765);
@@ -100,7 +99,7 @@ fn bench_one<S: StackfulSystem + ThreadSystem>(label: &'static str) {
 }
 
 fn main() {
-    bench_one::<cmpth::DefaultUltSystem>("heap+tls ");
+    bench_one::<cmpth::DualTaskSystem>("heap+tls ");
     bench_one::<ArenaTlsSys>("arena+tls");
     bench_one::<ArenaSys>("arena+sp ");
 }

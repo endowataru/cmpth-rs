@@ -70,3 +70,29 @@ where
         h.join();
     }
 }
+
+/// [`run`], but returns `root`'s result — the `StackfulSystem::run` trait
+/// method's actual body.
+///
+/// `run`'s root task is detached (no `JoinHandle`), and a detached task's
+/// descriptor is freed by the exit path the moment it finishes — there's no
+/// safe way to read a result back out of it afterward. Rather than
+/// complicate that already-delicate detach/exit protocol just to keep one
+/// result alive, this wraps `root` in a plain `Arc<Mutex<Option<R>>>`
+/// side-channel instead: negligible cost for something called once per
+/// program (this is the top-level entry point, not a hot path).
+pub fn run_with_result<S, F, R>(num_workers: usize, root: F) -> R
+where
+    S: StackfulSchedulerSystem,
+    S::Desc: crate::resumable::stackful::desc::StackfulTaskDesc + crate::resumable::common::desc::WakerTaskDesc,
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    let result = Arc::new(std::sync::Mutex::new(None));
+    let result2 = Arc::clone(&result);
+    run::<S, _>(num_workers, move || {
+        let r = root();
+        *result2.lock().unwrap() = Some(r);
+    });
+    result.lock().unwrap().take().expect("cmpth: run's root task did not complete")
+}

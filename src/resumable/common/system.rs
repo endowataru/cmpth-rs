@@ -5,12 +5,12 @@
 //! [`StacklessTaskSystem`](crate::resumable::stackless::system::StacklessTaskSystem)
 //! (async-task capability).
 
-use crate::traits::thread_system::ThreadSystem;
+use crate::traits::thread_system::{TaskSystem, ThreadSystem};
 use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::external_queue::ExternalQueue;
 use crate::resumable::common::desc::{SuspendedUlt, TaskDescAlloc};
 use crate::resumable::common::pool::{DescPool, DynamicPool};
-use crate::resumable::common::worker::UltWorker;
+use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
 
 /// Base system interface required by [`UltWorker`] and
 /// [`Scheduler`](crate::resumable::common::scheduler::Scheduler), independent of whether
@@ -107,4 +107,33 @@ pub trait SchedulerSystem: Sized + Send + Sync + 'static {
     ///
     /// [`execute`]: Self::execute
     fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut Self::Desc);
+}
+
+// ---------------------------------------------------------------------------
+// Blanket TaskSystem for every SchedulerSystem
+// ---------------------------------------------------------------------------
+
+/// Every `resumable`-backed system (stackful, stackless, or dual alike)
+/// assumes the same work-stealing scheduler underneath, so `TaskSystem` is
+/// blanket-derived here rather than implemented per flavor — one impl
+/// covers `ThreadSystem`'s (stackful) and `StacklessTaskSystem`'s
+/// (stackless) supertrait requirement alike, since
+/// [`UltWorker::current`](crate::resumable::common::worker::Worker::current)
+/// needs no bound beyond `SchedulerSystem` itself. Only the true base case
+/// (`OsSystem`, which isn't a `SchedulerSystem` at all — no managed worker
+/// pool) needs its own hand-written impl, in `os.rs`.
+impl<S: SchedulerSystem> TaskSystem for S {
+    fn worker_num() -> usize {
+        match UltWorker::<S>::current() {
+            Some(wk) => wk.num(),
+            None => 0,
+        }
+    }
+
+    fn num_workers() -> usize {
+        match UltWorker::<S>::current() {
+            Some(wk) => wk.num_workers(),
+            None => 1,
+        }
+    }
 }

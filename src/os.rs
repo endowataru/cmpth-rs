@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Context;
 
 use crate::traits::{BarrierWaitResult, Delegator, DelegatorConsumer, StackfulBarrier, StackfulMutex, Poller};
-use crate::traits::thread_system::{JoinHandleLike, TlsSlot, ThreadSystem, noop_waker};
+use crate::traits::thread_system::{JoinHandleLike, TaskSystem, TlsSlot, ThreadSystem, noop_waker};
 
 // ---------------------------------------------------------------------------
 // OsPoller — busy-polling Poller for OsSystem
@@ -38,6 +38,18 @@ impl Poller for OsPoller {
 
 pub struct OsSystem;
 
+impl TaskSystem for OsSystem {
+    // No managed worker pool -- any code can call `std::thread::spawn`
+    // freely, so there's no stable per-thread index to report.
+    fn worker_num() -> usize {
+        0
+    }
+
+    fn num_workers() -> usize {
+        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+    }
+}
+
 impl ThreadSystem for OsSystem {
     type Poller = OsPoller;
 
@@ -60,10 +72,6 @@ impl ThreadSystem for OsSystem {
     type SuspendedThread = OsSuspendedThread;
     type Delegator<C: DelegatorConsumer<Self>> = OsDelegator<C>;
     type ThreadSpecific<T: 'static> = OsTls<T>;
-
-    fn num_workers() -> usize {
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
-    }
 }
 
 impl<T: Send + 'static> JoinHandleLike<T> for std::thread::JoinHandle<T> {

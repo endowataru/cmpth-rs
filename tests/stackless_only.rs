@@ -9,7 +9,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use cmpth::StacklessTaskSystem;
+use cmpth::{ScopedStacklessTaskSystem, StacklessTaskSystem};
 
 cmpth::ult_async_system! {
     struct AsyncOnlySystem {

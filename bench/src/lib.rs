@@ -68,25 +68,25 @@ pub trait BenchSystem: Send + Sync + 'static {
 }
 
 // ---------------------------------------------------------------------------
-// CmpthBench — cmpth DefaultUltSystem
+// CmpthBench — cmpth DualTaskSystem
 // ---------------------------------------------------------------------------
 
 pub struct CmpthBench;
 
 impl BenchSystem for CmpthBench {
     type JoinHandle<T: Send + 'static> =
-        <cmpth::DefaultUltSystem as cmpth::ThreadSystem>::JoinHandle<T>;
+        <cmpth::DualTaskSystem as cmpth::ThreadSystem>::JoinHandle<T>;
 
     fn run(num_workers: usize, f: impl FnOnce() + Send + 'static) {
-        use cmpth::StackfulSystem as _;
-        cmpth::DefaultUltSystem::run(num_workers, f);
+        use cmpth::ScopedStackfulTaskSystem as _;
+        cmpth::DualTaskSystem::run(num_workers, f);
     }
 
     fn spawn<T: Send + 'static>(
         f: impl FnOnce() -> T + Send + 'static,
     ) -> Self::JoinHandle<T> {
         use cmpth::ThreadSystem as _;
-        cmpth::DefaultUltSystem::spawn(f)
+        cmpth::DualTaskSystem::spawn(f)
     }
 }
 
@@ -111,7 +111,7 @@ impl BenchSystem for StackfulOnlyBench {
         <StackfulOnlySystem as cmpth::ThreadSystem>::JoinHandle<T>;
 
     fn run(num_workers: usize, f: impl FnOnce() + Send + 'static) {
-        use cmpth::StackfulSystem as _;
+        use cmpth::ScopedStackfulTaskSystem as _;
         StackfulOnlySystem::run(num_workers, f);
     }
 
@@ -325,7 +325,7 @@ where
 
     let result = Arc::new(AtomicU64::new(0));
     let result2 = Arc::clone(&result);
-    use cmpth::StacklessTaskSystem;
+    use cmpth::ScopedStacklessTaskSystem;
     S::run_async(num_workers, async move {
         result2.store(fib_async::<S>(n).await, Ordering::Release);
     });
@@ -333,34 +333,35 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// fib_parallel_invoke — cmpth::parallel_invoke (independent rayon-join-like
+// fib_parallel_invoke — cmpth::parallel_call (independent rayon-join-like
 // scheduler family)
 // ---------------------------------------------------------------------------
 
-/// Parallel Fibonacci via [`StackfulParallelInvoke::parallel_invoke`] —
+/// Parallel Fibonacci via [`ScopedStackfulTaskSystem::parallel_call`] —
 /// cmpth's independent, rayon-`join`-like scheduler (stack-resident jobs, a
 /// single-purpose latch, no `BasicTaskDesc`/pool/`Future` involved at all).
 /// Doesn't fit `BenchSystem` (no `spawn`/`JoinHandle` concept, only scoped
-/// `parallel_invoke`) — used directly with [`run_fib_parallel_invoke`], same
+/// `parallel_call`) — used directly with [`run_fib_parallel_invoke`], same
 /// as [`fib_async`]/[`run_fib_async`].
 ///
-/// Generic over `S: StackfulParallelInvoke`, not hardcoded to
-/// `cmpth::ParallelInvokeSystem` — user code must always reach a scheduler
+/// Generic over `S: ScopedStackfulTaskSystem`, not hardcoded to
+/// `cmpth::ScopedTaskSystem` — user code must always reach a scheduler
 /// through its trait, never a concrete system type, or it becomes locked to
 /// that one implementation (see the "program against traits" principle in
 /// README.md / CLAUDE.md).
-pub fn fib_parallel_invoke<S: cmpth::StackfulParallelInvoke>(n: u64) -> u64 {
+pub fn fib_parallel_invoke<S: cmpth::ScopedStackfulTaskSystem>(n: u64) -> u64 {
     if n <= 1 {
         return n;
     }
-    let (a, b) = S::parallel_invoke(|| fib_parallel_invoke::<S>(n - 1), || fib_parallel_invoke::<S>(n - 2));
+    let (a, b) =
+        S::parallel_call(move || fib_parallel_invoke::<S>(n - 1), move || fib_parallel_invoke::<S>(n - 2));
     a + b
 }
 
 /// Run [`fib_parallel_invoke`] to completion on `num_workers` and return the
 /// result.
-pub fn run_fib_parallel_invoke<S: cmpth::StackfulParallelInvoke>(num_workers: usize, n: u64) -> u64 {
-    S::run(num_workers, || fib_parallel_invoke::<S>(n))
+pub fn run_fib_parallel_invoke<S: cmpth::ScopedStackfulTaskSystem>(num_workers: usize, n: u64) -> u64 {
+    S::run(num_workers, move || fib_parallel_invoke::<S>(n))
 }
 
 /// Count N-Queens solutions for an n×n board.
