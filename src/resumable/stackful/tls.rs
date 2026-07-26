@@ -13,7 +13,7 @@ use crate::traits::thread_system::TlsSlot;
 use crate::resumable::common::desc::TaskDesc;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::system::SchedulerSystem;
-use crate::resumable::stackful::system::UltSchedulerSystem;
+use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::common::worker::{UltWorker, Worker};
 
 static NEXT_ULT_TLS_KEY: AtomicUsize = AtomicUsize::new(0);
@@ -61,7 +61,7 @@ impl<S, T> Default for UltTls<S, T> {
     }
 }
 
-impl<S: UltSchedulerSystem, T: 'static> TlsSlot<T> for UltTls<S, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem, T: 'static> TlsSlot<T> for UltTls<S, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
     fn from_anchor(anchor: &'static crate::traits::thread_system::TlsAnchor) -> &'static Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
         // Sound: repr(transparent) over TlsAnchor (PhantomData is a ZST).
         unsafe { &*(anchor as *const _ as *const Self) }

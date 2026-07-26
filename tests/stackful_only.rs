@@ -2,14 +2,14 @@
 //! `execute`'s dispatch is `execute_stackful` (always a real context switch,
 //! no `poll_fn` tag check) rather than `execute_dual` — `Self::Desc` here
 //! never even needs to implement `AsyncTaskDesc`. `spawn_async` is simply
-//! not reachable for this system (there is no `AsyncWorkerSystem` impl), so
+//! not reachable for this system (there is no `StacklessSystem` impl), so
 //! this exercises exactly the branch-free path `execute_stackful`/
 //! `pop_or_root_stackful` were built for.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use cmpth::{JoinHandleLike, ThreadSystem, UltSystem};
+use cmpth::{JoinHandleLike, ThreadSystem, StackfulSystem};
 
 cmpth::ult_system! {
     struct StackfulOnlySystem {

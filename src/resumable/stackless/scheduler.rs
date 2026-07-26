@@ -23,7 +23,7 @@ use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
 /// `root` is pushed via `fork_async_parent_first` rather than
 /// `fork_parent_first`: there is no `Ctx`/`StackAlloc` to build a real
 /// stack or context from (this function only requires `S: SchedulerSystem`,
-/// not `S: UltSchedulerSystem`), and no current worker exists yet to call
+/// not `S: StackfulSchedulerSystem`), and no current worker exists yet to call
 /// `spawn_async` through. The worker dispatch loop is reused unchanged from
 /// `run` — `Worker::execute` already dispatches through
 /// [`SchedulerSystem::execute`], so a stackless-only system's override

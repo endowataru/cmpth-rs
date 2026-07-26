@@ -31,8 +31,8 @@ use crate::resumable::stackful::sync::delegator::SyncQueue;
 use crate::resumable::common::desc::WakerTaskDesc;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::system::SchedulerSystem;
-use crate::resumable::stackful::system::UltSchedulerSystem;
-use crate::traits::UltSystem;
+use crate::resumable::stackful::system::StackfulSchedulerSystem;
+use crate::traits::StackfulSystem;
 use crate::resumable::common::thread;
 use crate::resumable::stackful::thread::spawn;
 
@@ -40,7 +40,7 @@ use crate::resumable::stackful::thread::spawn;
 // Inner
 // ---------------------------------------------------------------------------
 
-struct Inner<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+struct Inner<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     queue: Q,
     consumer: std::cell::UnsafeCell<C>,
     consumer_sth: S::SuspendedThread,
@@ -49,10 +49,10 @@ struct Inner<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: Sync
     consumer_th: std::cell::UnsafeCell<Option<thread::JoinHandle<S, ()>>>,
 }
 
-unsafe impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Send for Inner<S, C, Q> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {}
-unsafe impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Sync for Inner<S, C, Q> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {}
+unsafe impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Send for Inner<S, C, Q> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {}
+unsafe impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Sync for Inner<S, C, Q> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {}
 
-impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default> Inner<S, C, Q> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default> Inner<S, C, Q> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     fn new(consumer: C) -> Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
         Inner {
             queue: Q::default(),
@@ -70,7 +70,7 @@ impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S,
 // delegator.rs (see that file's comments for the four-bugs-found history).
 // ---------------------------------------------------------------------------
 
-impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Inner<S, C, Q> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Inner<S, C, Q> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     fn consumer(&self) -> &mut C where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
         unsafe { &mut *self.consumer.get() }
     }
@@ -259,7 +259,7 @@ impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S,
 // lock_wait() first.
 // ---------------------------------------------------------------------------
 
-impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Drop for Inner<S, C, Q> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Drop for Inner<S, C, Q> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     fn drop(&mut self) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
         self.lock_wait();
         self.finished.store(true, Ordering::Release);
@@ -280,15 +280,15 @@ impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S,
 // Producer — Clone, mpsc::Sender-like
 // ---------------------------------------------------------------------------
 
-pub struct Producer<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>>(Arc<Inner<S, C, Q>>) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc;
+pub struct Producer<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>>(Arc<Inner<S, C, Q>>) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc;
 
-impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Clone for Producer<S, C, Q> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Clone for Producer<S, C, Q> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     fn clone(&self) -> Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
         Producer(Arc::clone(&self.0))
     }
 }
 
-impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Producer<S, C, Q> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Producer<S, C, Q> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     /// Runs `imm` inline if uncontended, otherwise delegates via `del` and
     /// waits for the result. Blocks only on the caller's own work; any
     /// backlog left behind by other callers is handed to the consumer ULT
@@ -319,7 +319,7 @@ impl<S: UltSchedulerSystem + UltSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S,
 /// [`crate::resumable::stackful::thread::spawn`]).
 pub fn delegator<S, C, Q>(consumer: C) -> Producer<S, C, Q>
 where
-    S: UltSchedulerSystem + UltSystem,
+    S: StackfulSchedulerSystem + StackfulSystem,
     C: DelegatorConsumer<S>,
     Q: SyncQueue<S, C> + Default + 'static, <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc
 {

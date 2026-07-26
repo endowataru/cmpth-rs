@@ -1,15 +1,15 @@
 //! End-to-end tests for a pure stackless-only system (`ult_async_system!`):
-//! no `Ctx`/`StackAlloc`/`UltSchedulerSystem` at all, `execute`'s dispatch is
+//! no `Ctx`/`StackAlloc`/`StackfulSchedulerSystem` at all, `execute`'s dispatch is
 //! `execute_async` (always poll, no `poll_fn` tag check) instead of
-//! `execute_dual`/`execute_stackful`. Only `AsyncTaskSystem`'s
+//! `execute_dual`/`execute_stackful`. Only `StacklessTaskSystem`'s
 //! `run_async`/`spawn`/`recurse`/`.await` are reachable here — there is no
 //! `spawn` (stackful), no `.join()` (blocking), no `block_on`: none of that
-//! is expressible without `UltSchedulerSystem`.
+//! is expressible without `StackfulSchedulerSystem`.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use cmpth::AsyncTaskSystem;
+use cmpth::StacklessTaskSystem;
 
 cmpth::ult_async_system! {
     struct AsyncOnlySystem {

@@ -238,7 +238,7 @@ pub(crate) fn heap_layout(size: usize) -> Layout {
 // ---------------------------------------------------------------------------
 
 /// Stack allocation policy.  Selected per system via
-/// [`UltSchedulerSystem::StackAlloc`](crate::UltSchedulerSystem::StackAlloc)
+/// [`StackfulSchedulerSystem::StackAlloc`](crate::StackfulSchedulerSystem::StackAlloc)
 /// (for real ULT stacks) or as the `A` parameter of
 /// [`ReturnPool`](crate::resumable::common::pool::ReturnPool)/
 /// [`SimplePool`](crate::resumable::common::pool::SimplePool) (for

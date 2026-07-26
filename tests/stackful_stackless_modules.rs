@@ -23,7 +23,7 @@ fn stackful_module_unlocks_lock_and_wait() {
         let r = b.wait();
         assert!(r.is_leader());
 
-        // UltSystem/ThreadSystem also in scope via the same bulk import.
+        // StackfulSystem/ThreadSystem also in scope via the same bulk import.
         assert!(DefaultUltSystem::num_workers() >= 1);
     });
 }

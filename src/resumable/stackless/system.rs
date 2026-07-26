@@ -1,4 +1,4 @@
-//! [`AsyncTaskSystem`] — the blanket-implemented async-task capability
+//! [`StacklessTaskSystem`] — the blanket-implemented async-task capability
 //! trait, and the [`ult_async_system!`](crate::ult_async_system) macro
 //! that generates a stackless-only system.
 
@@ -7,19 +7,19 @@ use std::future::Future;
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::stackless::desc::AsyncTaskDesc;
 
-// `AsyncWorkerSystem` now lives in `crate::traits::ult_system` —
+// `StacklessSystem` now lives in `crate::traits::system` —
 // re-exported below for callers that still spell out
-// `resumable::stackless::system::AsyncWorkerSystem`.
-pub use crate::traits::ult_system::AsyncWorkerSystem;
+// `resumable::stackless::system::StacklessSystem`.
+pub use crate::traits::system::StacklessSystem;
 
 /// `S::spawn(...)`/`S::recurse(...)` associated-function form of
 /// [`crate::resumable::stackless::thread::spawn_async`]/[`crate::resumable::stackless::thread::recurse`].
 ///
 /// Blanket-implemented for every [`SchedulerSystem`] whose `Desc` supports
 /// async tasks, exactly like [`ThreadSystem`](crate::ThreadSystem)'s blanket derivation from
-/// [`UltSystem`](crate::resumable::stackful::system::UltSystem) — no concrete system ever writes `impl
-/// AsyncTaskSystem for ...` by hand.
-pub trait AsyncTaskSystem: SchedulerSystem
+/// [`StackfulSystem`](crate::resumable::stackful::system::StackfulSystem) — no concrete system ever writes `impl
+/// StacklessTaskSystem for ...` by hand.
+pub trait StacklessTaskSystem: SchedulerSystem
 where
     Self::Desc: AsyncTaskDesc,
 {
@@ -43,7 +43,7 @@ where
     }
 
     /// See [`crate::resumable::stackless::scheduler::run_async`]. Named `run_async`, not
-    /// `run`, so it never collides with [`UltSystem::run`](crate::UltSystem::run)
+    /// `run`, so it never collides with [`StackfulSystem::run`](crate::StackfulSystem::run)
     /// on a dual system that implements both.
     fn run_async<F>(num_workers: usize, root: F)
     where
@@ -55,7 +55,7 @@ where
     /// Yield once to the executor from inside an async task on this system
     /// — see [`crate::future::yield_now`], which this just forwards to.
     /// Not generic over `Self` at all (unlike `spawn`/`recurse`/`run_async`):
-    /// provided here purely so generic code bounded by `S: AsyncTaskSystem`
+    /// provided here purely so generic code bounded by `S: StacklessTaskSystem`
     /// can write `S::yield_now().await` instead of a separate
     /// `cmpth::future` import, matching this trait's other methods.
     ///
@@ -65,7 +65,7 @@ where
     /// renamed to dodge the collision — on a dual system implementing both
     /// traits, calling `Concrete::yield_now()` is ambiguous by design (same
     /// resolution as `spawn` above) and must be disambiguated with
-    /// `<Concrete as AsyncTaskSystem>::yield_now()` /
+    /// `<Concrete as StacklessTaskSystem>::yield_now()` /
     /// `<Concrete as ThreadSystem>::yield_now()`; a generic caller bounded by
     /// only one of the two traits never sees the ambiguity.
     fn yield_now() -> impl Future<Output = ()> {
@@ -73,7 +73,7 @@ where
     }
 }
 
-impl<S: SchedulerSystem> AsyncTaskSystem for S where S::Desc: AsyncTaskDesc {}
+impl<S: SchedulerSystem> StacklessTaskSystem for S where S::Desc: AsyncTaskDesc {}
 
 // ---------------------------------------------------------------------------
 // ult_async_system! macro
@@ -82,11 +82,11 @@ impl<S: SchedulerSystem> AsyncTaskSystem for S where S::Desc: AsyncTaskDesc {}
 /// Define a complete **stackless-only** ULT system in one declaration.
 ///
 /// Unlike [`ult_system!`](crate::ult_system), the generated marker struct implements only
-/// [`SchedulerSystem`] — never [`UltSchedulerSystem`](crate::resumable::stackful::system::UltSchedulerSystem), so it never names a
+/// [`SchedulerSystem`] — never [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem), so it never names a
 /// context-switch policy or stack allocator, because it has none. Its only
 /// entry points are [`crate::resumable::stackless::scheduler::run_async`] (run) and
 /// [`crate::resumable::stackless::thread::spawn_async`] (spawn); there is no `spawn`, no
-/// `block_on`, no `ThreadSystem` impl for it via the `UltSystem` blanket
+/// `block_on`, no `ThreadSystem` impl for it via the `StackfulSystem` blanket
 /// (that blanket requires stackful capability).
 ///
 /// `Worker::execute`'s dispatch is [`crate::resumable::stackful::worker::execute_stackful`]
@@ -95,7 +95,7 @@ impl<S: SchedulerSystem> AsyncTaskSystem for S where S::Desc: AsyncTaskDesc {}
 ///
 /// ```
 /// use cmpth::SuspendedUlt;
-/// use cmpth::resumable::stackless::system::AsyncTaskSystem;
+/// use cmpth::resumable::stackless::system::StacklessTaskSystem;
 ///
 /// cmpth::ult_async_system! {
 ///     struct MyAsyncSystem {
@@ -120,7 +120,7 @@ macro_rules! ult_async_system {
                 base:            $base,
                 deque:           $deque,
                 // Sound as the default here specifically: this macro's
-                // output never implements UltSchedulerSystem, so it never
+                // output never implements StackfulSchedulerSystem, so it never
                 // does a real context switch (see InlineTlsCurrent's doc
                 // comment for the hazard that would otherwise apply).
                 lookup:          $crate::resumable::stackless::lookup::InlineTlsCurrent,

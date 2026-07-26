@@ -1,7 +1,7 @@
 //! Stackful worker extension traits ([`ContextSwitcher`]/
 //! [`StackfulLocalQueue`]/[`StackfulWorker`]), the stackful-only/dual
 //! dispatch bodies for `SchedulerSystem::execute`/
-//! `UltSchedulerSystem::pop_or_root`/`SchedulerSystem::free_finished_desc`,
+//! `StackfulSchedulerSystem::pop_or_root`/`SchedulerSystem::free_finished_desc`,
 //! and the `extern "C"` context-switch shims. See
 //! [`common::worker`](crate::resumable::common::worker) for the base
 //! traits and [`UltWorker<S>`](crate::resumable::common::worker::UltWorker) itself.
@@ -13,7 +13,7 @@ use crate::context::{CondTransfer, Context, ContextPolicy, Transfer};
 use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, Worker};
 use crate::resumable::common::system::SchedulerSystem;
-use crate::resumable::stackful::system::UltSchedulerSystem;
+use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::common::desc::{SuspendedUlt, TaskDesc};
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 
@@ -28,9 +28,9 @@ use crate::resumable::stackful::desc::StackfulTaskDesc;
 /// inside the callback is therefore inherently race-free; no "saving in
 /// progress" flags or spin-wait handshakes are needed anywhere.
 ///
-/// Only implementable when `S: UltSchedulerSystem` (needs `S::Ctx`) — a
+/// Only implementable when `S: StackfulSchedulerSystem` (needs `S::Ctx`) — a
 /// stackless-only system has no context-switch policy to name.
-pub trait ContextSwitcher<S: UltSchedulerSystem>: Sized
+pub trait ContextSwitcher<S: StackfulSchedulerSystem>: Sized
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -68,13 +68,13 @@ where
 
 /// Root-continuation management: only meaningful when there is a real
 /// scheduler-loop stack a suspending ULT can fall back into.
-pub trait StackfulLocalQueue<S: UltSchedulerSystem>: LocalQueue<S>
+pub trait StackfulLocalQueue<S: StackfulSchedulerSystem>: LocalQueue<S>
 where
     S::Desc: StackfulTaskDesc,
 {
     /// Pop the next runnable continuation: local deque first, then the root
     /// (scheduler-loop) continuation. Forwards to
-    /// [`UltSchedulerSystem::pop_or_root`] — see that method for why the
+    /// [`StackfulSchedulerSystem::pop_or_root`] — see that method for why the
     /// dispatch body lives on the system trait, not here.
     fn pop_or_root(&self) -> SuspendedUlt<S::Desc>;
 
@@ -88,7 +88,7 @@ where
 
 /// Scheduler-level operations that only make sense with a real, switchable
 /// stack: suspending the calling ULT and resuming whatever's next.
-pub trait StackfulWorker<S: UltSchedulerSystem>:
+pub trait StackfulWorker<S: StackfulSchedulerSystem>:
     Worker<S> + ContextSwitcher<S> + StackfulLocalQueue<S>
 where
     S::Desc: StackfulTaskDesc,
@@ -136,10 +136,10 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Dispatch bodies for SchedulerSystem::execute / UltSchedulerSystem::pop_or_root
+// Dispatch bodies for SchedulerSystem::execute / StackfulSchedulerSystem::pop_or_root
 //
 // Plain functions, not trait defaults directly: each concrete system's
-// `impl SchedulerSystem`/`impl UltSchedulerSystem` block calls exactly one
+// `impl SchedulerSystem`/`impl StackfulSchedulerSystem` block calls exactly one
 // of these from its own `execute`/`pop_or_root` method. No specialization is
 // involved — every concrete marker struct (DefaultUltSystem, a
 // stackful-only `ult_system!` struct, ...) gets exactly one such `impl`
@@ -152,7 +152,7 @@ where
 /// a real context switch — no runtime check.
 pub fn execute_stackful<S>(wk: &UltWorker<S>, cont: SuspendedUlt<S::Desc>)
 where
-    S: UltSchedulerSystem,
+    S: StackfulSchedulerSystem,
     S::Desc: StackfulTaskDesc,
 {
     let wk2 = wk.suspend_to_cont(cont, |wk, prev| wk.set_root_cont(prev));
@@ -163,7 +163,7 @@ where
 /// real, switchable continuation, so no requeue check is needed.
 pub fn pop_or_root_stackful<S>(wk: &UltWorker<S>) -> SuspendedUlt<S::Desc>
 where
-    S: UltSchedulerSystem,
+    S: StackfulSchedulerSystem,
     S::Desc: StackfulTaskDesc,
 {
     if let Some(c) = wk.deque.try_pop_top() {
@@ -184,7 +184,7 @@ where
 
 // --- StackfulLocalQueue ---
 
-impl<S: UltSchedulerSystem> StackfulLocalQueue<S> for UltWorker<S>
+impl<S: StackfulSchedulerSystem> StackfulLocalQueue<S> for UltWorker<S>
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -201,7 +201,7 @@ where
 
 // --- ContextSwitcher ---
 
-impl<S: UltSchedulerSystem> ContextSwitcher<S> for UltWorker<S>
+impl<S: StackfulSchedulerSystem> ContextSwitcher<S> for UltWorker<S>
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -291,7 +291,7 @@ where
 
 // --- StackfulWorker ---
 
-impl<S: UltSchedulerSystem> StackfulWorker<S> for UltWorker<S> where S::Desc: StackfulTaskDesc {}
+impl<S: StackfulSchedulerSystem> StackfulWorker<S> for UltWorker<S> where S::Desc: StackfulTaskDesc {}
 
 // ---------------------------------------------------------------------------
 // Shims: extern "C" callbacks handed to the context-switch layer.
@@ -301,7 +301,7 @@ impl<S: UltSchedulerSystem> StackfulWorker<S> for UltWorker<S> where S::Desc: St
 // anything that could allow the previous context to resume.
 // ---------------------------------------------------------------------------
 
-struct SuspendPayload<S: UltSchedulerSystem, F>
+struct SuspendPayload<S: StackfulSchedulerSystem, F>
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -312,7 +312,7 @@ where
 
 unsafe extern "C" fn suspend_shim<S, F>(prev: Context, a1: *mut (), _a2: *mut ()) -> Transfer
 where
-    S: UltSchedulerSystem,
+    S: StackfulSchedulerSystem,
     S::Desc: StackfulTaskDesc,
     F: FnOnce(&UltWorker<S>, SuspendedUlt<S::Desc>),
 {
@@ -330,7 +330,7 @@ where
     Transfer(wk as *const UltWorker<S> as *mut ())
 }
 
-struct CondSuspendPayload<S: UltSchedulerSystem, F>
+struct CondSuspendPayload<S: StackfulSchedulerSystem, F>
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -341,7 +341,7 @@ where
 
 unsafe extern "C" fn cond_suspend_shim<S, F>(prev: Context, a1: *mut (), _a2: *mut ()) -> CondTransfer
 where
-    S: UltSchedulerSystem,
+    S: StackfulSchedulerSystem,
     S::Desc: StackfulTaskDesc,
     F: FnOnce(&UltWorker<S>, &mut Option<SuspendedUlt<S::Desc>>),
 {
@@ -377,7 +377,7 @@ where
     }
 }
 
-struct ExitPayload<S: UltSchedulerSystem, F>
+struct ExitPayload<S: StackfulSchedulerSystem, F>
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -388,7 +388,7 @@ where
 
 unsafe extern "C" fn exit_shim<S, F>(a1: *mut (), _a2: *mut ()) -> Transfer
 where
-    S: UltSchedulerSystem,
+    S: StackfulSchedulerSystem,
     S::Desc: StackfulTaskDesc,
     F: FnOnce(&UltWorker<S>),
 {

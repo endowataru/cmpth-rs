@@ -1,8 +1,8 @@
 //! [`SchedulerSystem`] — the base scheduler-system trait shared by every
 //! flavor (stackful, stackless, dual). Extended by
-//! [`UltSchedulerSystem`](crate::resumable::stackful::system::UltSchedulerSystem)
+//! [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem)
 //! (real-stack capability) and
-//! [`AsyncTaskSystem`](crate::resumable::stackless::system::AsyncTaskSystem)
+//! [`StacklessTaskSystem`](crate::resumable::stackless::system::StacklessTaskSystem)
 //! (async-task capability).
 
 use crate::traits::thread_system::ThreadSystem;
@@ -19,7 +19,7 @@ use crate::resumable::common::worker::UltWorker;
 /// Deliberately does **not** name a context-switch policy or stack
 /// allocator: a stackless-only system has no real stack to switch into, so
 /// requiring one here would force it to name machinery it never uses. See
-/// [`UltSchedulerSystem`](crate::resumable::stackful::system::UltSchedulerSystem) for the stackful extension.
+/// [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem) for the stackful extension.
 pub trait SchedulerSystem: Sized + Send + Sync + 'static {
     /// The threading system this scheduler runs on.
     type Base: ThreadSystem;
@@ -36,7 +36,7 @@ pub trait SchedulerSystem: Sized + Send + Sync + 'static {
 
     /// Descriptor pool implementation for this system, used by the stackful
     /// `spawn` path (fixed-size ULT stacks, `STACK_SIZE` on
-    /// [`UltSchedulerSystem`](crate::resumable::stackful::system::UltSchedulerSystem)).
+    /// [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem)).
     type Pool: DescPool<Self::Desc>;
 
     /// Descriptor pool used by `spawn_async` (variable-size Future storage,

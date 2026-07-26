@@ -7,7 +7,7 @@
 //!
 //! * **`traits/`** — interface layer, no implementations:
 //!   [`ThreadSystem`], [`traits::Resumable`], [`traits::StackfulMutex`], [`traits::StackfulBarrier`], …
-//! * **`resumable/`** — implementation layer (parametric over [`UltSystem`])
+//! * **`resumable/`** — implementation layer (parametric over [`StackfulSystem`])
 //!   for schedulers whose defining property is that a spawned computation's
 //!   *continuation* is reified into something independently resumable
 //!   later (a real context-switch continuation for stackful ULTs, a
@@ -18,8 +18,8 @@
 //!   so its implementation needs none of this machinery.
 //! * **`lib.rs`** — instantiations: [`DefaultUltSystem`], [`DefaultUltUltSystem`].
 //!
-//! Because every `UltSystem` is also a `ThreadSystem`, schedulers nest: set
-//! `type Base = DefaultUltSystem` in a second `UltSystem` implementation to
+//! Because every `StackfulSystem` is also a `ThreadSystem`, schedulers nest: set
+//! `type Base = DefaultUltSystem` in a second `StackfulSystem` implementation to
 //! run ULTs on top of ULTs.
 
 mod context;
@@ -53,8 +53,8 @@ pub use resumable::stackful::sync::{Barrier as UltBarrier, McsDelegator, McsMute
 pub use resumable::common::sync::{DualBarrier as UltDualBarrier, DualMutex as UltDualMutex, DualMutexGuard as UltDualMutexGuard};
 pub use resumable::stackful::sync::{delegator, Producer as DelegatorProducer};
 pub use resumable::common::system::SchedulerSystem;
-pub use resumable::stackful::system::{UltSchedulerSystem, UltSystem};
-pub use resumable::stackless::system::{AsyncTaskSystem, AsyncWorkerSystem};
+pub use resumable::stackful::system::{StackfulSchedulerSystem, StackfulSystem};
+pub use resumable::stackless::system::{StacklessTaskSystem, StacklessSystem};
 pub use resumable::stackful::tls::UltTls;
 pub use resumable::common::worker::{LocalQueue, TaskPool, UltWorker, Worker, current_worker};
 pub use resumable::stackful::worker::ContextSwitcher;
@@ -64,14 +64,14 @@ pub use resumable::stackful::worker::ContextSwitcher;
 // ---------------------------------------------------------------------------
 
 // Both default systems host stackless spawn_async-style tasks as well as
-// stackful ULTs (`resumable::stackless::system::AsyncWorkerSystem` + `UltSystem`), and their
+// stackful ULTs (`resumable::stackless::system::StacklessSystem` + `StackfulSystem`), and their
 // `Mutex`/`Barrier` are meant to be contended-together from either calling
-// convention -- so `ult_system!` (which can't assume `AsyncWorkerSystem`
+// convention -- so `ult_system!` (which can't assume `StacklessSystem`
 // is also implemented, since a stackful-only system must stay expressible)
 // isn't used here. Everything it would have generated is written out by
-// hand instead, with `UltSystem::Mutex`/`Barrier` bound to the same
+// hand instead, with `StackfulSystem::Mutex`/`Barrier` bound to the same
 // `SuspendedTask`-parameterized `DualMutex`/`DualBarrier` as
-// `AsyncWorkerSystem::Mutex`/`Barrier`: since `SuspendedTask<S>`
+// `StacklessSystem::Mutex`/`Barrier`: since `SuspendedTask<S>`
 // implements both `StackfulResumable` and `StacklessResumable` (unlike
 // the macro's default `BasicSuspendedThread`, stackful-only), one type
 // satisfies both `StackfulMutex` and `StacklessMutex`, so a single
@@ -100,7 +100,7 @@ impl resumable::common::system::SchedulerSystem for DefaultUltSystem {
 
     // Dual system: a popped continuation may be either a real ULT or an
     // async task, so dispatch needs the poll_fn check (see execute_dual's
-    // doc comment / UltSchedulerSystem::pop_or_root below for why this
+    // doc comment / StackfulSchedulerSystem::pop_or_root below for why this
     // can't just be the stackful-only default).
     fn execute(wk: &UltWorker<Self>, cont: SuspendedUlt<resumable::common::desc::BasicTaskDesc>) {
         resumable::dual::worker::execute_dual(wk, cont)
@@ -111,7 +111,7 @@ impl resumable::common::system::SchedulerSystem for DefaultUltSystem {
     }
 }
 
-impl resumable::stackful::system::UltSchedulerSystem for DefaultUltSystem {
+impl resumable::stackful::system::StackfulSchedulerSystem for DefaultUltSystem {
     type Ctx   = NativeContext;
     type StackAlloc = resumable::common::stack::HeapStack;
     const STACK_SIZE: usize = 64 * 1024;
@@ -123,7 +123,7 @@ impl resumable::stackful::system::UltSchedulerSystem for DefaultUltSystem {
     }
 }
 
-impl UltSystem for DefaultUltSystem {
+impl StackfulSystem for DefaultUltSystem {
     type Mutex<T: Send> = UltDualMutex<Self, T, SuspendedTask<Self>>;
     type Barrier         = UltDualBarrier<Self, SuspendedTask<Self>>;
     type Delegator<C: DelegatorConsumer<Self>> = McsDelegator<Self, C>;
@@ -136,7 +136,7 @@ impl UltSystem for DefaultUltSystem {
     }
 }
 
-impl resumable::stackless::system::AsyncWorkerSystem for DefaultUltSystem {
+impl resumable::stackless::system::StacklessSystem for DefaultUltSystem {
     type Mutex<T: Send> = UltDualMutex<Self, T, SuspendedTask<Self>>;
     type Barrier = UltDualBarrier<Self, SuspendedTask<Self>>;
 }
@@ -169,7 +169,7 @@ impl resumable::common::system::SchedulerSystem for DefaultUltUltSystem {
     }
 }
 
-impl resumable::stackful::system::UltSchedulerSystem for DefaultUltUltSystem {
+impl resumable::stackful::system::StackfulSchedulerSystem for DefaultUltUltSystem {
     type Ctx   = NativeContext;
     type StackAlloc = resumable::common::stack::HeapStack;
     const STACK_SIZE: usize = 64 * 1024;
@@ -181,7 +181,7 @@ impl resumable::stackful::system::UltSchedulerSystem for DefaultUltUltSystem {
     }
 }
 
-impl UltSystem for DefaultUltUltSystem {
+impl StackfulSystem for DefaultUltUltSystem {
     type Mutex<T: Send> = UltDualMutex<Self, T, SuspendedTask<Self>>;
     type Barrier         = UltDualBarrier<Self, SuspendedTask<Self>>;
     type Delegator<C: DelegatorConsumer<Self>> = McsDelegator<Self, C>;
@@ -194,7 +194,7 @@ impl UltSystem for DefaultUltUltSystem {
     }
 }
 
-impl resumable::stackless::system::AsyncWorkerSystem for DefaultUltUltSystem {
+impl resumable::stackless::system::StacklessSystem for DefaultUltUltSystem {
     type Mutex<T: Send> = UltDualMutex<Self, T, SuspendedTask<Self>>;
     type Barrier = UltDualBarrier<Self, SuspendedTask<Self>>;
 }
@@ -215,7 +215,7 @@ pub mod default {
     //! call `MySystem::run(...)`, etc. directly on its own marker struct.
 
     use crate::traits::ThreadSystem as _;
-    use crate::traits::UltSystem as _;
+    use crate::traits::StackfulSystem as _;
 
     /// Start the default scheduler with `num_workers` OS threads and run
     /// `root` as the first task.  Returns when `root` and every task it

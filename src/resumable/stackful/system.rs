@@ -1,14 +1,14 @@
-//! [`UltSchedulerSystem`] — extends
+//! [`StackfulSchedulerSystem`] — extends
 //! [`SchedulerSystem`](crate::resumable::common::system::SchedulerSystem)
 //! with real-stack context-switch capability. Also the blanket
-//! `ThreadSystem` derivation for any system implementing both `UltSystem`
-//! and `UltSchedulerSystem`, and the [`ult_system!`](crate::ult_system)
+//! `ThreadSystem` derivation for any system implementing both `StackfulSystem`
+//! and `StackfulSchedulerSystem`, and the [`ult_system!`](crate::ult_system)
 //! macro that generates a stackful-only system.
 //!
 //! # Nesting
 //!
-//! Because the blanket gives every `UltSystem` a full `ThreadSystem`, setting
-//! `type Base = DefaultUltSystem` in a second `UltSystem` stacks one ULT
+//! Because the blanket gives every `StackfulSystem` a full `ThreadSystem`, setting
+//! `type Base = DefaultUltSystem` in a second `StackfulSystem` stacks one ULT
 //! scheduler on top of another without any extra boilerplate:
 //!
 //! ```ignore
@@ -40,9 +40,9 @@ use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::stackful::suspended::UltSuspendedThread;
 use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
 
-// `UltSystem` now lives in `crate::traits::ult_system` — re-exported below
-// for callers that still spell out `resumable::stackful::system::UltSystem`.
-pub use crate::traits::ult_system::UltSystem;
+// `StackfulSystem` now lives in `crate::traits::system` — re-exported below
+// for callers that still spell out `resumable::stackful::system::StackfulSystem`.
+pub use crate::traits::system::StackfulSystem;
 
 /// Extends [`SchedulerSystem`] with real-stack context-switch machinery:
 /// context-switch policy, stack allocator, stack size, and the
@@ -52,7 +52,7 @@ pub use crate::traits::ult_system::UltSystem;
 /// descriptor type (no saved context to switch into) cannot satisfy this
 /// trait at all, which is exactly the point: it makes "this system can run
 /// real ULTs" a checkable, compile-time fact instead of a convention.
-pub trait UltSchedulerSystem: SchedulerSystem
+pub trait StackfulSchedulerSystem: SchedulerSystem
 where
     Self::Desc: StackfulTaskDesc,
 {
@@ -66,7 +66,7 @@ where
     const STACK_SIZE: usize;
 
     /// Parked-continuation type for this system.
-    type SuspendedThread: UltSuspendedThread<UltSchedulerSystem = Self>;
+    type SuspendedThread: UltSuspendedThread<StackfulSchedulerSystem = Self>;
 
     /// Resolve what a suspending/exiting ULT switches into when its local
     /// deque is empty: the worker's own root (scheduler-loop) continuation.
@@ -83,10 +83,10 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Blanket ThreadSystem implementation for every UltSystem
+// Blanket ThreadSystem implementation for every StackfulSystem
 // ---------------------------------------------------------------------------
 
-impl<S: UltSystem + UltSchedulerSystem> ThreadSystem for S
+impl<S: StackfulSystem + StackfulSchedulerSystem> ThreadSystem for S
 where
     S::Desc: StackfulTaskDesc + crate::resumable::common::desc::WakerTaskDesc,
 {
@@ -110,10 +110,10 @@ where
         crate::resumable::stackful::thread::spawn::<S, T, F>(f)
     }
 
-    type Mutex<T: Send> = <S as UltSystem>::Mutex<T>;
-    type Barrier = <S as UltSystem>::Barrier;
+    type Mutex<T: Send> = <S as StackfulSystem>::Mutex<T>;
+    type Barrier = <S as StackfulSystem>::Barrier;
     type SuspendedThread = S::SuspendedThread;
-    type Delegator<C: DelegatorConsumer<Self>> = <S as UltSystem>::Delegator<C>;
+    type Delegator<C: DelegatorConsumer<Self>> = <S as StackfulSystem>::Delegator<C>;
     type ThreadSpecific<T: 'static> = crate::resumable::stackful::tls::UltTls<S, T>;
 
     fn num_workers() -> usize {
@@ -130,12 +130,12 @@ where
 
 /// Define a complete ULT system in one declaration.
 ///
-/// Generates a marker struct and a `UltSystem` implementation that includes
+/// Generates a marker struct and a `StackfulSystem` implementation that includes
 /// the one `static` TLS slot for the per-worker pointer.  The `ThreadSystem`
 /// implementation is provided automatically by the blanket.
 ///
 /// ```
-/// use cmpth::{ThreadSystem, UltSystem, JoinHandleLike};
+/// use cmpth::{ThreadSystem, StackfulSystem, JoinHandleLike};
 ///
 /// cmpth::ult_system! {
 ///     struct MySystem {
@@ -166,7 +166,7 @@ where
 ///         lookup:      cmpth::SpCurrent,   // worker from the stack pointer
 ///     }
 /// }
-/// # use cmpth::UltSystem;
+/// # use cmpth::StackfulSystem;
 /// # GuardedSystem::run(1, || {});
 /// ```
 #[macro_export]
@@ -213,12 +213,12 @@ macro_rules! ult_system {
             type ExternalQueue   = $crate::resumable::common::external_queue::StealPathQueue<$crate::resumable::common::desc::BasicTaskDesc>;
             type Pool            = $crate::resumable::common::pool::ReturnPool<$crate::resumable::common::desc::BasicTaskDesc, $alloc>;
             // Never actually allocated through: this system never calls
-            // spawn_async (no AsyncWorkerSystem impl below). Mirrors
+            // spawn_async (no StacklessSystem impl below). Mirrors
             // ult_async_system!'s unused `Pool` in the other direction.
             type AsyncPool       = $crate::resumable::common::pool::SimplePool<$crate::resumable::common::desc::BasicTaskDesc>;
             const ASYNC_POOL_SIZE: usize = 0;
             // Never actually taken from: this system never calls `recurse`
-            // (no AsyncWorkerSystem impl below). Mirrors `AsyncPool` above.
+            // (no StacklessSystem impl below). Mirrors `AsyncPool` above.
             type RecursionPool   = $crate::resumable::common::pool::ThresholdPool<$crate::resumable::common::pool::BlockPool>;
             type Lookup          = $lookup;
 
@@ -244,7 +244,7 @@ macro_rules! ult_system {
             }
         }
 
-        impl $crate::resumable::stackful::system::UltSchedulerSystem for $name {
+        impl $crate::resumable::stackful::system::StackfulSchedulerSystem for $name {
             type Ctx   = $ctx;
             type StackAlloc = $alloc;
             const STACK_SIZE: usize = $stack;
@@ -252,7 +252,7 @@ macro_rules! ult_system {
             type SuspendedThread = $crate::resumable::stackful::suspended::BasicSuspendedThread<Self>;
         }
 
-        impl $crate::UltSystem for $name {
+        impl $crate::StackfulSystem for $name {
             type Mutex<T: Send>  = $crate::resumable::common::sync::DualMutex<Self, T, $crate::resumable::stackful::suspended::BasicSuspendedThread<Self>>;
             type Barrier         = $crate::resumable::common::sync::DualBarrier<Self, $crate::resumable::stackful::suspended::BasicSuspendedThread<Self>>;
             type Delegator<C: $crate::DelegatorConsumer<Self>> =
