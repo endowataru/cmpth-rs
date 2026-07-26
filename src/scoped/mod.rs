@@ -10,7 +10,7 @@
 //! spawned here outlives this call" property `std::thread::scope` names
 //! itself after, just restricted to exactly two branches.
 //!
-//! Deliberately *not* built on [`crate::ult`]'s `SchedulerSystem`/
+//! Deliberately *not* built on [`crate::resumable`]'s `SchedulerSystem`/
 //! `UltWorker` machinery: a `parallel_invoke` branch is represented as a
 //! plain value on the caller's own native stack frame ([`job::JobRef`]),
 //! with a single-purpose completion latch, not a separately allocated,

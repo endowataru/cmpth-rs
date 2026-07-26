@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use cmpth::default::*;
-use cmpth::ult::sync::mcs_delegator::McsQueue;
+use cmpth::resumable::stackful::sync::mcs_delegator::McsQueue;
 use cmpth::{delegator, BasicSuspendedThread, DefaultUltSystem, DelegatorConsumer};
 
 #[derive(Default)]

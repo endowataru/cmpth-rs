@@ -13,7 +13,7 @@
 //! inherent methods instead.
 //!
 //! The interface owns the name here, not the implementation: `DualMutex`
-//! is the trait; the concrete generic-over-N type (`ult::sync::DualMutex`)
+//! is the trait; the concrete generic-over-N type (`resumable::common::sync::DualMutex`)
 //! is re-exported under an alias (`UltDualMutex`) at the crate root to make
 //! room, the same pattern already used for `Barrier`/`UltBarrier`.
 

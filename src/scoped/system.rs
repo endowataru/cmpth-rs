@@ -1,7 +1,7 @@
 //! [`ParallelInvokeSystem`] — the concrete marker type implementing
 //! [`StackfulParallelInvoke`]/[`StacklessParallelInvoke`].
 //!
-//! Unlike `ult`'s systems, there is no pluggable backend axis here (no
+//! Unlike `resumable`'s systems, there is no pluggable backend axis here (no
 //! `Base`/`Deque`/`Pool` choice — both engines always use `crossbeam_deque`
 //! and always own their worker threads directly), so one concrete type
 //! implementing both traits is enough; no `_system!` macro is needed.

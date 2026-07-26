@@ -1,15 +1,15 @@
 //! [`UltSystem`] and [`AsyncWorkerSystem`] — the two independent
 //! capability traits a concrete system composes (`docs/sync-async-unification.md`).
 //!
-//! Kept separate from [`SchedulerSystem`](crate::ult::system::SchedulerSystem)/
-//! [`UltSchedulerSystem`](crate::ult::system::UltSchedulerSystem), which stay in
-//! `ult::system`: those reference implementation-layer types
+//! Kept separate from [`SchedulerSystem`](crate::resumable::common::system::SchedulerSystem)/
+//! [`UltSchedulerSystem`](crate::resumable::stackful::system::UltSchedulerSystem), which stay in
+//! `resumable::system`: those reference implementation-layer types
 //! (`UltWorker`) directly in their signatures, so they belong with the
 //! scheduler implementation, not the interface layer. `UltSystem` is a
 //! sibling of `UltSchedulerSystem`, not built on top of it (no supertrait
 //! relationship) — a concrete marker struct implements both independently
 //! (via [`ult_system!`](crate::ult_system)), but generic code that only
-//! needs scheduler internals (almost all of `ult/`) should bound on
+//! needs scheduler internals (almost all of `resumable/`) should bound on
 //! `UltSchedulerSystem` alone rather than pulling in `UltSystem`'s
 //! user-facing `Mutex`/`Barrier`/`Delegator` capabilities it never uses.
 //! `run` *is* a trait method here, despite needing `Self: UltSchedulerSystem`

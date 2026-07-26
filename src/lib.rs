@@ -7,8 +7,15 @@
 //!
 //! * **`traits/`** — interface layer, no implementations:
 //!   [`ThreadSystem`], [`traits::Resumable`], [`traits::StackfulMutex`], [`traits::StackfulBarrier`], …
-//! * **`ult/`** — ULT implementation layer (parametric over [`UltSystem`]):
-//!   [`UltWorker<S>`], [`BasicSuspendedThread<S>`], sync primitives, scheduler.
+//! * **`resumable/`** — implementation layer (parametric over [`UltSystem`])
+//!   for schedulers whose defining property is that a spawned computation's
+//!   *continuation* is reified into something independently resumable
+//!   later (a real context-switch continuation for stackful ULTs, a
+//!   pollable task for stackless ones): [`UltWorker<S>`],
+//!   [`BasicSuspendedThread<S>`], sync primitives, scheduler. Sibling to
+//!   [`scoped`], whose defining property is the opposite — a
+//!   `parallel_invoke` call's own continuation is never reified/exposed,
+//!   so its implementation needs none of this machinery.
 //! * **`lib.rs`** — instantiations: [`DefaultUltSystem`], [`DefaultUltUltSystem`].
 //!
 //! Because every `UltSystem` is also a `ThreadSystem`, schedulers nest: set
@@ -20,35 +27,44 @@ pub mod traits;
 mod os;
 mod spin;
 pub mod future;
-pub mod ult;
+pub mod resumable;
 pub mod scoped;
 
 pub use context::{CondTransfer, Context, ContextPolicy, NativeContext, Transfer};
 pub use traits::{BarrierWaitResult, DelegatorConsumer, Delegator, DualBarrier, DualMutex, JoinHandleLike, Poller, Resumable, StackfulParallelInvoke, StacklessParallelInvoke, StackfulResumable, TlsAnchor, TlsSlot, ThreadSystem};
 pub use scoped::ParallelInvokeSystem;
 pub use os::{OsBarrier, OsCondvar, OsMutex, OsPoller, OsSystem, OsTls};
-pub use ult::waker::UltPoller;
-pub use ult::deque::{CrossbeamDeque, SpinDeque, WorkerDeque};
-pub use ult::desc::{AsyncTaskDesc, BasicTaskDesc, StackfulTaskDesc, SuspendedUlt, TaskDesc, TaskDescAlloc};
-pub use ult::external_queue::{ExternalQueue, PollerUltQueue, StealPathQueue};
-pub use ult::lookup::{CurrentLookup, InlineTlsCurrent, SpCurrent, TlsCurrent};
-pub use ult::pool::{DescPool, ReturnPool, SimplePool};
-pub use ult::stack::{ArenaStack, HeapStack, StackAlloc};
-pub use ult::async_wait::SuspendedFuture;
-pub use ult::dual_wait::SuspendedTask;
-pub use ult::suspended::{BasicSuspendedThread, UltSuspendedThread};
-pub use ult::sync::{Barrier as UltBarrier, McsDelegator, McsMutex, McsMutexGuard, McsCondvar, BarrierCore, MutexCore, DualBarrier as UltDualBarrier, DualMutex as UltDualMutex, DualMutexGuard as UltDualMutexGuard};
-pub use ult::sync::{delegator, Producer as DelegatorProducer};
-pub use ult::system::{AsyncTaskSystem, AsyncWorkerSystem, SchedulerSystem, UltSchedulerSystem, UltSystem};
-pub use ult::tls::UltTls;
-pub use ult::worker::{ContextSwitcher, LocalQueue, TaskPool, UltWorker, Worker, current_worker};
+pub use resumable::stackful::waker::UltPoller;
+pub use resumable::common::deque::{CrossbeamDeque, SpinDeque, WorkerDeque};
+pub use resumable::common::desc::{BasicTaskDesc, SuspendedUlt, TaskDesc, TaskDescAlloc};
+pub use resumable::stackful::desc::StackfulTaskDesc;
+pub use resumable::stackless::desc::AsyncTaskDesc;
+pub use resumable::common::external_queue::{ExternalQueue, PollerUltQueue, StealPathQueue};
+pub use resumable::common::lookup::{CurrentLookup, TlsCurrent};
+pub use resumable::stackful::lookup::SpCurrent;
+pub use resumable::stackless::lookup::InlineTlsCurrent;
+pub use resumable::common::pool::{DescPool, ReturnPool, SimplePool};
+pub use resumable::stackful::stack::ArenaStack;
+pub use resumable::common::stack::{HeapStack, StackAlloc};
+pub use resumable::stackless::async_wait::SuspendedFuture;
+pub use resumable::dual::dual_wait::SuspendedTask;
+pub use resumable::stackful::suspended::{BasicSuspendedThread, UltSuspendedThread};
+pub use resumable::stackful::sync::{Barrier as UltBarrier, McsDelegator, McsMutex, McsMutexGuard, McsCondvar, BarrierCore, MutexCore};
+pub use resumable::common::sync::{DualBarrier as UltDualBarrier, DualMutex as UltDualMutex, DualMutexGuard as UltDualMutexGuard};
+pub use resumable::stackful::sync::{delegator, Producer as DelegatorProducer};
+pub use resumable::common::system::SchedulerSystem;
+pub use resumable::stackful::system::{UltSchedulerSystem, UltSystem};
+pub use resumable::stackless::system::{AsyncTaskSystem, AsyncWorkerSystem};
+pub use resumable::stackful::tls::UltTls;
+pub use resumable::common::worker::{LocalQueue, TaskPool, UltWorker, Worker, current_worker};
+pub use resumable::stackful::worker::ContextSwitcher;
 
 // ---------------------------------------------------------------------------
 // Default instantiations
 // ---------------------------------------------------------------------------
 
 // Both default systems host stackless spawn_async-style tasks as well as
-// stackful ULTs (`ult::system::AsyncWorkerSystem` + `UltSystem`), and their
+// stackful ULTs (`resumable::stackless::system::AsyncWorkerSystem` + `UltSystem`), and their
 // `Mutex`/`Barrier` are meant to be contended-together from either calling
 // convention -- so `ult_system!` (which can't assume `AsyncWorkerSystem`
 // is also implemented, since a stackful-only system must stay expressible)
@@ -66,16 +82,16 @@ pub use ult::worker::{ContextSwitcher, LocalQueue, TaskPool, UltWorker, Worker, 
 /// The default ULT system: runs on top of [`OsSystem`].
 pub struct DefaultUltSystem;
 
-impl ult::system::SchedulerSystem for DefaultUltSystem {
+impl resumable::common::system::SchedulerSystem for DefaultUltSystem {
     type Base  = OsSystem;
-    type Desc  = ult::desc::BasicTaskDesc;
-    type Deque = CrossbeamDeque<ult::desc::BasicTaskDesc>;
-    type ExternalQueue   = ult::external_queue::StealPathQueue<ult::desc::BasicTaskDesc>;
-    type Pool            = ult::pool::ReturnPool<ult::desc::BasicTaskDesc, ult::stack::HeapStack>;
-    type AsyncPool       = ult::pool::ReturnPool<ult::desc::BasicTaskDesc, ult::stack::AsyncArenaStack>;
+    type Desc  = resumable::common::desc::BasicTaskDesc;
+    type Deque = CrossbeamDeque<resumable::common::desc::BasicTaskDesc>;
+    type ExternalQueue   = resumable::common::external_queue::StealPathQueue<resumable::common::desc::BasicTaskDesc>;
+    type Pool            = resumable::common::pool::ReturnPool<resumable::common::desc::BasicTaskDesc, resumable::common::stack::HeapStack>;
+    type AsyncPool       = resumable::common::pool::ReturnPool<resumable::common::desc::BasicTaskDesc, resumable::stackless::stack::AsyncArenaStack>;
     const ASYNC_POOL_SIZE: usize = 512;
-    type RecursionPool   = ult::pool::ThresholdPool<ult::pool::BlockPool>;
-    type Lookup          = ult::lookup::TlsCurrent;
+    type RecursionPool   = resumable::common::pool::ThresholdPool<resumable::common::pool::BlockPool>;
+    type Lookup          = resumable::common::lookup::TlsCurrent;
 
     fn worker_tls() -> &'static <OsSystem as ThreadSystem>::ThreadSpecific<UltWorker<Self>> {
         static A: TlsAnchor = TlsAnchor::new();
@@ -86,24 +102,24 @@ impl ult::system::SchedulerSystem for DefaultUltSystem {
     // async task, so dispatch needs the poll_fn check (see execute_dual's
     // doc comment / UltSchedulerSystem::pop_or_root below for why this
     // can't just be the stackful-only default).
-    fn execute(wk: &UltWorker<Self>, cont: SuspendedUlt<ult::desc::BasicTaskDesc>) {
-        ult::worker::execute_dual(wk, cont)
+    fn execute(wk: &UltWorker<Self>, cont: SuspendedUlt<resumable::common::desc::BasicTaskDesc>) {
+        resumable::dual::worker::execute_dual(wk, cont)
     }
 
-    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut ult::desc::BasicTaskDesc) {
-        ult::worker::free_finished_desc_dual(wk, desc)
+    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut resumable::common::desc::BasicTaskDesc) {
+        resumable::dual::worker::free_finished_desc_dual(wk, desc)
     }
 }
 
-impl ult::system::UltSchedulerSystem for DefaultUltSystem {
+impl resumable::stackful::system::UltSchedulerSystem for DefaultUltSystem {
     type Ctx   = NativeContext;
-    type StackAlloc = ult::stack::HeapStack;
+    type StackAlloc = resumable::common::stack::HeapStack;
     const STACK_SIZE: usize = 64 * 1024;
 
-    type SuspendedThread = ult::suspended::BasicSuspendedThread<Self>;
+    type SuspendedThread = resumable::stackful::suspended::BasicSuspendedThread<Self>;
 
-    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedUlt<ult::desc::BasicTaskDesc> {
-        ult::worker::pop_or_root_dual(wk)
+    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedUlt<resumable::common::desc::BasicTaskDesc> {
+        resumable::dual::worker::pop_or_root_dual(wk)
     }
 }
 
@@ -116,11 +132,11 @@ impl UltSystem for DefaultUltSystem {
     where
         F: FnOnce() + Send + 'static,
     {
-        ult::scheduler::run::<Self, F>(num_workers, root)
+        resumable::stackful::scheduler::run::<Self, F>(num_workers, root)
     }
 }
 
-impl ult::system::AsyncWorkerSystem for DefaultUltSystem {
+impl resumable::stackless::system::AsyncWorkerSystem for DefaultUltSystem {
     type Mutex<T: Send> = UltDualMutex<Self, T, SuspendedTask<Self>>;
     type Barrier = UltDualBarrier<Self, SuspendedTask<Self>>;
 }
@@ -128,40 +144,40 @@ impl ult::system::AsyncWorkerSystem for DefaultUltSystem {
 /// A second-level ULT system: runs on top of [`DefaultUltSystem`]'s ULTs.
 pub struct DefaultUltUltSystem;
 
-impl ult::system::SchedulerSystem for DefaultUltUltSystem {
+impl resumable::common::system::SchedulerSystem for DefaultUltUltSystem {
     type Base  = DefaultUltSystem;
-    type Desc  = ult::desc::BasicTaskDesc;
-    type Deque = CrossbeamDeque<ult::desc::BasicTaskDesc>;
-    type ExternalQueue   = ult::external_queue::StealPathQueue<ult::desc::BasicTaskDesc>;
-    type Pool            = ult::pool::ReturnPool<ult::desc::BasicTaskDesc, ult::stack::HeapStack>;
-    type AsyncPool       = ult::pool::ReturnPool<ult::desc::BasicTaskDesc, ult::stack::AsyncArenaStack>;
+    type Desc  = resumable::common::desc::BasicTaskDesc;
+    type Deque = CrossbeamDeque<resumable::common::desc::BasicTaskDesc>;
+    type ExternalQueue   = resumable::common::external_queue::StealPathQueue<resumable::common::desc::BasicTaskDesc>;
+    type Pool            = resumable::common::pool::ReturnPool<resumable::common::desc::BasicTaskDesc, resumable::common::stack::HeapStack>;
+    type AsyncPool       = resumable::common::pool::ReturnPool<resumable::common::desc::BasicTaskDesc, resumable::stackless::stack::AsyncArenaStack>;
     const ASYNC_POOL_SIZE: usize = 512;
-    type RecursionPool   = ult::pool::ThresholdPool<ult::pool::BlockPool>;
-    type Lookup          = ult::lookup::TlsCurrent;
+    type RecursionPool   = resumable::common::pool::ThresholdPool<resumable::common::pool::BlockPool>;
+    type Lookup          = resumable::common::lookup::TlsCurrent;
 
     fn worker_tls() -> &'static <DefaultUltSystem as ThreadSystem>::ThreadSpecific<UltWorker<Self>> {
         static A: TlsAnchor = TlsAnchor::new();
         TlsSlot::from_anchor(&A)
     }
 
-    fn execute(wk: &UltWorker<Self>, cont: SuspendedUlt<ult::desc::BasicTaskDesc>) {
-        ult::worker::execute_dual(wk, cont)
+    fn execute(wk: &UltWorker<Self>, cont: SuspendedUlt<resumable::common::desc::BasicTaskDesc>) {
+        resumable::dual::worker::execute_dual(wk, cont)
     }
 
-    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut ult::desc::BasicTaskDesc) {
-        ult::worker::free_finished_desc_dual(wk, desc)
+    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut resumable::common::desc::BasicTaskDesc) {
+        resumable::dual::worker::free_finished_desc_dual(wk, desc)
     }
 }
 
-impl ult::system::UltSchedulerSystem for DefaultUltUltSystem {
+impl resumable::stackful::system::UltSchedulerSystem for DefaultUltUltSystem {
     type Ctx   = NativeContext;
-    type StackAlloc = ult::stack::HeapStack;
+    type StackAlloc = resumable::common::stack::HeapStack;
     const STACK_SIZE: usize = 64 * 1024;
 
-    type SuspendedThread = ult::suspended::BasicSuspendedThread<Self>;
+    type SuspendedThread = resumable::stackful::suspended::BasicSuspendedThread<Self>;
 
-    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedUlt<ult::desc::BasicTaskDesc> {
-        ult::worker::pop_or_root_dual(wk)
+    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedUlt<resumable::common::desc::BasicTaskDesc> {
+        resumable::dual::worker::pop_or_root_dual(wk)
     }
 }
 
@@ -174,11 +190,11 @@ impl UltSystem for DefaultUltUltSystem {
     where
         F: FnOnce() + Send + 'static,
     {
-        ult::scheduler::run::<Self, F>(num_workers, root)
+        resumable::stackful::scheduler::run::<Self, F>(num_workers, root)
     }
 }
 
-impl ult::system::AsyncWorkerSystem for DefaultUltUltSystem {
+impl resumable::stackless::system::AsyncWorkerSystem for DefaultUltUltSystem {
     type Mutex<T: Send> = UltDualMutex<Self, T, SuspendedTask<Self>>;
     type Barrier = UltDualBarrier<Self, SuspendedTask<Self>>;
 }
@@ -232,7 +248,7 @@ pub mod default {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        crate::ult::thread::spawn::<crate::DefaultUltSystem, T, F>(f)
+        crate::resumable::stackful::thread::spawn::<crate::DefaultUltSystem, T, F>(f)
     }
 
     /// Spawn a `Future` as a stackless task: the executor polls it in place,
@@ -249,7 +265,7 @@ pub mod default {
         F: std::future::Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        crate::DefaultUltSystem::block_on(crate::ult::thread::spawn_async::<
+        crate::DefaultUltSystem::block_on(crate::resumable::stackless::thread::spawn_async::<
             crate::DefaultUltSystem,
             T,
             F,
@@ -261,11 +277,11 @@ pub mod default {
         crate::DefaultUltSystem::yield_now();
     }
 
-    pub type JoinHandle<T> = crate::ult::thread::JoinHandle<crate::DefaultUltSystem, T>;
-    pub type Mutex<T> = crate::ult::sync::McsMutex<crate::DefaultUltSystem, T>;
-    pub type MutexGuard<'a, T> = crate::ult::sync::McsMutexGuard<'a, crate::DefaultUltSystem, T>;
-    pub type Condvar = crate::ult::sync::McsCondvar<crate::DefaultUltSystem>;
-    pub type Barrier = crate::ult::sync::Barrier<crate::DefaultUltSystem>;
+    pub type JoinHandle<T> = crate::resumable::common::thread::JoinHandle<crate::DefaultUltSystem, T>;
+    pub type Mutex<T> = crate::resumable::stackful::sync::McsMutex<crate::DefaultUltSystem, T>;
+    pub type MutexGuard<'a, T> = crate::resumable::stackful::sync::McsMutexGuard<'a, crate::DefaultUltSystem, T>;
+    pub type Condvar = crate::resumable::stackful::sync::McsCondvar<crate::DefaultUltSystem>;
+    pub type Barrier = crate::resumable::stackful::sync::Barrier<crate::DefaultUltSystem>;
 }
 
 // ---------------------------------------------------------------------------

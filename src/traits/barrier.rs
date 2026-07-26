@@ -29,7 +29,7 @@ pub trait StacklessBarrier: Sized + Send + Sync {
 /// A barrier usable from either calling convention — see
 /// [`crate::traits::DualMutex`] for the same pattern applied to mutexes.
 /// The interface owns the name here too: the concrete generic-over-N type
-/// (`ult::sync::DualBarrier`) is re-exported under an alias
+/// (`resumable::common::sync::DualBarrier`) is re-exported under an alias
 /// (`UltDualBarrier`) at the crate root to make room.
 pub trait DualBarrier: Sized + Send + Sync + StackfulBarrier + StacklessBarrier {}
 

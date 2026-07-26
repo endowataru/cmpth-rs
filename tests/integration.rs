@@ -800,10 +800,10 @@ impl cmpth::SchedulerSystem for ManualSystem {
     type ExternalQueue   = StealPathQueue<BasicTaskDesc>;
     type Pool            = ReturnPool<BasicTaskDesc, HeapStack>;
     // Unused: ManualSystem never calls spawn_async.
-    type AsyncPool       = cmpth::ult::pool::SimplePool<BasicTaskDesc>;
+    type AsyncPool       = cmpth::resumable::common::pool::SimplePool<BasicTaskDesc>;
     const ASYNC_POOL_SIZE: usize = 0;
     // Unused: ManualSystem never calls recurse.
-    type RecursionPool   = cmpth::ult::pool::ThresholdPool<cmpth::ult::pool::BlockPool>;
+    type RecursionPool   = cmpth::resumable::common::pool::ThresholdPool<cmpth::resumable::common::pool::BlockPool>;
     type Lookup          = TlsCurrent;
 
     fn worker_tls() -> &'static <OsSystem as cmpth::ThreadSystem>::ThreadSpecific<UltWorker<Self>> {
@@ -816,11 +816,11 @@ impl cmpth::SchedulerSystem for ManualSystem {
 
     // Stackful-only: no poll_fn tag check, see `execute_stackful`'s doc comment.
     fn execute(wk: &UltWorker<Self>, cont: cmpth::SuspendedUlt<BasicTaskDesc>) {
-        cmpth::ult::worker::execute_stackful(wk, cont)
+        cmpth::resumable::stackful::worker::execute_stackful(wk, cont)
     }
 
     fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut BasicTaskDesc) {
-        cmpth::ult::worker::free_finished_desc_stackful(wk, desc)
+        cmpth::resumable::stackful::worker::free_finished_desc_stackful(wk, desc)
     }
 }
 
@@ -834,15 +834,15 @@ impl cmpth::UltSchedulerSystem for ManualSystem {
 
 impl UltSystem for ManualSystem {
     type Mutex<T: Send> = cmpth::McsMutex<Self, T>;
-    type Barrier        = cmpth::ult::sync::Barrier<Self>;
+    type Barrier        = cmpth::resumable::stackful::sync::Barrier<Self>;
     type Delegator<C: cmpth::DelegatorConsumer<Self>> =
-        cmpth::ult::sync::McsDelegator<Self, C>;
+        cmpth::resumable::stackful::sync::McsDelegator<Self, C>;
 
     fn run<F>(num_workers: usize, root: F)
     where
         F: FnOnce() + Send + 'static,
     {
-        cmpth::ult::scheduler::run::<Self, F>(num_workers, root)
+        cmpth::resumable::stackful::scheduler::run::<Self, F>(num_workers, root)
     }
 }
 
