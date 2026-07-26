@@ -17,7 +17,7 @@ cmpth::ult_system! {
     pub struct ArenaSys {
         base:        cmpth::OsSystem,
         context:     cmpth::NativeContext,
-        deque:       cmpth::CrossbeamDeque,
+        deque:       cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>,
         stack_size:  64 * 1024,
         stack_alloc: cmpth::ArenaStack,
         lookup:      cmpth::SpCurrent,
@@ -30,7 +30,7 @@ cmpth::ult_system! {
     pub struct ArenaTlsSys {
         base:        cmpth::OsSystem,
         context:     cmpth::NativeContext,
-        deque:       cmpth::CrossbeamDeque,
+        deque:       cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>,
         stack_size:  64 * 1024,
         stack_alloc: cmpth::ArenaStack,
         lookup:      cmpth::TlsCurrent,

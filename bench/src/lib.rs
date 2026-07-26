@@ -91,6 +91,52 @@ impl BenchSystem for CmpthBench {
 }
 
 // ---------------------------------------------------------------------------
+// StackfulOnlyBench — cmpth stackful-only system (ult_system!, no AsyncTaskDesc
+// anywhere: Worker::execute is execute_stackful, no poll_fn tag check)
+// ---------------------------------------------------------------------------
+
+cmpth::ult_system! {
+    pub struct StackfulOnlySystem {
+        base:       cmpth::OsSystem,
+        context:    cmpth::NativeContext,
+        deque:      cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>,
+        stack_size: 64 * 1024,
+    }
+}
+
+pub struct StackfulOnlyBench;
+
+impl BenchSystem for StackfulOnlyBench {
+    type JoinHandle<T: Send + 'static> =
+        <StackfulOnlySystem as cmpth::ThreadSystem>::JoinHandle<T>;
+
+    fn run(num_workers: usize, f: impl FnOnce() + Send + 'static) {
+        use cmpth::UltSystem as _;
+        StackfulOnlySystem::run(num_workers, f);
+    }
+
+    fn spawn<T: Send + 'static>(
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> Self::JoinHandle<T> {
+        use cmpth::ThreadSystem as _;
+        StackfulOnlySystem::spawn(f)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AsyncOnlySystem — cmpth stackless-only system (ult_async_system!, no
+// UltSchedulerSystem at all). Doesn't fit BenchSystem (no blocking join);
+// used directly with `run_fib_async`/`fib_async` instead.
+// ---------------------------------------------------------------------------
+
+cmpth::ult_async_system! {
+    pub struct AsyncOnlySystem {
+        base:  cmpth::OsSystem,
+        deque: cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // OsThreadBench — raw std::thread (non-recursive benchmarks only)
 // ---------------------------------------------------------------------------
 
@@ -221,6 +267,91 @@ pub fn fib<S: BenchSystem>(n: u64) -> u64 {
     }
     let (r1, r2) = S::par_join(move || fib::<S>(n - 1), move || fib::<S>(n - 2));
     r1 + r2
+}
+
+// ---------------------------------------------------------------------------
+// Stackless-only fib — no BenchSystem (blocking join doesn't exist for a pure
+// stackless-only system): spawn_async + .await all the way down instead of
+// spawn + .join(). Boxed for recursion (an `async fn` can't directly recurse).
+// ---------------------------------------------------------------------------
+
+/// Parallel Fibonacci via binary fork-join, entirely through
+/// `spawn_async`/`.await` — the stackless-only counterpart to [`fib`].
+///
+/// Mirrors [`BenchSystem::par_join`]'s default (spawn one branch, run the
+/// other inline): only `n - 1` is `spawn_async`'d; `n - 2` is awaited
+/// directly as a nested future in this same task, with no separate
+/// descriptor or dispatch-loop round trip — the async equivalent of a
+/// plain, un-spawned function call. Spawning *both* branches (an earlier
+/// version of this benchmark did) pays two tasks' worth of scheduling
+/// overhead per node for an algorithm that, in the stackful/rayon
+/// versions being compared against, only ever pays for one.
+///
+/// The spawned (`n - 1`) branch isn't self-referential at the type level:
+/// its future is handed to `spawn_async` and consumed there (in its own,
+/// separately allocated task) before this function's own future ever
+/// suspends, so no boxing is needed for it. The inlined (`n - 2`) branch,
+/// in contrast, really is held across this future's own suspend points
+/// whenever it doesn't finish synchronously (its subtasks got stolen),
+/// which is exactly the case `async fn` recursion can't express without
+/// heap indirection (E0733) — [`cmpth::ult::thread::recurse`] provides
+/// that indirection from a per-worker pool instead of `Box::pin`, since
+/// this recursive call is never a schedulable task (only ever awaited by
+/// its immediate caller, right here).
+pub fn fib_async<S>(n: u64) -> impl std::future::Future<Output = u64> + Send
+where
+    S: cmpth::SchedulerSystem + cmpth::AsyncTaskSystem,
+    S::Desc: cmpth::AsyncTaskDesc,
+{
+    async move {
+        if n <= 1 {
+            return n;
+        }
+        let h1 = S::spawn(move || fib_async::<S>(n - 1)).await;
+        let r2 = S::recurse(move || fib_async::<S>(n - 2)).await;
+        h1.await + r2
+    }
+}
+
+/// Run [`fib_async`] to completion on a stackless-only system `S` and return
+/// the result.
+pub fn run_fib_async<S>(num_workers: usize, n: u64) -> u64
+where
+    S: cmpth::SchedulerSystem,
+    S::Desc: cmpth::AsyncTaskDesc,
+{
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    let result = Arc::new(AtomicU64::new(0));
+    let result2 = Arc::clone(&result);
+    use cmpth::AsyncTaskSystem;
+    S::run_async(num_workers, async move {
+        result2.store(fib_async::<S>(n).await, Ordering::Release);
+    });
+    result.load(Ordering::Acquire)
+}
+
+// ---------------------------------------------------------------------------
+// fib_forkjoin — cmpth::fork_join (the experimental rayon-style scheduler)
+// ---------------------------------------------------------------------------
+
+/// Parallel Fibonacci via [`cmpth::fork_join::join`] — cmpth's experimental
+/// rayon-style scheduler (stack-resident jobs, a single-purpose latch, no
+/// `BasicTaskDesc`/pool/`Future` involved at all). Doesn't fit `BenchSystem`
+/// (no `spawn`/`JoinHandle` concept, only scoped `join`) — used directly
+/// with [`run_fib_forkjoin`], same as [`fib_async`]/[`run_fib_async`].
+pub fn fib_forkjoin(n: u64) -> u64 {
+    if n <= 1 {
+        return n;
+    }
+    let (a, b) = cmpth::fork_join::join(|| fib_forkjoin(n - 1), || fib_forkjoin(n - 2));
+    a + b
+}
+
+/// Run [`fib_forkjoin`] to completion on `num_workers` and return the result.
+pub fn run_fib_forkjoin(num_workers: usize, n: u64) -> u64 {
+    cmpth::fork_join::run(num_workers, || fib_forkjoin(n))
 }
 
 /// Count N-Queens solutions for an n×n board.
