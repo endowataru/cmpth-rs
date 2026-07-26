@@ -1,6 +1,6 @@
 //! Async waker integration for ULT-based systems.
 //!
-//! The waker data pointer is `*mut BasicTaskDesc`.  Two vtables are used:
+//! The waker data pointer is `*mut S::Desc`.  Two vtables are used:
 //!
 //! * **PRIVATE** (`waker_refs & EVER_SHARED == 0`): the waker has never been
 //!   cloned.  State transitions are driven by `waker_refs` bits 0-1
@@ -37,18 +37,19 @@ use std::task::{Context, RawWaker, RawWakerVTable, Waker};
 
 use crate::traits::Poller;
 use crate::traits::thread_system::{noop_waker, ThreadSystem};
-use crate::ult::desc::{AsyncTaskDesc, BasicTaskDesc, StackfulTaskDesc, SuspendedUlt, WakeOutcome};
+use crate::ult::desc::{StackfulTaskDesc, SuspendedUlt, WakeOutcome, WakerTaskDesc};
 use crate::ult::external_queue::ExternalQueue;
 use crate::ult::scheduler::Scheduler;
-use crate::ult::system::UltSchedulerSystem;
-use crate::ult::worker::{LocalQueue, UltWorker, Worker};
+use crate::ult::system::{SchedulerSystem, UltSchedulerSystem};
+use crate::ult::desc::TaskDesc;
+use crate::ult::worker::{LocalQueue, StackfulWorker, UltWorker, Worker};
 
 // ---------------------------------------------------------------------------
 // Vtable singletons (one per concrete UltSystem type S)
 // ---------------------------------------------------------------------------
 
 struct PrivateVtable<S>(PhantomData<S>);
-impl<S: UltSchedulerSystem> PrivateVtable<S> {
+impl<S: UltSchedulerSystem> PrivateVtable<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     const VTABLE: RawWakerVTable = RawWakerVTable::new(
         clone_private::<S>,
         wake_private::<S>,
@@ -58,7 +59,7 @@ impl<S: UltSchedulerSystem> PrivateVtable<S> {
 }
 
 struct SharedVtable<S>(PhantomData<S>);
-impl<S: UltSchedulerSystem> SharedVtable<S> {
+impl<S: UltSchedulerSystem> SharedVtable<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     const VTABLE: RawWakerVTable = RawWakerVTable::new(
         clone_shared::<S>,
         wake_shared::<S>,
@@ -67,11 +68,11 @@ impl<S: UltSchedulerSystem> SharedVtable<S> {
     );
 }
 
-fn private_vtable<S: UltSchedulerSystem>() -> &'static RawWakerVTable {
+fn private_vtable<S: UltSchedulerSystem>() -> &'static RawWakerVTable where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     &PrivateVtable::<S>::VTABLE
 }
 
-fn shared_vtable<S: UltSchedulerSystem>() -> &'static RawWakerVTable {
+fn shared_vtable<S: UltSchedulerSystem>() -> &'static RawWakerVTable where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     &SharedVtable::<S>::VTABLE
 }
 
@@ -82,7 +83,7 @@ fn shared_vtable<S: UltSchedulerSystem>() -> &'static RawWakerVTable {
 /// [`Poller`] implementation for ULT systems.
 ///
 /// In ULT mode (`desc` is `Some`): stores a real [`Waker`] backed by
-/// `waker_refs` in the current [`BasicTaskDesc`].  [`wait`](Poller::wait) uses
+/// `waker_refs` in the current descriptor.  [`wait`](Poller::wait) uses
 /// `cond_suspend_to_sched` with NOTIFIED-cancel logic.
 ///
 /// In fallback mode (`desc` is `None`, called from outside the scheduler):
@@ -92,14 +93,14 @@ fn shared_vtable<S: UltSchedulerSystem>() -> &'static RawWakerVTable {
 /// This type is `!Send`: it is bound to the same ULT.  In cmpth, `!Send`
 /// means "bound to the same ULT", not "bound to the same OS thread" — the
 /// scheduler moves the entire ULT stack atomically on steal.
-pub struct UltPoller<S: UltSchedulerSystem> {
-    desc: Option<NonNull<BasicTaskDesc>>,
+pub struct UltPoller<S: UltSchedulerSystem> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+    desc: Option<NonNull<S::Desc>>,
     waker: Waker,
     _marker: PhantomData<S>,
 }
 
-impl<S: UltSchedulerSystem> Poller for UltPoller<S> {
-    fn new() -> Self {
+impl<S: UltSchedulerSystem> Poller for UltPoller<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+    fn new() -> Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
         match UltWorker::<S>::current() {
             Some(wk) => {
                 let desc = wk.cur_task.get();
@@ -120,11 +121,11 @@ impl<S: UltSchedulerSystem> Poller for UltPoller<S> {
         }
     }
 
-    fn context<'a>(&'a self) -> Context<'a> {
+    fn context<'a>(&'a self) -> Context<'a> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
         Context::from_waker(&self.waker)
     }
 
-    fn wait(&self) {
+    fn wait(&self) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
         match self.desc {
             Some(desc) => {
                 let desc = desc.as_ptr();
@@ -144,8 +145,8 @@ impl<S: UltSchedulerSystem> Poller for UltPoller<S> {
     }
 }
 
-impl<S: UltSchedulerSystem> Drop for UltPoller<S> {
-    fn drop(&mut self) {
+impl<S: UltSchedulerSystem> Drop for UltPoller<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+    fn drop(&mut self) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
         if let Some(desc) = self.desc {
             // Reset before self.waker drops, so racing wakers see IDLE.
             unsafe { desc.as_ref().mark_idle() };
@@ -160,7 +161,7 @@ impl<S: UltSchedulerSystem> Drop for UltPoller<S> {
 
 /// # Safety
 /// `desc` must be a currently-suspended task whose ctx has just been cleared.
-unsafe fn push_continuation<S: UltSchedulerSystem>(desc: *mut BasicTaskDesc) {
+unsafe fn push_continuation<S: SchedulerSystem>(desc: *mut S::Desc) where <S as SchedulerSystem>::Desc: WakerTaskDesc {
     match UltWorker::<S>::current() {
         Some(wk) => wk.push_local_top(SuspendedUlt(desc)),
         None => {
@@ -191,8 +192,8 @@ unsafe fn push_continuation<S: UltSchedulerSystem>(desc: *mut BasicTaskDesc) {
 ///
 /// # Safety
 /// `desc` must point to a live `BasicTaskDesc`.
-unsafe fn try_wake<S: UltSchedulerSystem>(desc: *const BasicTaskDesc) {
-    let desc = desc as *mut BasicTaskDesc;
+unsafe fn try_wake<S: UltSchedulerSystem>(desc: *const S::Desc) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+    let desc = desc as *mut S::Desc;
     if let WakeOutcome::ClaimedParked = unsafe { (*desc).try_wake_state() } {
         // The ctx store (Release) in cond_shim happened-before the Acquire
         // CAS inside try_wake_state; we can now load ctx safely.
@@ -206,15 +207,15 @@ unsafe fn try_wake<S: UltSchedulerSystem>(desc: *const BasicTaskDesc) {
 // PRIVATE vtable functions
 // ---------------------------------------------------------------------------
 
-unsafe fn clone_private<S: UltSchedulerSystem>(ptr: *const ()) -> RawWaker {
-    let desc = ptr as *const BasicTaskDesc;
+unsafe fn clone_private<S: UltSchedulerSystem>(ptr: *const ()) -> RawWaker where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+    let desc = ptr as *const S::Desc;
     unsafe { (*desc).transition_to_shared() };
     // The clone uses the SHARED vtable; the original retains PRIVATE vtable
     // but its wake_private/drop_private check EVER_SHARED and dispatch correctly.
     RawWaker::new(ptr, shared_vtable::<S>())
 }
 
-unsafe fn wake_private<S: UltSchedulerSystem>(ptr: *const ()) {
+unsafe fn wake_private<S: UltSchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     // wake() consumes the waker.  For PRIVATE, there is no ref count to
     // decrement (the waker is part of the block_on frame).  If EVER_SHARED
     // was set after construction, delegate to the SHARED path for the drop.
@@ -222,8 +223,8 @@ unsafe fn wake_private<S: UltSchedulerSystem>(ptr: *const ()) {
     unsafe { drop_private::<S>(ptr) };
 }
 
-unsafe fn wake_by_ref_private<S: UltSchedulerSystem>(ptr: *const ()) {
-    let desc = ptr as *const BasicTaskDesc;
+unsafe fn wake_by_ref_private<S: UltSchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+    let desc = ptr as *const S::Desc;
     if unsafe { (*desc).is_ever_shared() } {
         // Transitioned to SHARED after construction; use SHARED wake logic.
         unsafe { wake_by_ref_shared::<S>(ptr) };
@@ -232,8 +233,8 @@ unsafe fn wake_by_ref_private<S: UltSchedulerSystem>(ptr: *const ()) {
     }
 }
 
-unsafe fn drop_private<S: UltSchedulerSystem>(ptr: *const ()) {
-    let desc = ptr as *const BasicTaskDesc;
+unsafe fn drop_private<S: UltSchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+    let desc = ptr as *const S::Desc;
     if unsafe { (*desc).is_ever_shared() } {
         // The original waker is being dropped; treat like a SHARED drop.
         unsafe { drop_shared::<S>(ptr) };
@@ -252,8 +253,15 @@ unsafe fn drop_private<S: UltSchedulerSystem>(ptr: *const ()) {
 
 /// Like `try_wake` but skips the ctx non-null assertion.  Used for async
 /// tasks where PARKED simply means "not in the deque", not "context saved".
-unsafe fn try_wake_async<S: UltSchedulerSystem>(desc: *const BasicTaskDesc) {
-    let desc = desc as *mut BasicTaskDesc;
+///
+/// Also the wake-side counterpart of `JoinState::AsyncJoiner` (see
+/// `TaskDesc::try_register_async_joiner`): called directly, bypassing the
+/// `Waker`/`RawWakerVTable` indirection entirely, since the registering side
+/// (`JoinHandle::poll`) only takes that path when it already knows — from
+/// `UltWorker::polling_async` — that going through a real `Waker` would have
+/// dispatched here anyway.
+pub(crate) unsafe fn try_wake_async<S: SchedulerSystem>(desc: *const S::Desc) where <S as SchedulerSystem>::Desc: WakerTaskDesc {
+    let desc = desc as *mut S::Desc;
     if let WakeOutcome::ClaimedParked = unsafe { (*desc).try_wake_state() } {
         // No ctx to load for async tasks; just push to deque.
         unsafe { push_continuation::<S>(desc) };
@@ -261,7 +269,7 @@ unsafe fn try_wake_async<S: UltSchedulerSystem>(desc: *const BasicTaskDesc) {
 }
 
 struct AsyncPrivateVtable<S>(PhantomData<S>);
-impl<S: UltSchedulerSystem> AsyncPrivateVtable<S> {
+impl<S: SchedulerSystem> AsyncPrivateVtable<S> where <S as SchedulerSystem>::Desc: WakerTaskDesc {
     const VTABLE: RawWakerVTable = RawWakerVTable::new(
         clone_async_private::<S>,
         wake_async_private::<S>,
@@ -271,7 +279,7 @@ impl<S: UltSchedulerSystem> AsyncPrivateVtable<S> {
 }
 
 struct AsyncSharedVtable<S>(PhantomData<S>);
-impl<S: UltSchedulerSystem> AsyncSharedVtable<S> {
+impl<S: SchedulerSystem> AsyncSharedVtable<S> where <S as SchedulerSystem>::Desc: WakerTaskDesc {
     const VTABLE: RawWakerVTable = RawWakerVTable::new(
         clone_async_shared::<S>,
         wake_async_shared::<S>,
@@ -280,29 +288,29 @@ impl<S: UltSchedulerSystem> AsyncSharedVtable<S> {
     );
 }
 
-pub(crate) fn async_task_private_vtable<S: UltSchedulerSystem>() -> &'static RawWakerVTable {
+pub(crate) fn async_task_private_vtable<S: SchedulerSystem>() -> &'static RawWakerVTable where <S as SchedulerSystem>::Desc: WakerTaskDesc {
     &AsyncPrivateVtable::<S>::VTABLE
 }
 
-unsafe fn clone_async_private<S: UltSchedulerSystem>(ptr: *const ()) -> RawWaker {
-    let desc = ptr as *const BasicTaskDesc;
+unsafe fn clone_async_private<S: SchedulerSystem>(ptr: *const ()) -> RawWaker where <S as SchedulerSystem>::Desc: WakerTaskDesc {
+    let desc = ptr as *const S::Desc;
     unsafe { (*desc).transition_to_shared() };
     RawWaker::new(ptr, &AsyncSharedVtable::<S>::VTABLE)
 }
 
-unsafe fn clone_async_shared<S: UltSchedulerSystem>(ptr: *const ()) -> RawWaker {
-    let desc = ptr as *const BasicTaskDesc;
+unsafe fn clone_async_shared<S: SchedulerSystem>(ptr: *const ()) -> RawWaker where <S as SchedulerSystem>::Desc: WakerTaskDesc {
+    let desc = ptr as *const S::Desc;
     unsafe { (*desc).incr_shared_ref() };
     RawWaker::new(ptr, &AsyncSharedVtable::<S>::VTABLE)
 }
 
-unsafe fn wake_async_private<S: UltSchedulerSystem>(ptr: *const ()) {
+unsafe fn wake_async_private<S: SchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: WakerTaskDesc {
     unsafe { wake_by_ref_async_private::<S>(ptr) };
     unsafe { drop_async_private::<S>(ptr) };
 }
 
-unsafe fn wake_by_ref_async_private<S: UltSchedulerSystem>(ptr: *const ()) {
-    let desc = ptr as *const BasicTaskDesc;
+unsafe fn wake_by_ref_async_private<S: SchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: WakerTaskDesc {
+    let desc = ptr as *const S::Desc;
     if unsafe { (*desc).is_ever_shared() } {
         unsafe { wake_by_ref_async_shared::<S>(ptr) };
     } else {
@@ -310,44 +318,44 @@ unsafe fn wake_by_ref_async_private<S: UltSchedulerSystem>(ptr: *const ()) {
     }
 }
 
-unsafe fn drop_async_private<S: UltSchedulerSystem>(ptr: *const ()) {
-    let desc = ptr as *const BasicTaskDesc;
+unsafe fn drop_async_private<S: SchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: WakerTaskDesc {
+    let desc = ptr as *const S::Desc;
     if unsafe { (*desc).is_ever_shared() } {
         unsafe { drop_shared::<S>(ptr) };
     }
     // Pure PRIVATE: waker is owned by run_async_poll's stack frame; no action.
 }
 
-unsafe fn wake_async_shared<S: UltSchedulerSystem>(ptr: *const ()) {
+unsafe fn wake_async_shared<S: SchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: WakerTaskDesc {
     unsafe { wake_by_ref_async_shared::<S>(ptr) };
     unsafe { drop_shared::<S>(ptr) };
 }
 
-unsafe fn wake_by_ref_async_shared<S: UltSchedulerSystem>(ptr: *const ()) {
-    unsafe { try_wake_async::<S>(ptr as *const BasicTaskDesc) };
+unsafe fn wake_by_ref_async_shared<S: SchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: WakerTaskDesc {
+    unsafe { try_wake_async::<S>(ptr as *const S::Desc) };
 }
 
 // ---------------------------------------------------------------------------
 // SHARED vtable functions
 // ---------------------------------------------------------------------------
 
-unsafe fn clone_shared<S: UltSchedulerSystem>(ptr: *const ()) -> RawWaker {
-    let desc = ptr as *const BasicTaskDesc;
+unsafe fn clone_shared<S: UltSchedulerSystem>(ptr: *const ()) -> RawWaker where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+    let desc = ptr as *const S::Desc;
     unsafe { (*desc).incr_shared_ref() };
     RawWaker::new(ptr, shared_vtable::<S>())
 }
 
-unsafe fn wake_shared<S: UltSchedulerSystem>(ptr: *const ()) {
+unsafe fn wake_shared<S: UltSchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     unsafe { wake_by_ref_shared::<S>(ptr) };
     unsafe { drop_shared::<S>(ptr) };
 }
 
-unsafe fn wake_by_ref_shared<S: UltSchedulerSystem>(ptr: *const ()) {
-    unsafe { try_wake::<S>(ptr as *const BasicTaskDesc) };
+unsafe fn wake_by_ref_shared<S: UltSchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+    unsafe { try_wake::<S>(ptr as *const S::Desc) };
 }
 
-unsafe fn drop_shared<S: UltSchedulerSystem>(ptr: *const ()) {
-    let desc = ptr as *const BasicTaskDesc;
+unsafe fn drop_shared<S: SchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: WakerTaskDesc {
+    let desc = ptr as *const S::Desc;
     // If this was the last SHARED reference, the task is either still
     // running (block_on not done) or has already finished (block_on
     // returned with IDLE state).  Either way, no cleanup is needed:

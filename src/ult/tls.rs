@@ -11,7 +11,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::traits::thread_system::TlsSlot;
 use crate::ult::desc::TaskDesc;
-use crate::ult::system::UltSchedulerSystem;
+use crate::ult::desc::StackfulTaskDesc;
+use crate::ult::system::{SchedulerSystem, UltSchedulerSystem};
 use crate::ult::worker::{UltWorker, Worker};
 
 static NEXT_ULT_TLS_KEY: AtomicUsize = AtomicUsize::new(0);
@@ -28,7 +29,28 @@ impl<S, T> UltTls<S, T> {
     }
 
     fn key(&self) -> usize {
-        *self.anchor.index.get_or_init(|| NEXT_ULT_TLS_KEY.fetch_add(1, Ordering::Relaxed))
+        use crate::traits::thread_system::TLS_ANCHOR_UNASSIGNED;
+        let cur = self.anchor.index.load(Ordering::Relaxed);
+        if cur != TLS_ANCHOR_UNASSIGNED {
+            return cur;
+        }
+        // Race-safe one-time assignment (see `OsTls::assign_slot`'s doc
+        // comment for why a CAS loop suffices in place of `OnceLock` here).
+        loop {
+            let cur = self.anchor.index.load(Ordering::Relaxed);
+            if cur != TLS_ANCHOR_UNASSIGNED {
+                return cur;
+            }
+            let candidate = NEXT_ULT_TLS_KEY.fetch_add(1, Ordering::Relaxed);
+            if self
+                .anchor
+                .index
+                .compare_exchange(TLS_ANCHOR_UNASSIGNED, candidate, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                return candidate;
+            }
+        }
     }
 }
 
@@ -38,15 +60,15 @@ impl<S, T> Default for UltTls<S, T> {
     }
 }
 
-impl<S: UltSchedulerSystem, T: 'static> TlsSlot<T> for UltTls<S, T> {
-    fn from_anchor(anchor: &'static crate::traits::thread_system::TlsAnchor) -> &'static Self {
+impl<S: UltSchedulerSystem, T: 'static> TlsSlot<T> for UltTls<S, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    fn from_anchor(anchor: &'static crate::traits::thread_system::TlsAnchor) -> &'static Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
         // Sound: repr(transparent) over TlsAnchor (PhantomData is a ZST).
         unsafe { &*(anchor as *const _ as *const Self) }
     }
 
     const INIT: Self = UltTls::new();
 
-    fn get(&self) -> *mut T {
+    fn get(&self) -> *mut T where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
         let wk = UltWorker::<S>::current()
             .expect("cmpth: ULT-local storage accessed outside a worker");
         let desc = wk.cur_task.get();
@@ -57,7 +79,7 @@ impl<S: UltSchedulerSystem, T: 'static> TlsSlot<T> for UltTls<S, T> {
             .cast()
     }
 
-    fn set(&self, p: *mut T) {
+    fn set(&self, p: *mut T) where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
         let wk = UltWorker::<S>::current()
             .expect("cmpth: ULT-local storage accessed outside a worker");
         let desc = wk.cur_task.get();

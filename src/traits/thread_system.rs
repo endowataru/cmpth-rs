@@ -102,12 +102,15 @@ pub trait JoinHandleLike<T: Send + 'static>: Send {
 /// }
 /// ```
 pub struct TlsAnchor {
-    pub(crate) index: std::sync::OnceLock<usize>,
+    pub(crate) index: std::sync::atomic::AtomicUsize,
 }
+
+/// Sentinel for [`TlsAnchor::index`]: no slot assigned yet.
+pub(crate) const TLS_ANCHOR_UNASSIGNED: usize = usize::MAX;
 
 impl TlsAnchor {
     pub const fn new() -> Self {
-        TlsAnchor { index: std::sync::OnceLock::new() }
+        TlsAnchor { index: std::sync::atomic::AtomicUsize::new(TLS_ANCHOR_UNASSIGNED) }
     }
 }
 
@@ -138,6 +141,35 @@ pub trait TlsSlot<T: 'static>: Sync + 'static {
 
     /// Set the value for the current thread.
     fn set(&self, p: *mut T);
+
+    /// Like [`get`](Self::get), but callable from code the caller may
+    /// inline: only sound when the OS thread is guaranteed not to change
+    /// between the read and its use. `OsTls::get` must forbid inlining
+    /// because a suspended ULT can resume on a *different* OS thread,
+    /// and an inlined read could get CSE'd across that opaque
+    /// context-switch call, reading the wrong thread's slot.
+    /// Stackless-only code (no context switches: a `Future::poll` call
+    /// never migrates OS threads mid-call) has no such hazard, so it can
+    /// use this instead of paying for a call it doesn't need protection
+    /// from. Defaults to the safe [`get`](Self::get); implementors that
+    /// can offer a genuinely inlinable path override it.
+    #[inline]
+    fn get_inline(&self) -> *mut T {
+        self.get()
+    }
+
+    /// Eagerly resolve whatever one-time internal state this slot needs
+    /// (e.g. `OsTls`'s array index) before the hot path ever calls
+    /// `get`/`set`/`get_inline`. Called once, single-threaded, at scheduler
+    /// construction (see `Scheduler::new`'s callers in `ult::scheduler`) —
+    /// well before any worker OS thread starts, so the real first-use
+    /// assignment race this guards against in [`get`](Self::get)'s slow
+    /// path never actually happens in practice.
+    ///
+    /// Default: no-op. Implementations whose "assign once" step isn't on a
+    /// hot path (e.g. `UltTls`, used far less often than a `spawn`/`join`
+    /// hot loop) don't need to override this.
+    fn warm_up(&self) {}
 }
 
 // ---------------------------------------------------------------------------

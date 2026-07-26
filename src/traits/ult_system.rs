@@ -1,7 +1,7 @@
 //! [`UltSystem`] and [`AsyncWorkerSystem`] — the two independent
 //! capability traits a concrete system composes (`docs/sync-async-unification.md`).
 //!
-//! Kept separate from [`UltContextSystem`](crate::ult::system::UltContextSystem)/
+//! Kept separate from [`SchedulerSystem`](crate::ult::system::SchedulerSystem)/
 //! [`UltSchedulerSystem`](crate::ult::system::UltSchedulerSystem), which stay in
 //! `ult::system`: those reference implementation-layer types
 //! (`UltWorker`) directly in their signatures, so they belong with the

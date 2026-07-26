@@ -46,7 +46,7 @@ cmpth::ult_system! {
     pub struct MySystem {
         base:       cmpth::OsSystem,        // what the workers run on
         context:    cmpth::NativeContext,   // context-switch implementation
-        deque:      cmpth::CrossbeamDeque,  // work-stealing deque
+        deque:      cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>,  // work-stealing deque
         stack_size: 64 * 1024,
     }
 }

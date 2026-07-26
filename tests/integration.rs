@@ -149,7 +149,7 @@ fn nested_spawn_join() {
     run(2, || {
         DefaultUltUltSystem::run(2, || {
             let handles: Vec<_> = (0..50)
-                .map(|i| DefaultUltUltSystem::spawn(move || i * 3u64))
+                .map(|i| <DefaultUltUltSystem as ThreadSystem>::spawn(move || i * 3u64))
                 .collect();
             let mut sum = 0u64;
             for h in handles {
@@ -171,7 +171,7 @@ fn nested_mutex() {
             let handles: Vec<_> = (0..20)
                 .map(|_| {
                     let m = Arc::clone(&m);
-                    DefaultUltUltSystem::spawn(move || {
+                    <DefaultUltUltSystem as ThreadSystem>::spawn(move || {
                         for _ in 0..50 {
                             *m.lock() += 1;
                         }
@@ -363,7 +363,7 @@ fn block_on_cross_ult_wake() {
                     w.wake();
                     break;
                 }
-                DefaultUltSystem::yield_now();
+                <DefaultUltSystem as ThreadSystem>::yield_now();
             }
         });
 
@@ -687,7 +687,7 @@ cmpth::ult_system! {
     pub struct ArenaUltSystem {
         base:        OsSystem,
         context:     NativeContext,
-        deque:       CrossbeamDeque,
+        deque:       CrossbeamDeque<BasicTaskDesc>,
         stack_size:  64 * 1024,
         stack_alloc: cmpth::ArenaStack,
         lookup:      cmpth::SpCurrent,
@@ -701,7 +701,7 @@ cmpth::ult_system! {
     pub struct ArenaUltUltSystem {
         base:        ArenaUltSystem,
         context:     NativeContext,
-        deque:       CrossbeamDeque,
+        deque:       CrossbeamDeque<BasicTaskDesc>,
         stack_size:  64 * 1024,
         stack_alloc: cmpth::ArenaStack,
         lookup:      cmpth::SpCurrent,
@@ -711,7 +711,7 @@ cmpth::ult_system! {
 #[test]
 fn arena_spawn_join() {
     ArenaUltSystem::run(2, || {
-        let handles: Vec<_> = (0..100).map(|i| ArenaUltSystem::spawn(move || i * 2u64)).collect();
+        let handles: Vec<_> = (0..100).map(|i| <ArenaUltSystem as ThreadSystem>::spawn(move || i * 2u64)).collect();
         let mut sum = 0u64;
         for h in handles {
             sum += JoinHandleLike::join(h);
@@ -726,7 +726,7 @@ fn arena_parallel_fib() {
         if n <= 1 {
             return n;
         }
-        let h = ArenaUltSystem::spawn(move || fib(n - 1));
+        let h = <ArenaUltSystem as ThreadSystem>::spawn(move || fib(n - 1));
         let r2 = fib(n - 2);
         JoinHandleLike::join(h) + r2
     }
@@ -745,7 +745,7 @@ fn arena_mutex_stress() {
         let handles: Vec<_> = (0..100)
             .map(|_| {
                 let m = Arc::clone(&m);
-                ArenaUltSystem::spawn(move || {
+                <ArenaUltSystem as ThreadSystem>::spawn(move || {
                     for _ in 0..100 {
                         *m.lock() += 1;
                     }
@@ -777,7 +777,7 @@ fn arena_external_block_on() {
     // block_on from a non-worker OS thread: sp is outside the arena, so the
     // lookup takes the TLS-fallback path and finds no worker (as intended).
     ArenaUltSystem::run(2, || {
-        let h = ArenaUltSystem::spawn(|| 7u64);
+        let h = <ArenaUltSystem as ThreadSystem>::spawn(|| 7u64);
         assert_eq!(JoinHandleLike::join(h), 7);
     });
 }
@@ -793,19 +793,17 @@ fn arena_external_block_on() {
 /// would be shared across ALL systems, breaking nested schedulers).
 struct ManualSystem;
 
-impl cmpth::UltContextSystem for ManualSystem {
-    type StackAlloc = HeapStack;
-}
-
-impl cmpth::UltSchedulerSystem for ManualSystem {
+impl cmpth::SchedulerSystem for ManualSystem {
     type Base  = OsSystem;
-    type Ctx   = NativeContext;
-    type Deque = CrossbeamDeque;
-    const STACK_SIZE: usize = 64 * 1024;
-
-    type SuspendedThread = BasicSuspendedThread<Self>;
-    type ExternalQueue   = StealPathQueue;
-    type Pool            = ReturnPool<HeapStack>;
+    type Desc  = BasicTaskDesc;
+    type Deque = CrossbeamDeque<BasicTaskDesc>;
+    type ExternalQueue   = StealPathQueue<BasicTaskDesc>;
+    type Pool            = ReturnPool<BasicTaskDesc, HeapStack>;
+    // Unused: ManualSystem never calls spawn_async.
+    type AsyncPool       = cmpth::ult::pool::SimplePool<BasicTaskDesc>;
+    const ASYNC_POOL_SIZE: usize = 0;
+    // Unused: ManualSystem never calls recurse.
+    type RecursionPool   = cmpth::ult::pool::ThresholdPool<cmpth::ult::pool::BlockPool>;
     type Lookup          = TlsCurrent;
 
     fn worker_tls() -> &'static <OsSystem as cmpth::ThreadSystem>::ThreadSpecific<UltWorker<Self>> {
@@ -815,6 +813,23 @@ impl cmpth::UltSchedulerSystem for ManualSystem {
             <OsTls<UltWorker<ManualSystem>> as TlsSlot<UltWorker<ManualSystem>>>::INIT;
         &TLS
     }
+
+    // Stackful-only: no poll_fn tag check, see `execute_stackful`'s doc comment.
+    fn execute(wk: &UltWorker<Self>, cont: cmpth::SuspendedUlt<BasicTaskDesc>) {
+        cmpth::ult::worker::execute_stackful(wk, cont)
+    }
+
+    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut BasicTaskDesc) {
+        cmpth::ult::worker::free_finished_desc_stackful(wk, desc)
+    }
+}
+
+impl cmpth::UltSchedulerSystem for ManualSystem {
+    type Ctx   = NativeContext;
+    type StackAlloc = HeapStack;
+    const STACK_SIZE: usize = 64 * 1024;
+
+    type SuspendedThread = BasicSuspendedThread<Self>;
 }
 
 impl UltSystem for ManualSystem {
@@ -834,7 +849,7 @@ impl UltSystem for ManualSystem {
 #[test]
 fn manual_impl_without_macro() {
     ManualSystem::run(2, || {
-        let h = ManualSystem::spawn(|| 6 * 7u64);
+        let h = <ManualSystem as ThreadSystem>::spawn(|| 6 * 7u64);
         assert_eq!(JoinHandleLike::join(h), 42);
     });
 }

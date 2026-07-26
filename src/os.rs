@@ -117,12 +117,51 @@ impl<T> OsTls<T> {
         }
     }
 
+    /// Fast path: a single `Relaxed` load against the (normally already
+    /// eagerly-assigned, via [`warm_up`](Self::warm_up)) cached index — no
+    /// `OnceLock`-style state check. Falls back to [`assign_slot`] only if
+    /// nobody has assigned one yet.
+    #[inline]
     fn slot(&self) -> usize {
-        *self.anchor.index.get_or_init(|| {
-            let s = NEXT_OS_TLS_SLOT.fetch_add(1, Ordering::Relaxed);
-            assert!(s < OS_TLS_MAX_SLOTS, "cmpth: too many OsTls slots (max {OS_TLS_MAX_SLOTS})");
+        let s = self.anchor.index.load(Ordering::Relaxed);
+        if s != crate::traits::thread_system::TLS_ANCHOR_UNASSIGNED {
             s
-        })
+        } else {
+            self.assign_slot()
+        }
+    }
+
+    /// Race-safe, one-time assignment: a plain `fetch_add` for a new index
+    /// plus a CAS to publish it, not `OnceLock`. Sound because the
+    /// "compute" step here is a wait-free, always-succeeds atomic increment
+    /// (no arbitrary/blocking user closure like a general `OnceLock` has to
+    /// support) — if two threads race here, the loser's fetched-but-unused
+    /// index is simply wasted (never a correctness issue, and in practice
+    /// this only happens if `warm_up` wasn't called before concurrent first
+    /// use, which the scheduler's setup path avoids).
+    #[cold]
+    fn assign_slot(&self) -> usize {
+        loop {
+            let cur = self.anchor.index.load(Ordering::Relaxed);
+            if cur != crate::traits::thread_system::TLS_ANCHOR_UNASSIGNED {
+                return cur;
+            }
+            let candidate = NEXT_OS_TLS_SLOT.fetch_add(1, Ordering::Relaxed);
+            assert!(candidate < OS_TLS_MAX_SLOTS, "cmpth: too many OsTls slots (max {OS_TLS_MAX_SLOTS})");
+            if self
+                .anchor
+                .index
+                .compare_exchange(
+                    crate::traits::thread_system::TLS_ANCHOR_UNASSIGNED,
+                    candidate,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                )
+                .is_ok()
+            {
+                return candidate;
+            }
+        }
     }
 }
 
@@ -150,6 +189,23 @@ impl<T: 'static> TlsSlot<T> for OsTls<T> {
     fn set(&self, p: *mut T) {
         let slot = self.slot();
         OS_TLS_SLOTS.with(|v| v[slot].set(p.cast()));
+    }
+
+    // Safe to inline: callers of this method (see the trait doc comment)
+    // have already proven the OS thread can't change underneath them, so
+    // there is no context switch for the compiler to CSE the TLS base
+    // address across in the first place.
+    #[inline]
+    fn get_inline(&self) -> *mut T {
+        let slot = self.slot();
+        OS_TLS_SLOTS.with(|v| v[slot].get()).cast()
+    }
+
+    // Resolve the array index now, single-threaded, before any worker OS
+    // thread can race to assign it — see `Scheduler::new`'s callers, which
+    // call this on the constructing thread before spawning workers.
+    fn warm_up(&self) {
+        self.slot();
     }
 }
 

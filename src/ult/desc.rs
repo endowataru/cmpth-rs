@@ -38,8 +38,29 @@ use std::task::{Context, Waker};
 
 pub type TaskResult = Result<Box<dyn Any + Send>, Box<dyn Any + Send>>;
 
-/// Type-erased poll function stored on an async task's descriptor.
-pub type PollFn<D> = for<'cx> unsafe fn(*mut D, &mut Context<'cx>) -> bool;
+/// Result of driving one `spawn_async` task's poll to completion or a
+/// suspend point (named `TaskPollResult`, not `PollResult`, to keep it out
+/// of the way of `std::task::Poll` and `std::future::poll_fn` at a glance).
+pub enum TaskPollResult<D> {
+    /// The future finished; nothing left to do for this task.
+    Ready,
+    /// The future finished, and its completion claimed exclusive ownership
+    /// of a waiting [`JoinState::AsyncJoiner`] — the caller's poll loop
+    /// should continue directly into that descriptor next (symmetric
+    /// transfer), instead of pushing it to a deque and waiting for some
+    /// worker to pop it back out. Safe because `try_wake_state`'s
+    /// `ClaimedParked` outcome (the only case this is constructed for)
+    /// proves nobody else can be concurrently polling that descriptor.
+    ReadyAndContinue(*mut D),
+    /// The future returned `Poll::Pending`; the caller should park (or
+    /// requeue immediately if a wake raced in during the poll).
+    Pending,
+}
+
+/// Type-erased poll function stored on an async task's descriptor. Not
+/// `PollFn` — that reads too much like `std::future::poll_fn` for a type
+/// that has nothing to do with it.
+pub type TaskPollFn<D> = for<'cx> unsafe fn(*mut D, &mut Context<'cx>) -> TaskPollResult<D>;
 
 // ---------------------------------------------------------------------------
 // waker_refs encoding
@@ -71,12 +92,20 @@ pub(crate) const REF_ONE:     usize = 4; // one unit of ref count (bits 2+)
 //   DETACHED = 2   — JoinHandle dropped early; the exit path cleans up.
 //                    Also the initial state of handle-less (root) tasks.
 //   ptr            — a parked sync joiner (`*mut D`, aligned, > 7)
-//   ptr | 1        — a registered async waker (`*mut Waker`, boxed)
+//   ptr | 1        — a registered async waker (`*mut Waker`, boxed) — used
+//                    when the polling task's waker isn't verifiably one of
+//                    ours (foreign executor, or no worker at all).
+//   ptr | 2        — a registered async joiner (`*mut D`, unboxed) — the
+//                    common case: the polling task is itself driven by this
+//                    same system's `run_async_poll`, so its own descriptor
+//                    is enough to reconstruct the wake without allocating a
+//                    `Box<Waker>` (see `JoinHandle::poll`).
 // ---------------------------------------------------------------------------
 pub(crate) const JS_RUNNING: usize = 0;
 pub(crate) const JS_FINISHED: usize = 1;
 pub(crate) const JS_DETACHED: usize = 2;
 pub(crate) const JS_ASYNC_TAG: usize = 1;
+pub(crate) const JS_ASYNC_JOINER_TAG: usize = 2;
 
 /// Decoded view of a `join_state` word.
 pub enum JoinState<D> {
@@ -85,6 +114,10 @@ pub enum JoinState<D> {
     Detached,
     SyncJoiner(*mut D),
     AsyncWaker(*mut Waker),
+    /// Same role as `AsyncWaker`, but unboxed: the polling task's own
+    /// descriptor, reachable directly because its waker is known (by
+    /// construction) to be this system's own `run_async_poll` waker.
+    AsyncJoiner(*mut D),
 }
 
 pub(crate) fn decode_join_state<D>(v: usize) -> JoinState<D> {
@@ -93,6 +126,9 @@ pub(crate) fn decode_join_state<D>(v: usize) -> JoinState<D> {
         JS_FINISHED => JoinState::Finished,
         JS_DETACHED => JoinState::Detached,
         v if v & JS_ASYNC_TAG != 0 => JoinState::AsyncWaker((v & !JS_ASYNC_TAG) as *mut Waker),
+        v if v & JS_ASYNC_JOINER_TAG != 0 => {
+            JoinState::AsyncJoiner((v & !JS_ASYNC_JOINER_TAG) as *mut D)
+        }
         v => JoinState::SyncJoiner(v as *mut D),
     }
 }
@@ -139,8 +175,17 @@ pub trait TaskDesc: Send + Sync + Sized + 'static {
 
     /// Index of the worker that allocated this descriptor.  Used by
     /// [`ReturnPool`](crate::ult::pool::ReturnPool) to route deallocation
-    /// back to the home worker.
+    /// back to the home worker. Meaningless when [`oversized`](Self::oversized)
+    /// is set (an oversized descriptor is never routed back to a free list).
     fn alloc_wk(&self) -> &Cell<usize>;
+
+    /// True if this descriptor's storage is a one-off allocation that didn't
+    /// fit a [`DescPool`](crate::ult::pool::DescPool)'s fixed slot size (see
+    /// `DescPool::alloc`) — `dealloc` must free it directly rather than
+    /// return it to the free list. Always false for descriptors that fit the
+    /// pool's configured size, which is the common case for both fixed-size
+    /// ULT stacks and most `spawn_async` futures.
+    fn oversized(&self) -> &Cell<bool>;
 
     /// Used by nested schedulers for their per-worker pointer (`UltTls`).
     /// Only touched by the OS thread currently running this task.
@@ -150,11 +195,22 @@ pub trait TaskDesc: Send + Sync + Sized + 'static {
     /// pseudo-descriptors, in which case this must never be called).
     fn stack_top(&self) -> *mut u8;
 
+    /// Type-erased `*const Scheduler<S>`.  Set at task-creation time —
+    /// `spawn`, `spawn_async`, and `fork_parent_first` all record it,
+    /// regardless of task flavor — so that `wake()` called from an external
+    /// OS thread can reach the scheduler's `ExternalQueue` without going
+    /// through worker TLS.  Null for root pseudo-descriptors. Only actually
+    /// read by the `AsyncTaskDesc` wake path (`waker.rs::push_continuation`)
+    /// today, but writing it doesn't need `AsyncTaskDesc` capability, so it
+    /// lives on the base trait rather than gating every constructor on it.
+    fn scheduler(&self) -> &Cell<*const ()>;
+
     /// Record that this task is now running on `worker_ptr` — called by
     /// every context-switch shim immediately after deciding `self` is the
     /// task being switched into.  Propagates to the arena cell slot too
     /// (when present), since every caller that sets `worker()` here has
     /// always also needed to update `slot()` in the same breath.
+    #[inline]
     fn mark_resumed_on(&self, worker_ptr: *const ()) {
         self.worker().set(worker_ptr);
         if let Some(slot) = self.slot().get() {
@@ -165,6 +221,7 @@ pub trait TaskDesc: Send + Sync + Sized + 'static {
     // --- join-protocol operations, built on join_state() ------------------
 
     /// Read and decode the current join state (`Acquire`).
+    #[inline]
     fn read_join_state(&self) -> JoinState<Self> {
         decode_join_state(self.join_state().load(Ordering::Acquire))
     }
@@ -174,6 +231,7 @@ pub trait TaskDesc: Send + Sync + Sized + 'static {
     /// [`publish_finished`](Self::publish_finished)/
     /// [`commit_finished`](Self::commit_finished), making the written result
     /// visible.)
+    #[inline]
     fn is_finished(&self) -> bool {
         self.join_state().load(Ordering::Acquire) == JS_FINISHED
     }
@@ -181,6 +239,7 @@ pub trait TaskDesc: Send + Sync + Sized + 'static {
     /// Direct-handoff exit: the exiting task already switched straight into
     /// the parked sync joiner's continuation: this just publishes `FINISHED`
     /// (`Release`) so the joiner (now running) observes its result is ready.
+    #[inline]
     fn commit_finished(&self) {
         self.join_state().store(JS_FINISHED, Ordering::Release);
     }
@@ -189,6 +248,7 @@ pub trait TaskDesc: Send + Sync + Sized + 'static {
     /// whichever party the old state names, so the caller can settle it
     /// (wake a late-registered joiner/waker, or notice the handle was
     /// dropped).
+    #[inline]
     fn publish_finished(&self) -> JoinState<Self> {
         decode_join_state(self.join_state().swap(JS_FINISHED, Ordering::AcqRel))
     }
@@ -214,6 +274,49 @@ pub trait TaskDesc: Send + Sync + Sized + 'static {
                 joiner as usize,
                 Ordering::Release,
                 Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    if let JoinState::AsyncWaker(w) = decode_join_state::<Self>(cur) {
+                        drop(unsafe { Box::from_raw(w) });
+                    }
+                    return true;
+                }
+                Err(c) => cur = c,
+            }
+        }
+    }
+
+    /// `JoinHandle::poll`'s fast-path registration: install `joiner` (the
+    /// currently-polling task's own descriptor) directly, with no
+    /// allocation. Returns `false` if the task turned out to already be
+    /// finished (caller should proceed to take the result instead) —
+    /// otherwise commits the tagged pointer and drops whichever *boxed*
+    /// waker it superseded, if any (an old `AsyncJoiner` needs no cleanup:
+    /// it never allocated).
+    ///
+    /// # Safety
+    /// `joiner` must be a stable pointer to the currently-polling task's own
+    /// descriptor for as long as it might be woken through this slot — the
+    /// caller (`JoinHandle::poll`) only calls this when `joiner` came from
+    /// `UltWorker::polling_async`, which is only ever set to the descriptor
+    /// `run_async_poll` is synchronously driving right now (see that
+    /// function's doc comment for why the ambient waker is then guaranteed
+    /// to be `joiner`'s own).
+    #[inline]
+    unsafe fn try_register_async_joiner(&self, joiner: *mut Self) -> bool {
+        debug_assert_eq!(
+            joiner as usize & (JS_ASYNC_TAG | JS_ASYNC_JOINER_TAG),
+            0,
+            "cmpth: descriptor pointer not aligned enough to tag"
+        );
+        let mut cur = self.join_state().load(Ordering::Acquire);
+        let new = (joiner as usize) | JS_ASYNC_JOINER_TAG;
+        loop {
+            if cur == JS_FINISHED {
+                return false;
+            }
+            match self.join_state().compare_exchange_weak(
+                cur, new, Ordering::Release, Ordering::Acquire,
             ) {
                 Ok(_) => {
                     if let JoinState::AsyncWaker(w) = decode_join_state::<Self>(cur) {
@@ -287,6 +390,38 @@ pub trait TaskDesc: Send + Sync + Sized + 'static {
     }
 }
 
+/// Construction/lifecycle operations for a descriptor type, kept separate
+/// from [`TaskDesc`] itself so generic pool/worker code (`DescPool`,
+/// `UltWorker::new`, `spawn`/`spawn_async`) can allocate, free, and reset a
+/// descriptor through `D::alloc_with`/`new_root`/`free`/`reinit` without
+/// naming the concrete descriptor type — the same "trait owns the contract,
+/// one struct satisfies it today" shape as `TaskDesc` itself. Every method
+/// here mirrors an existing `BasicTaskDesc` inherent fn byte-for-byte; this
+/// is a mechanical accessor split, not a behavior change.
+pub trait TaskDescAlloc: TaskDesc + Sized {
+    /// Allocate a descriptor whose stack storage is `stack` (heap or arena,
+    /// per the caller's `StackAlloc` policy). Used by the pool and by
+    /// `spawn`'s parent-first fork path.
+    fn alloc_with(stack: crate::ult::stack::StackMem, has_handle: bool) -> *mut Self;
+
+    /// Allocate a descriptor with a plain heap buffer of `stack_size` bytes,
+    /// bypassing any arena/guard-page policy. Used by `spawn_async`, whose
+    /// "stack" only ever stores a `Future` + result — no code runs on it, so
+    /// it never needs the arena.
+    fn alloc(stack_size: usize, has_handle: bool) -> *mut Self;
+
+    /// Pseudo-descriptor for a worker's own scheduler-loop context (the
+    /// "root continuation"), embedded by value in `UltWorker`.
+    fn new_root() -> Self;
+
+    /// # Safety
+    /// Must be called exactly once, after no other references exist.
+    unsafe fn free(ptr: *mut Self);
+
+    /// Reset a pooled descriptor for reuse (the stack allocation is kept).
+    fn reinit(&mut self, has_handle: bool);
+}
+
 /// Descriptor operations needed only by tasks with a real, switchable
 /// execution stack (stackful ULTs). A pure-stackless descriptor type would
 /// not implement this — there is no saved context to hand off, since
@@ -337,43 +472,34 @@ pub trait StackfulTaskDesc: TaskDesc {
     }
 }
 
-/// Descriptor operations needed only by tasks that can be polled/awaited
-/// via a [`Waker`] — `spawn_async` tasks, and any task whose `JoinHandle`
-/// wants to be awaitable. A descriptor type for a system with no async
-/// interop at all (no `block_on`, no awaitable `JoinHandle`) would not
-/// implement this.
-pub trait AsyncTaskDesc: TaskDesc {
-    /// Non-null for async tasks spawned via `spawn_async`; null for sync
-    /// ULTs.
-    ///
-    /// When set, `Worker::execute` calls this instead of doing a context
-    /// switch.  The function polls the Future stored in the task's "stack"
-    /// buffer and returns `true` when the Future returned `Poll::Ready`
-    /// (caller must not touch `desc` after that).
-    fn poll_fn(&self) -> &Cell<Option<PollFn<Self>>>;
-
+/// Descriptor operations needed by any task that can be driven via a real
+/// [`std::task::Waker`] — both `block_on` (polling an arbitrary `Future`
+/// from a real ULT) and `spawn_async` tasks need this `waker_refs` state
+/// machine; `spawn_async` additionally needs [`AsyncTaskDesc`] on top for
+/// its `poll_fn` task representation. Kept separate from `AsyncTaskDesc` so
+/// that `ThreadSystem::block_on` (and anything generic over `S: ThreadSystem`,
+/// like `DelegatorConsumer`) doesn't drag in `poll_fn`/spawn_async-specific
+/// machinery it never touches — a system that supports `block_on` but not
+/// `spawn_async` is expressible this way.
+pub trait WakerTaskDesc: TaskDesc {
     /// Encodes PRIVATE/SHARED mode, ref count, and POLLING/PARKED/NOTIFIED/
     /// IDLE state.  See the `waker_refs` constants at the top of this file.
     /// Zero (IDLE) when no `block_on` call is active on this task.
     fn waker_refs(&self) -> &AtomicUsize;
 
-    /// Type-erased `*const Scheduler<S>`.  Set at task-creation time so that
-    /// `wake()` called from an external OS thread can reach the scheduler's
-    /// `ExternalQueue` without going through worker TLS.  Null for root
-    /// pseudo-descriptors.
-    fn scheduler(&self) -> &Cell<*const ()>;
-
     // --- named waker_refs state-machine operations -------------------------
 
     /// Reset to POLLING unconditionally.  Called whenever a poll is about
     /// to begin (`UltPoller::new`, `run_async_poll`'s pre-poll mark).
+    #[inline]
     fn mark_polling(&self) {
         self.waker_refs().store(POLLING, Ordering::Release);
     }
 
     /// Reset to IDLE unconditionally.  Called when a poll session ends
-    /// (`UltPoller::drop`, `async_poll_fn` invalidating the waker before
+    /// (`UltPoller::drop`, `poll_spawned_task` invalidating the waker before
     /// publishing the result so a racing `wake()` becomes a no-op).
+    #[inline]
     fn mark_idle(&self) {
         self.waker_refs().store(IDLE, Ordering::Release);
     }
@@ -427,6 +553,7 @@ pub trait AsyncTaskDesc: TaskDesc {
     ///
     /// CAS loop — unlike `decide_park`, concurrent wakers can race this
     /// transition (matches the original call site exactly).
+    #[inline]
     fn park_after_poll(&self) -> bool {
         loop {
             let refs = self.waker_refs().load(Ordering::Acquire);
@@ -525,7 +652,23 @@ pub trait AsyncTaskDesc: TaskDesc {
     }
 }
 
-/// Outcome of [`AsyncTaskDesc::try_wake_state`].
+/// Descriptor operations needed only by tasks that represent a `spawn_async`
+/// Future — the type-erased poll entry point. Builds on [`WakerTaskDesc`]
+/// (a `spawn_async` task's own poll loop, `run_async_poll`, uses
+/// `mark_polling`/`park_after_poll` on itself just like `block_on` does).
+pub trait AsyncTaskDesc: WakerTaskDesc {
+    /// Non-null for async tasks spawned via `spawn_async`; null for sync
+    /// ULTs.
+    ///
+    /// When set, `Worker::execute` calls this instead of doing a context
+    /// switch.  The function polls the Future stored in the task's "stack"
+    /// buffer; see [`TaskPollResult`] for what it reports back (`Ready`:
+    /// don't touch `desc` again; `Pending`: park it; `ReadyAndContinue`:
+    /// poll the named descriptor next instead).
+    fn poll_fn(&self) -> &Cell<Option<TaskPollFn<Self>>>;
+}
+
+/// Outcome of [`WakerTaskDesc::try_wake_state`].
 pub enum WakeOutcome {
     /// Was POLLING; now NOTIFIED. The task will notice on its next
     /// `waker_refs` check and re-poll; there is no continuation to push.
@@ -549,7 +692,7 @@ pub struct BasicTaskDesc {
     join_state: AtomicUsize,
     worker: Cell<*const ()>,
     slot: Cell<Option<*mut crate::ult::stack::CellSlot>>,
-    poll_fn: Cell<Option<PollFn<BasicTaskDesc>>>,
+    poll_fn: Cell<Option<TaskPollFn<BasicTaskDesc>>>,
     is_root: bool,
 
     // --- Warm ---------------------------------------------------------------
@@ -562,6 +705,7 @@ pub struct BasicTaskDesc {
     // --- Pool metadata ---------------------------------------------------
     pool_next: Cell<*mut BasicTaskDesc>,
     alloc_wk: Cell<usize>,
+    oversized: Cell<bool>,
 
     // --- ULT-local storage -----------------------------------------------
     tls: UnsafeCell<Option<HashMap<usize, *mut ()>>>,
@@ -581,18 +725,44 @@ impl TaskDesc for BasicTaskDesc {
     fn result(&self) -> &UnsafeCell<Option<TaskResult>> { &self.result }
     fn pool_next(&self) -> &Cell<*mut Self> { &self.pool_next }
     fn alloc_wk(&self) -> &Cell<usize> { &self.alloc_wk }
+    fn oversized(&self) -> &Cell<bool> { &self.oversized }
     fn tls(&self) -> &UnsafeCell<Option<HashMap<usize, *mut ()>>> { &self.tls }
     fn stack_top(&self) -> *mut u8 { self.stack.top() }
+    fn scheduler(&self) -> &Cell<*const ()> { &self.scheduler }
 }
 
 impl StackfulTaskDesc for BasicTaskDesc {
     fn ctx(&self) -> &AtomicPtr<u8> { &self.ctx }
 }
 
-impl AsyncTaskDesc for BasicTaskDesc {
-    fn poll_fn(&self) -> &Cell<Option<PollFn<Self>>> { &self.poll_fn }
+impl WakerTaskDesc for BasicTaskDesc {
     fn waker_refs(&self) -> &AtomicUsize { &self.waker_refs }
-    fn scheduler(&self) -> &Cell<*const ()> { &self.scheduler }
+}
+
+impl AsyncTaskDesc for BasicTaskDesc {
+    fn poll_fn(&self) -> &Cell<Option<TaskPollFn<Self>>> { &self.poll_fn }
+}
+
+impl TaskDescAlloc for BasicTaskDesc {
+    fn alloc_with(stack: crate::ult::stack::StackMem, has_handle: bool) -> *mut Self {
+        BasicTaskDesc::alloc_with(stack, has_handle)
+    }
+
+    fn alloc(stack_size: usize, has_handle: bool) -> *mut Self {
+        BasicTaskDesc::alloc(stack_size, has_handle)
+    }
+
+    fn new_root() -> Self {
+        BasicTaskDesc::new_root()
+    }
+
+    unsafe fn free(ptr: *mut Self) {
+        unsafe { BasicTaskDesc::free(ptr) }
+    }
+
+    fn reinit(&mut self, has_handle: bool) {
+        BasicTaskDesc::reinit(self, has_handle)
+    }
 }
 
 impl BasicTaskDesc {
@@ -608,7 +778,7 @@ impl BasicTaskDesc {
     /// stacks, captures the cell slot pointer for use by the switch shims.
     pub(crate) fn alloc_with(stack: crate::ult::stack::StackMem, has_handle: bool) -> *mut BasicTaskDesc {
         // Compute slot before moving `stack` into the Box.
-        let slot = crate::ult::stack::cell_slot(&stack);
+        let slot = stack.cell_slot();
         Box::into_raw(Box::new(BasicTaskDesc {
             ctx: AtomicPtr::new(std::ptr::null_mut()),
             is_root: false,
@@ -621,6 +791,7 @@ impl BasicTaskDesc {
             poll_fn: Cell::new(None),
             pool_next: Cell::new(std::ptr::null_mut()),
             alloc_wk: Cell::new(0),
+            oversized: Cell::new(false),
             tls: UnsafeCell::new(None),
             stack,
         }))
@@ -640,6 +811,7 @@ impl BasicTaskDesc {
             poll_fn: Cell::new(None),
             pool_next: Cell::new(std::ptr::null_mut()),
             alloc_wk: Cell::new(0),
+            oversized: Cell::new(false),
             tls: UnsafeCell::new(None),
             stack: crate::ult::stack::StackMem::None,
         }
@@ -671,20 +843,25 @@ impl BasicTaskDesc {
 /// Owning handle to a suspended task.  Not `Clone`, not `Drop`: ownership is
 /// linear and consuming the continuation (resuming it or storing it in a
 /// waiter slot) is explicit.
-pub struct SuspendedUlt(pub(crate) *mut BasicTaskDesc);
+///
+/// Generic over the descriptor type `D` so a stackful-only or stackless-only
+/// system can plug in a narrower descriptor later without touching every
+/// deque/pool/worker call site again — for now every concrete system still
+/// sets `D = BasicTaskDesc`.
+pub struct SuspendedUlt<D: TaskDesc>(pub(crate) *mut D);
 
-unsafe impl Send for SuspendedUlt {}
+unsafe impl<D: TaskDesc> Send for SuspendedUlt<D> {}
 
-impl SuspendedUlt {
-    pub(crate) fn desc(&self) -> *mut BasicTaskDesc {
+impl<D: TaskDesc> SuspendedUlt<D> {
+    pub(crate) fn desc(&self) -> *mut D {
         self.0
     }
 
     pub(crate) fn is_root(&self) -> bool {
-        unsafe { (*self.0).is_root }
+        unsafe { (*self.0).is_root() }
     }
 
-    pub(crate) fn into_raw(self) -> *mut BasicTaskDesc {
+    pub(crate) fn into_raw(self) -> *mut D {
         self.0
     }
 }

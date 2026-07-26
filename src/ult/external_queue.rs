@@ -2,6 +2,7 @@
 //! scheduler (e.g. RDMA completion threads calling `Waker::wake()`).
 
 use std::any::Any;
+use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, Weak};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -9,7 +10,7 @@ use crate::traits::thread_system::ThreadSystem;
 use crate::ult::desc::SuspendedUlt;
 use crate::ult::scheduler::Scheduler;
 use crate::traits::ult_system::UltSystem;
-use crate::ult::system::UltSchedulerSystem;
+use crate::ult::system::{SchedulerSystem, UltSchedulerSystem};
 use crate::ult::thread::{ErasedBody, fork_parent_first};
 use crate::ult::worker::{LocalQueue, UltWorker, Worker};
 
@@ -18,6 +19,8 @@ use crate::ult::worker::{LocalQueue, UltWorker, Worker};
 // ---------------------------------------------------------------------------
 
 /// How continuations pushed by external OS threads reach the ULT scheduler.
+/// Base-level (`S: SchedulerSystem`): a stackless-only system still needs a
+/// way for external OS threads to hand it work.
 ///
 /// Two provided implementations:
 ///
@@ -25,16 +28,17 @@ use crate::ult::worker::{LocalQueue, UltWorker, Worker};
 ///   deque and steal attempts both fail; one atomic check added to the
 ///   steal-fail path.
 /// * [`PollerUltQueue`] — a dedicated poller ULT drains the queue; zero
-///   overhead on the steal path, but consumes one ULT stack.
-pub trait ExternalQueue<S: UltSchedulerSystem>: Default + Send + Sync + 'static {
+///   overhead on the steal path, but consumes one ULT stack. Inherently
+///   stackful (it *is* a ULT), so only implemented for `S: UltSchedulerSystem`.
+pub trait ExternalQueue<S: SchedulerSystem>: Default + Send + Sync + 'static {
     /// Push a continuation from an external (non-worker) OS thread.
-    fn push(&self, cont: SuspendedUlt);
+    fn push(&self, cont: SuspendedUlt<S::Desc>);
 
     /// Drain one item from the queue in the worker steal-fail path.
     ///
     /// [`PollerUltQueue`] always returns `None`; the poller ULT handles
     /// delivery.
-    fn try_pop(&self) -> Option<SuspendedUlt>;
+    fn try_pop(&self) -> Option<SuspendedUlt<S::Desc>>;
 
     /// Called once by [`crate::ult::scheduler::run`] before workers start.
     ///
@@ -52,12 +56,12 @@ pub trait ExternalQueue<S: UltSchedulerSystem>: Default + Send + Sync + 'static 
 /// `push()` is mutex-guarded and O(1).  `try_pop()` skips the lock entirely
 /// when the queue is observed empty via an atomic flag (`Acquire` load),
 /// keeping the steal-fail path fast in the common empty case.
-pub struct StealPathQueue {
+pub struct StealPathQueue<D: crate::ult::desc::TaskDesc> {
     non_empty: AtomicBool,
-    inner: Mutex<Vec<SuspendedUlt>>,
+    inner: Mutex<Vec<SuspendedUlt<D>>>,
 }
 
-impl Default for StealPathQueue {
+impl<D: crate::ult::desc::TaskDesc> Default for StealPathQueue<D> {
     fn default() -> Self {
         StealPathQueue {
             non_empty: AtomicBool::new(false),
@@ -66,13 +70,13 @@ impl Default for StealPathQueue {
     }
 }
 
-impl<S: UltSchedulerSystem> ExternalQueue<S> for StealPathQueue {
-    fn push(&self, cont: SuspendedUlt) {
+impl<S: SchedulerSystem> ExternalQueue<S> for StealPathQueue<S::Desc> {
+    fn push(&self, cont: SuspendedUlt<S::Desc>) {
         self.inner.lock().unwrap().push(cont);
         self.non_empty.store(true, Ordering::Release);
     }
 
-    fn try_pop(&self) -> Option<SuspendedUlt> {
+    fn try_pop(&self) -> Option<SuspendedUlt<S::Desc>> {
         if !self.non_empty.load(Ordering::Acquire) {
             return None;
         }
@@ -95,22 +99,26 @@ impl<S: UltSchedulerSystem> ExternalQueue<S> for StealPathQueue {
 /// `on_start()` spawns a poller ULT that loops: drain the queue → yield →
 /// repeat.  Each wake-up re-checks and forwards any pending continuations to
 /// the worker's local deque.
-pub struct PollerUltQueue {
-    inner: Arc<Mutex<Vec<SuspendedUlt>>>,
+pub struct PollerUltQueue<D: crate::ult::desc::TaskDesc> {
+    inner: Arc<Mutex<Vec<SuspendedUlt<D>>>>,
+    _marker: PhantomData<D>,
 }
 
-impl Default for PollerUltQueue {
+impl<D: crate::ult::desc::TaskDesc> Default for PollerUltQueue<D> {
     fn default() -> Self {
-        PollerUltQueue { inner: Arc::new(Mutex::new(Vec::new())) }
+        PollerUltQueue { inner: Arc::new(Mutex::new(Vec::new())), _marker: PhantomData }
     }
 }
 
-impl<S: UltSchedulerSystem + UltSystem> ExternalQueue<S> for PollerUltQueue {
-    fn push(&self, cont: SuspendedUlt) {
+impl<S: UltSchedulerSystem + UltSystem> ExternalQueue<S> for PollerUltQueue<S::Desc>
+where
+    S::Desc: crate::ult::desc::StackfulTaskDesc + crate::ult::desc::WakerTaskDesc,
+{
+    fn push(&self, cont: SuspendedUlt<S::Desc>) {
         self.inner.lock().unwrap().push(cont);
     }
 
-    fn try_pop(&self) -> Option<SuspendedUlt> {
+    fn try_pop(&self) -> Option<SuspendedUlt<S::Desc>> {
         None
     }
 
@@ -124,7 +132,7 @@ impl<S: UltSchedulerSystem + UltSystem> ExternalQueue<S> for PollerUltQueue {
 
         let body: ErasedBody = Box::new(move || {
             loop {
-                let pending: Vec<SuspendedUlt> =
+                let pending: Vec<SuspendedUlt<S::Desc>> =
                     std::mem::take(&mut *inner.lock().unwrap());
                 if let Some(wk) = UltWorker::<S>::current() {
                     for cont in pending {

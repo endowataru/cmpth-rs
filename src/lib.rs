@@ -21,14 +21,16 @@ mod os;
 mod spin;
 pub mod future;
 pub mod ult;
+pub mod fork_join;
 
 pub use context::{CondTransfer, Context, ContextPolicy, NativeContext, Transfer};
 pub use traits::{BarrierWaitResult, DelegatorConsumer, Delegator, DualBarrier, DualMutex, JoinHandleLike, Poller, Resumable, StackfulResumable, TlsAnchor, TlsSlot, ThreadSystem};
 pub use os::{OsBarrier, OsCondvar, OsMutex, OsPoller, OsSystem, OsTls};
 pub use ult::waker::UltPoller;
 pub use ult::deque::{CrossbeamDeque, SpinDeque, WorkerDeque};
+pub use ult::desc::{AsyncTaskDesc, BasicTaskDesc, StackfulTaskDesc, SuspendedUlt, TaskDesc, TaskDescAlloc};
 pub use ult::external_queue::{ExternalQueue, PollerUltQueue, StealPathQueue};
-pub use ult::lookup::{CurrentLookup, SpCurrent, TlsCurrent};
+pub use ult::lookup::{CurrentLookup, InlineTlsCurrent, SpCurrent, TlsCurrent};
 pub use ult::pool::{DescPool, ReturnPool, SimplePool};
 pub use ult::stack::{ArenaStack, HeapStack, StackAlloc};
 pub use ult::async_wait::SuspendedFuture;
@@ -36,7 +38,7 @@ pub use ult::dual_wait::SuspendedTask;
 pub use ult::suspended::{BasicSuspendedThread, UltSuspendedThread};
 pub use ult::sync::{Barrier as UltBarrier, McsDelegator, McsMutex, McsMutexGuard, McsCondvar, BarrierCore, MutexCore, DualBarrier as UltDualBarrier, DualMutex as UltDualMutex, DualMutexGuard as UltDualMutexGuard};
 pub use ult::sync::{delegator, Producer as DelegatorProducer};
-pub use ult::system::{AsyncWorkerSystem, UltContextSystem, UltSchedulerSystem, UltSystem};
+pub use ult::system::{AsyncTaskSystem, AsyncWorkerSystem, SchedulerSystem, UltSchedulerSystem, UltSystem};
 pub use ult::tls::UltTls;
 pub use ult::worker::{ContextSwitcher, LocalQueue, TaskPool, UltWorker, Worker, current_worker};
 
@@ -63,24 +65,44 @@ pub use ult::worker::{ContextSwitcher, LocalQueue, TaskPool, UltWorker, Worker, 
 /// The default ULT system: runs on top of [`OsSystem`].
 pub struct DefaultUltSystem;
 
-impl ult::system::UltContextSystem for DefaultUltSystem {
-    type StackAlloc = ult::stack::HeapStack;
-}
-
-impl ult::system::UltSchedulerSystem for DefaultUltSystem {
+impl ult::system::SchedulerSystem for DefaultUltSystem {
     type Base  = OsSystem;
-    type Ctx   = NativeContext;
-    type Deque = CrossbeamDeque;
-    const STACK_SIZE: usize = 64 * 1024;
-
-    type SuspendedThread = ult::suspended::BasicSuspendedThread<Self>;
-    type ExternalQueue   = ult::external_queue::StealPathQueue;
-    type Pool            = ult::pool::ReturnPool<ult::stack::HeapStack>;
+    type Desc  = ult::desc::BasicTaskDesc;
+    type Deque = CrossbeamDeque<ult::desc::BasicTaskDesc>;
+    type ExternalQueue   = ult::external_queue::StealPathQueue<ult::desc::BasicTaskDesc>;
+    type Pool            = ult::pool::ReturnPool<ult::desc::BasicTaskDesc, ult::stack::HeapStack>;
+    type AsyncPool       = ult::pool::ReturnPool<ult::desc::BasicTaskDesc, ult::stack::AsyncArenaStack>;
+    const ASYNC_POOL_SIZE: usize = 512;
+    type RecursionPool   = ult::pool::ThresholdPool<ult::pool::BlockPool>;
     type Lookup          = ult::lookup::TlsCurrent;
 
     fn worker_tls() -> &'static <OsSystem as ThreadSystem>::ThreadSpecific<UltWorker<Self>> {
         static A: TlsAnchor = TlsAnchor::new();
         TlsSlot::from_anchor(&A)
+    }
+
+    // Dual system: a popped continuation may be either a real ULT or an
+    // async task, so dispatch needs the poll_fn check (see execute_dual's
+    // doc comment / UltSchedulerSystem::pop_or_root below for why this
+    // can't just be the stackful-only default).
+    fn execute(wk: &UltWorker<Self>, cont: SuspendedUlt<ult::desc::BasicTaskDesc>) {
+        ult::worker::execute_dual(wk, cont)
+    }
+
+    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut ult::desc::BasicTaskDesc) {
+        ult::worker::free_finished_desc_dual(wk, desc)
+    }
+}
+
+impl ult::system::UltSchedulerSystem for DefaultUltSystem {
+    type Ctx   = NativeContext;
+    type StackAlloc = ult::stack::HeapStack;
+    const STACK_SIZE: usize = 64 * 1024;
+
+    type SuspendedThread = ult::suspended::BasicSuspendedThread<Self>;
+
+    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedUlt<ult::desc::BasicTaskDesc> {
+        ult::worker::pop_or_root_dual(wk)
     }
 }
 
@@ -105,24 +127,40 @@ impl ult::system::AsyncWorkerSystem for DefaultUltSystem {
 /// A second-level ULT system: runs on top of [`DefaultUltSystem`]'s ULTs.
 pub struct DefaultUltUltSystem;
 
-impl ult::system::UltContextSystem for DefaultUltUltSystem {
-    type StackAlloc = ult::stack::HeapStack;
-}
-
-impl ult::system::UltSchedulerSystem for DefaultUltUltSystem {
+impl ult::system::SchedulerSystem for DefaultUltUltSystem {
     type Base  = DefaultUltSystem;
-    type Ctx   = NativeContext;
-    type Deque = CrossbeamDeque;
-    const STACK_SIZE: usize = 64 * 1024;
-
-    type SuspendedThread = ult::suspended::BasicSuspendedThread<Self>;
-    type ExternalQueue   = ult::external_queue::StealPathQueue;
-    type Pool            = ult::pool::ReturnPool<ult::stack::HeapStack>;
+    type Desc  = ult::desc::BasicTaskDesc;
+    type Deque = CrossbeamDeque<ult::desc::BasicTaskDesc>;
+    type ExternalQueue   = ult::external_queue::StealPathQueue<ult::desc::BasicTaskDesc>;
+    type Pool            = ult::pool::ReturnPool<ult::desc::BasicTaskDesc, ult::stack::HeapStack>;
+    type AsyncPool       = ult::pool::ReturnPool<ult::desc::BasicTaskDesc, ult::stack::AsyncArenaStack>;
+    const ASYNC_POOL_SIZE: usize = 512;
+    type RecursionPool   = ult::pool::ThresholdPool<ult::pool::BlockPool>;
     type Lookup          = ult::lookup::TlsCurrent;
 
     fn worker_tls() -> &'static <DefaultUltSystem as ThreadSystem>::ThreadSpecific<UltWorker<Self>> {
         static A: TlsAnchor = TlsAnchor::new();
         TlsSlot::from_anchor(&A)
+    }
+
+    fn execute(wk: &UltWorker<Self>, cont: SuspendedUlt<ult::desc::BasicTaskDesc>) {
+        ult::worker::execute_dual(wk, cont)
+    }
+
+    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut ult::desc::BasicTaskDesc) {
+        ult::worker::free_finished_desc_dual(wk, desc)
+    }
+}
+
+impl ult::system::UltSchedulerSystem for DefaultUltUltSystem {
+    type Ctx   = NativeContext;
+    type StackAlloc = ult::stack::HeapStack;
+    const STACK_SIZE: usize = 64 * 1024;
+
+    type SuspendedThread = ult::suspended::BasicSuspendedThread<Self>;
+
+    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedUlt<ult::desc::BasicTaskDesc> {
+        ult::worker::pop_or_root_dual(wk)
     }
 }
 
@@ -210,7 +248,12 @@ pub mod default {
         F: std::future::Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        crate::ult::thread::spawn_async::<crate::DefaultUltSystem, T, F>(f)
+        crate::DefaultUltSystem::block_on(crate::ult::thread::spawn_async::<
+            crate::DefaultUltSystem,
+            T,
+            F,
+            _,
+        >(move || f))
     }
 
     pub fn yield_now() {
