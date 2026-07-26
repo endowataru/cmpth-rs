@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use cmpth::default::*;
 use cmpth::traits::Delegator as DelegatorTrait;
-use cmpth::{BasicSuspendedThread, DualTaskSystem, DelegatorConsumer, McsDelegator};
+use cmpth::{BasicSuspendedThread, DefaultDualTaskSystem, DelegatorConsumer, McsDelegator};
 
 /// Work item: an amount to add to the shared total, plus the slot the
 /// delegating caller parks on so `execute()` can wake them when done. Per
@@ -22,27 +22,27 @@ use cmpth::{BasicSuspendedThread, DualTaskSystem, DelegatorConsumer, McsDelegato
 #[derive(Default)]
 struct AddWork {
     amount: u64,
-    sth: BasicSuspendedThread<DualTaskSystem>,
+    sth: BasicSuspendedThread<DefaultDualTaskSystem>,
 }
 
 struct Counter {
     total: Arc<AtomicU64>,
 }
 
-impl DelegatorConsumer<DualTaskSystem> for Counter {
+impl DelegatorConsumer<DefaultDualTaskSystem> for Counter {
     type Work = AddWork;
 
     fn execute(
         &mut self,
         work: &mut AddWork,
-    ) -> (bool, Option<BasicSuspendedThread<DualTaskSystem>>) {
+    ) -> (bool, Option<BasicSuspendedThread<DefaultDualTaskSystem>>) {
         self.total.fetch_add(work.amount, Ordering::SeqCst);
         // Extract the delegator's parked continuation by value (it can't be
         // cloned) so consume() can notify() it after this returns.
         (true, Some(std::mem::take(&mut work.sth)))
     }
 
-    fn progress(&mut self) -> Option<BasicSuspendedThread<DualTaskSystem>> {
+    fn progress(&mut self) -> Option<BasicSuspendedThread<DefaultDualTaskSystem>> {
         None
     }
 
@@ -58,7 +58,7 @@ fn delegated_work_is_actually_executed() {
     // and must be woken by the (now actually running) consumer ULT.
     run(4, || {
         let total = Arc::new(AtomicU64::new(0));
-        let del: Arc<McsDelegator<DualTaskSystem, Counter>> =
+        let del: Arc<McsDelegator<DefaultDualTaskSystem, Counter>> =
             Arc::new(McsDelegator::start(Counter { total: Arc::clone(&total) }));
 
         const N: usize = 50;

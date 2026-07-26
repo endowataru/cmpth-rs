@@ -141,7 +141,7 @@ where
 // Plain functions, not trait defaults directly: each concrete system's
 // `impl SchedulerSystem`/`impl StackfulSchedulerSystem` block calls exactly one
 // of these from its own `execute`/`pop_or_root` method. No specialization is
-// involved — every concrete marker struct (DualTaskSystem, a
+// involved — every concrete marker struct (DefaultDualTaskSystem, a
 // stackful-only `UltIdentity` implementor, ...) gets exactly one such
 // `impl` block, so this is ordinary static dispatch, monomorphized per
 // system.

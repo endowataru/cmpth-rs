@@ -107,7 +107,7 @@ fn bench_one<S: StackfulTaskSystem>(label: &'static str) {
 }
 
 fn main() {
-    bench_one::<cmpth::DualTaskSystem>("heap+tls ");
+    bench_one::<cmpth::DefaultDualTaskSystem>("heap+tls ");
     bench_one::<ArenaTlsSys>("arena+tls");
     bench_one::<ArenaSys>("arena+sp ");
 }

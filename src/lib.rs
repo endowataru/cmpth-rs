@@ -16,10 +16,11 @@
 //!   [`scoped`], whose defining property is the opposite — a
 //!   `parallel_call` call's own continuation is never reified/exposed,
 //!   so its implementation needs none of this machinery.
-//! * **`lib.rs`** — instantiations: [`DualTaskSystem`], [`NestedDualTaskSystem`].
+//! * **`lib.rs`** — instantiations: [`DefaultDualTaskSystem`], [`DefaultNestedDualTaskSystem`],
+//!   [`DefaultStacklessOnlyTaskSystem`].
 //!
 //! Every stackful system implements [`ThreadSystem`] directly, so schedulers
-//! nest: set `type Base = DualTaskSystem` in a second `ThreadSystem`
+//! nest: set `type Base = DefaultDualTaskSystem` in a second `ThreadSystem`
 //! implementation to run ULTs on top of ULTs.
 
 mod context;
@@ -80,9 +81,9 @@ pub use resumable::stackful::worker::ContextSwitcher;
 // -- not two separate locks that happen to have the same name.
 
 /// The default ULT system: runs on top of [`OsSystem`].
-pub struct DualTaskSystem;
+pub struct DefaultDualTaskSystem;
 
-impl resumable::common::system::SchedulerSystem for DualTaskSystem {
+impl resumable::common::system::SchedulerSystem for DefaultDualTaskSystem {
     type Base  = OsSystem;
     type Desc  = resumable::common::desc::BasicTaskDesc;
     type Deque = CrossbeamDeque<resumable::common::desc::BasicTaskDesc>;
@@ -111,7 +112,7 @@ impl resumable::common::system::SchedulerSystem for DualTaskSystem {
     }
 }
 
-impl resumable::stackful::system::StackfulSchedulerSystem for DualTaskSystem {
+impl resumable::stackful::system::StackfulSchedulerSystem for DefaultDualTaskSystem {
     type Ctx   = NativeContext;
     type StackAlloc = resumable::common::stack::HeapStack;
     const STACK_SIZE: usize = 64 * 1024;
@@ -123,7 +124,7 @@ impl resumable::stackful::system::StackfulSchedulerSystem for DualTaskSystem {
     }
 }
 
-impl ThreadSystem for DualTaskSystem {
+impl ThreadSystem for DefaultDualTaskSystem {
     type Poller = resumable::stackful::waker::UltPoller<Self>;
 
     fn yield_now() {
@@ -151,11 +152,11 @@ impl ThreadSystem for DualTaskSystem {
     type ThreadSpecific<T: 'static> = resumable::stackful::tls::UltTls<Self, T>;
 }
 
-/// A second-level ULT system: runs on top of [`DualTaskSystem`]'s ULTs.
-pub struct NestedDualTaskSystem;
+/// A second-level ULT system: runs on top of [`DefaultDualTaskSystem`]'s ULTs.
+pub struct DefaultNestedDualTaskSystem;
 
-impl resumable::common::system::SchedulerSystem for NestedDualTaskSystem {
-    type Base  = DualTaskSystem;
+impl resumable::common::system::SchedulerSystem for DefaultNestedDualTaskSystem {
+    type Base  = DefaultDualTaskSystem;
     type Desc  = resumable::common::desc::BasicTaskDesc;
     type Deque = CrossbeamDeque<resumable::common::desc::BasicTaskDesc>;
     type ExternalQueue   = resumable::common::external_queue::StealPathQueue<resumable::common::desc::BasicTaskDesc>;
@@ -165,7 +166,7 @@ impl resumable::common::system::SchedulerSystem for NestedDualTaskSystem {
     type RecursionPool   = resumable::common::pool::ThresholdPool<resumable::common::pool::BlockPool>;
     type Lookup          = resumable::common::lookup::TlsCurrent;
 
-    fn worker_tls() -> &'static <DualTaskSystem as ThreadSystem>::ThreadSpecific<UltWorker<Self>> {
+    fn worker_tls() -> &'static <DefaultDualTaskSystem as ThreadSystem>::ThreadSpecific<UltWorker<Self>> {
         static A: TlsAnchor = TlsAnchor::new();
         TlsSlot::from_anchor(&A)
     }
@@ -179,7 +180,7 @@ impl resumable::common::system::SchedulerSystem for NestedDualTaskSystem {
     }
 }
 
-impl resumable::stackful::system::StackfulSchedulerSystem for NestedDualTaskSystem {
+impl resumable::stackful::system::StackfulSchedulerSystem for DefaultNestedDualTaskSystem {
     type Ctx   = NativeContext;
     type StackAlloc = resumable::common::stack::HeapStack;
     const STACK_SIZE: usize = 64 * 1024;
@@ -191,7 +192,7 @@ impl resumable::stackful::system::StackfulSchedulerSystem for NestedDualTaskSyst
     }
 }
 
-impl ThreadSystem for NestedDualTaskSystem {
+impl ThreadSystem for DefaultNestedDualTaskSystem {
     type Poller = resumable::stackful::waker::UltPoller<Self>;
 
     fn yield_now() {
@@ -219,6 +220,41 @@ impl ThreadSystem for NestedDualTaskSystem {
     type ThreadSpecific<T: 'static> = resumable::stackful::tls::UltTls<Self, T>;
 }
 
+// `DefaultStacklessOnlyTaskSystem`'s marker: implements `UltAsyncIdentity`
+// directly rather than being exposed itself -- callers only ever need to
+// name the type alias below, the same way `UltAsyncSystem`'s own type
+// parameter is never named at a `DefaultDualTaskSystem`-style call site.
+#[doc(hidden)]
+pub struct DefaultStacklessOnlyMarker;
+
+impl resumable::stackless::system::UltAsyncIdentity for DefaultStacklessOnlyMarker {
+    type Base = OsSystem;
+    type Deque = CrossbeamDeque<resumable::common::desc::BasicTaskDesc>;
+    type Lookup = InlineTlsCurrent;
+
+    fn worker_tls_anchor()
+    -> &'static <OsSystem as ThreadSystem>::ThreadSpecific<UltWorker<UltAsyncSystem<Self>>>
+    {
+        static A: TlsAnchor = TlsAnchor::new();
+        TlsSlot::from_anchor(&A)
+    }
+}
+
+/// The default stackless-*only* ULT system: runs on top of [`OsSystem`],
+/// genuinely no stackful capability at all (no context-switch policy, no
+/// stack allocator) -- unlike [`DefaultDualTaskSystem`], which also hosts
+/// `spawn_async` but pays for dual-flavor dispatch (a `poll_fn`-tag check
+/// per popped continuation, a tagged-word wait slot) on every task even
+/// when nothing on it ever calls the stackful `spawn`. Measured ~10-13%
+/// faster than `DefaultDualTaskSystem` on a pure-async `spawn_async` workload for
+/// exactly that reason.
+///
+/// Use this instead of `DefaultDualTaskSystem` whenever a system never needs
+/// stackful `spawn`/blocking `Mutex`/`block_on` — the same "pick a system"
+/// call site as any other, just via `UltAsyncIdentity` instead of
+/// `UltIdentity`.
+pub type DefaultStacklessOnlyTaskSystem = UltAsyncSystem<DefaultStacklessOnlyMarker>;
+
 // ---------------------------------------------------------------------------
 // Convenience API for the default system
 //
@@ -227,7 +263,7 @@ impl ThreadSystem for NestedDualTaskSystem {
 // ---------------------------------------------------------------------------
 
 pub mod default {
-    //! Convenience aliases and entry points bound to [`DualTaskSystem`](crate::DualTaskSystem).
+    //! Convenience aliases and entry points bound to [`DefaultDualTaskSystem`](crate::DefaultDualTaskSystem).
     //!
     //! Import with `use cmpth::default::*` to bring the default-system API
     //! into scope.  The explicit module path signals that you are using the
@@ -253,7 +289,7 @@ pub mod default {
         F: FnOnce() -> R + Send + 'static,
         R: Send + 'static,
     {
-        crate::DualTaskSystem::run(num_workers, root)
+        crate::DefaultDualTaskSystem::run(num_workers, root)
     }
 
     /// Spawn a ULT (child-first: the child starts immediately and the
@@ -271,7 +307,7 @@ pub mod default {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        crate::resumable::stackful::thread::spawn::<crate::DualTaskSystem, T, F>(f)
+        crate::resumable::stackful::thread::spawn::<crate::DefaultDualTaskSystem, T, F>(f)
     }
 
     /// Spawn a `Future` as a stackless task: the executor polls it in place,
@@ -288,8 +324,8 @@ pub mod default {
         F: std::future::Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        crate::DualTaskSystem::block_on(crate::resumable::stackless::thread::spawn_async::<
-            crate::DualTaskSystem,
+        crate::DefaultDualTaskSystem::block_on(crate::resumable::stackless::thread::spawn_async::<
+            crate::DefaultDualTaskSystem,
             T,
             F,
             _,
@@ -297,14 +333,14 @@ pub mod default {
     }
 
     pub fn yield_now() {
-        crate::DualTaskSystem::yield_now();
+        crate::DefaultDualTaskSystem::yield_now();
     }
 
-    pub type JoinHandle<T> = crate::resumable::common::thread::JoinHandle<crate::DualTaskSystem, T>;
-    pub type Mutex<T> = crate::resumable::stackful::sync::McsMutex<crate::DualTaskSystem, T>;
-    pub type MutexGuard<'a, T> = crate::resumable::stackful::sync::McsMutexGuard<'a, crate::DualTaskSystem, T>;
-    pub type Condvar = crate::resumable::stackful::sync::McsCondvar<crate::DualTaskSystem>;
-    pub type Barrier = crate::resumable::stackful::sync::Barrier<crate::DualTaskSystem>;
+    pub type JoinHandle<T> = crate::resumable::common::thread::JoinHandle<crate::DefaultDualTaskSystem, T>;
+    pub type Mutex<T> = crate::resumable::stackful::sync::McsMutex<crate::DefaultDualTaskSystem, T>;
+    pub type MutexGuard<'a, T> = crate::resumable::stackful::sync::McsMutexGuard<'a, crate::DefaultDualTaskSystem, T>;
+    pub type Condvar = crate::resumable::stackful::sync::McsCondvar<crate::DefaultDualTaskSystem>;
+    pub type Barrier = crate::resumable::stackful::sync::Barrier<crate::DefaultDualTaskSystem>;
 }
 
 // ---------------------------------------------------------------------------
@@ -315,5 +351,5 @@ pub mod system {
     pub use crate::traits::{JoinHandleLike, StackfulBarrier, StackfulMutex, ThreadSystem};
     pub use crate::os::{OsBarrier, OsCondvar, OsMutex, OsSystem};
 
-    pub type WssSystem = crate::DualTaskSystem;
+    pub type WssSystem = crate::DefaultDualTaskSystem;
 }

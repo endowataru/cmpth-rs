@@ -7,13 +7,13 @@ use std::sync::Arc;
 
 use cmpth::default::*;
 use cmpth::traits::{BarrierWaitResult, StackfulBarrier, StacklessBarrier};
-use cmpth::{BasicSuspendedThread, DualTaskSystem, SuspendedFuture, SuspendedTask, UltDualBarrier};
+use cmpth::{BasicSuspendedThread, DefaultDualTaskSystem, SuspendedFuture, SuspendedTask, UltDualBarrier};
 
 #[test]
 fn sync_only_flavor() {
     run(8, || {
         const N: usize = 8;
-        let b: Arc<UltDualBarrier<DualTaskSystem, BasicSuspendedThread<DualTaskSystem>>> =
+        let b: Arc<UltDualBarrier<DefaultDualTaskSystem, BasicSuspendedThread<DefaultDualTaskSystem>>> =
             Arc::new(UltDualBarrier::new(N));
         let before = Arc::new(AtomicUsize::new(0));
         let after = Arc::new(AtomicUsize::new(0));
@@ -50,7 +50,7 @@ fn sync_only_flavor() {
 fn async_only_flavor() {
     run(8, || {
         const N: usize = 8;
-        let b: Arc<UltDualBarrier<DualTaskSystem, SuspendedFuture<DualTaskSystem>>> =
+        let b: Arc<UltDualBarrier<DefaultDualTaskSystem, SuspendedFuture<DefaultDualTaskSystem>>> =
             Arc::new(UltDualBarrier::new(N));
         let before = Arc::new(AtomicUsize::new(0));
         let leaders = Arc::new(AtomicUsize::new(0));
@@ -83,7 +83,7 @@ fn dual_flavor_from_both_sync_and_async() {
         const NSYNC: usize = 4;
         const NASYNC: usize = 4;
         const N: usize = NSYNC + NASYNC;
-        let b: Arc<UltDualBarrier<DualTaskSystem, SuspendedTask<DualTaskSystem>>> =
+        let b: Arc<UltDualBarrier<DefaultDualTaskSystem, SuspendedTask<DefaultDualTaskSystem>>> =
             Arc::new(UltDualBarrier::new(N));
         let before = Arc::new(AtomicUsize::new(0));
         let leaders = Arc::new(AtomicUsize::new(0));

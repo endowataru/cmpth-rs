@@ -68,25 +68,25 @@ pub trait BenchSystem: Send + Sync + 'static {
 }
 
 // ---------------------------------------------------------------------------
-// CmpthBench — cmpth DualTaskSystem
+// CmpthBench — cmpth DefaultDualTaskSystem
 // ---------------------------------------------------------------------------
 
 pub struct CmpthBench;
 
 impl BenchSystem for CmpthBench {
     type JoinHandle<T: Send + 'static> =
-        <cmpth::DualTaskSystem as cmpth::ThreadSystem>::JoinHandle<T>;
+        <cmpth::DefaultDualTaskSystem as cmpth::ThreadSystem>::JoinHandle<T>;
 
     fn run(num_workers: usize, f: impl FnOnce() + Send + 'static) {
         use cmpth::ScopedStackfulTaskSystem as _;
-        cmpth::DualTaskSystem::run(num_workers, f);
+        cmpth::DefaultDualTaskSystem::run(num_workers, f);
     }
 
     fn spawn<T: Send + 'static>(
         f: impl FnOnce() -> T + Send + 'static,
     ) -> Self::JoinHandle<T> {
         use cmpth::ThreadSystem as _;
-        cmpth::DualTaskSystem::spawn(f)
+        cmpth::DefaultDualTaskSystem::spawn(f)
     }
 }
 

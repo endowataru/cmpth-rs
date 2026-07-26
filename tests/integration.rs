@@ -9,7 +9,7 @@ use cmpth::traits::StackfulBarrier;
 // Shared static ULT-local slot used by the UltTls tests below.
 // Key is lazily assigned once; each new scheduler run gives each ULT a fresh
 // TLS map, so there is no cross-test interference.
-static ULT_LOCAL: UltTls<DualTaskSystem, u64> = UltTls::new();
+static ULT_LOCAL: UltTls<DefaultDualTaskSystem, u64> = UltTls::new();
 
 #[test]
 fn create_and_join() {
@@ -134,7 +134,7 @@ fn task_panic_propagates() {
 #[test]
 fn suspended_thread_cancel() {
     run(2, || {
-        let sth = BasicSuspendedThread::<DualTaskSystem>::new();
+        let sth = BasicSuspendedThread::<DefaultDualTaskSystem>::new();
         sth.wait_with_cond(|| false);
         assert!(!sth.is_set());
     });
@@ -147,9 +147,9 @@ fn suspended_thread_cancel() {
 #[test]
 fn nested_spawn_join() {
     run(2, || {
-        NestedDualTaskSystem::run(2, || {
+        DefaultNestedDualTaskSystem::run(2, || {
             let handles: Vec<_> = (0..50)
-                .map(|i| <NestedDualTaskSystem as ThreadSystem>::spawn(move || i * 3u64))
+                .map(|i| <DefaultNestedDualTaskSystem as ThreadSystem>::spawn(move || i * 3u64))
                 .collect();
             let mut sum = 0u64;
             for h in handles {
@@ -163,15 +163,15 @@ fn nested_spawn_join() {
 #[test]
 fn nested_mutex() {
     run(2, || {
-        NestedDualTaskSystem::run(2, || {
+        DefaultNestedDualTaskSystem::run(2, || {
             use std::sync::Arc;
             use cmpth::traits::StackfulMutex;
-            type M = <NestedDualTaskSystem as ThreadSystem>::Mutex<u64>;
+            type M = <DefaultNestedDualTaskSystem as ThreadSystem>::Mutex<u64>;
             let m = Arc::new(<M as StackfulMutex<u64>>::new(0));
             let handles: Vec<_> = (0..20)
                 .map(|_| {
                     let m = Arc::clone(&m);
-                    <NestedDualTaskSystem as ThreadSystem>::spawn(move || {
+                    <DefaultNestedDualTaskSystem as ThreadSystem>::spawn(move || {
                         for _ in 0..50 {
                             *m.lock() += 1;
                         }
@@ -210,9 +210,9 @@ fn generic_workload<S: ThreadSystem>() -> u64 {
 fn generic_over_layers() {
     assert_eq!(generic_workload::<OsSystem>(), 80);
     run(2, || {
-        assert_eq!(generic_workload::<DualTaskSystem>(), 80);
-        NestedDualTaskSystem::run(2, || {
-            assert_eq!(generic_workload::<NestedDualTaskSystem>(), 80);
+        assert_eq!(generic_workload::<DefaultDualTaskSystem>(), 80);
+        DefaultNestedDualTaskSystem::run(2, || {
+            assert_eq!(generic_workload::<DefaultNestedDualTaskSystem>(), 80);
         });
     });
 }
@@ -251,7 +251,7 @@ fn detach_after_finish() {
 fn mcs_mutex_basic() {
     use cmpth::McsMutex;
     run(4, || {
-        let m = std::sync::Arc::new(McsMutex::<DualTaskSystem, u64>::new(0));
+        let m = std::sync::Arc::new(McsMutex::<DefaultDualTaskSystem, u64>::new(0));
         let handles: Vec<_> = (0..8).map(|_| {
             let m = std::sync::Arc::clone(&m);
             spawn(move || { *m.lock() += 1; })
@@ -288,7 +288,7 @@ impl std::future::Future for YieldOnce {
 fn block_on_yield_once() {
     // block_on should park, get woken (immediately by wake_by_ref), and re-poll to Ready.
     run(2, || {
-        let v = DualTaskSystem::block_on(YieldOnce(false));
+        let v = DefaultDualTaskSystem::block_on(YieldOnce(false));
         assert_eq!(v, 42);
     });
 }
@@ -296,7 +296,7 @@ fn block_on_yield_once() {
 #[test]
 fn future_yield_now_in_block_on() {
     run(2, || {
-        let v = DualTaskSystem::block_on(async {
+        let v = DefaultDualTaskSystem::block_on(async {
             cmpth::future::yield_now().await;
             42u32
         });
@@ -318,7 +318,7 @@ fn future_yield_now_without_worker() {
 #[test]
 fn block_on_already_ready() {
     run(1, || {
-        let v = DualTaskSystem::block_on(async { 99u32 });
+        let v = DefaultDualTaskSystem::block_on(async { 99u32 });
         assert_eq!(v, 99);
     });
 }
@@ -363,11 +363,11 @@ fn block_on_cross_ult_wake() {
                     w.wake();
                     break;
                 }
-                <DualTaskSystem as ThreadSystem>::yield_now();
+                <DefaultDualTaskSystem as ThreadSystem>::yield_now();
             }
         });
 
-        DualTaskSystem::block_on(WaitForWake { slot, done });
+        DefaultDualTaskSystem::block_on(WaitForWake { slot, done });
         waker_h.join().unwrap();
     });
 }
@@ -376,7 +376,7 @@ fn block_on_cross_ult_wake() {
 #[test]
 fn join_handle_as_future() {
     run(2, || {
-        let v = DualTaskSystem::block_on(async {
+        let v = DefaultDualTaskSystem::block_on(async {
             let h = spawn(|| 42u64);
             h.await
         });
@@ -397,7 +397,7 @@ fn join_handle_future_drop_mid_wait() {
             done2.store(true, Ordering::Release);
         });
         // Poll once (registers waker), then drop the future — should detach cleanly.
-        DualTaskSystem::block_on(async {
+        DefaultDualTaskSystem::block_on(async {
             let mut h = std::pin::pin!(h);
             let _ = std::future::poll_fn(|cx| {
                 // Drive one poll to register the async joiner, then return Ready
@@ -459,7 +459,7 @@ fn block_on_external_thread_wake() {
     });
 
     run(2, move || {
-        let v = DualTaskSystem::block_on(WaitForExternalWake { slot, ready });
+        let v = DefaultDualTaskSystem::block_on(WaitForExternalWake { slot, ready });
         assert_eq!(v, 7);
     });
 
@@ -599,7 +599,7 @@ fn spawn_async_yield() {
         let flag = Arc::new(AtomicBool::new(false));
         let flag2 = Arc::clone(&flag);
         let h = spawn_async(async move {
-            <DualTaskSystem as StacklessTaskSystem>::yield_now().await;
+            <DefaultDualTaskSystem as StacklessTaskSystem>::yield_now().await;
             flag2.store(true, Ordering::Release);
             42u32
         });
@@ -622,7 +622,7 @@ fn spawn_async_join_handle_as_future() {
     // Await a spawn_async JoinHandle from within block_on.
     run(2, || {
         let h = spawn_async(async { 7u32 });
-        let v = DualTaskSystem::block_on(h);
+        let v = DefaultDualTaskSystem::block_on(h);
         assert_eq!(v, 7);
     });
 }
