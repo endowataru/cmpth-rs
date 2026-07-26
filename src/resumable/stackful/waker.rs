@@ -49,7 +49,7 @@ use crate::resumable::common::worker::{UltWorker, Worker};
 use crate::resumable::stackful::worker::StackfulWorker;
 
 // ---------------------------------------------------------------------------
-// Vtable singletons (one per concrete StackfulSystem type S)
+// Vtable singletons (one per concrete ThreadSystem type S)
 // ---------------------------------------------------------------------------
 
 struct PrivateVtable<S>(PhantomData<S>);

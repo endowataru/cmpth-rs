@@ -7,7 +7,7 @@
 //!
 //! * **`traits/`** — interface layer, no implementations:
 //!   [`ThreadSystem`], [`traits::Resumable`], [`traits::StackfulMutex`], [`traits::StackfulBarrier`], …
-//! * **`resumable/`** — implementation layer (parametric over [`StackfulSystem`])
+//! * **`resumable/`** — implementation layer (parametric over [`ThreadSystem`])
 //!   for schedulers whose defining property is that a spawned computation's
 //!   *continuation* is reified into something independently resumable
 //!   later (a real context-switch continuation for stackful ULTs, a
@@ -18,9 +18,9 @@
 //!   so its implementation needs none of this machinery.
 //! * **`lib.rs`** — instantiations: [`DualTaskSystem`], [`NestedDualTaskSystem`].
 //!
-//! Because every `StackfulSystem` is also a `ThreadSystem`, schedulers nest: set
-//! `type Base = DualTaskSystem` in a second `StackfulSystem` implementation to
-//! run ULTs on top of ULTs.
+//! Every stackful system implements [`ThreadSystem`] directly, so schedulers
+//! nest: set `type Base = DualTaskSystem` in a second `ThreadSystem`
+//! implementation to run ULTs on top of ULTs.
 
 mod context;
 pub mod traits;
@@ -53,8 +53,8 @@ pub use resumable::stackful::sync::{Barrier as UltBarrier, McsDelegator, McsMute
 pub use resumable::common::sync::{DualBarrier as UltDualBarrier, DualMutex as UltDualMutex, DualMutexGuard as UltDualMutexGuard};
 pub use resumable::stackful::sync::{delegator, Producer as DelegatorProducer};
 pub use resumable::common::system::SchedulerSystem;
-pub use resumable::stackful::system::{StackfulSchedulerSystem, StackfulSystem, StackfulTaskSystem};
-pub use resumable::stackless::system::{StacklessTaskSystem, StacklessSystem};
+pub use resumable::stackful::system::{StackfulSchedulerSystem, StackfulTaskSystem};
+pub use resumable::stackless::system::StacklessTaskSystem;
 pub use resumable::stackful::tls::UltTls;
 pub use resumable::common::worker::{LocalQueue, TaskPool, UltWorker, Worker, current_worker};
 pub use resumable::stackful::worker::ContextSwitcher;
@@ -63,21 +63,21 @@ pub use resumable::stackful::worker::ContextSwitcher;
 // Default instantiations
 // ---------------------------------------------------------------------------
 
-// Both default systems host stackless spawn_async-style tasks as well as
-// stackful ULTs (`resumable::stackless::system::StacklessSystem` + `StackfulSystem`), and their
-// `Mutex`/`Barrier` are meant to be contended-together from either calling
-// convention -- so `ult_system!` (which can't assume `StacklessSystem`
-// is also implemented, since a stackful-only system must stay expressible)
-// isn't used here. Everything it would have generated is written out by
-// hand instead, with `StackfulSystem::Mutex`/`Barrier` bound to the same
-// `SuspendedTask`-parameterized `DualMutex`/`DualBarrier` as
-// `StacklessSystem::Mutex`/`Barrier`: since `SuspendedTask<S>`
-// implements both `StackfulResumable` and `StacklessResumable` (unlike
-// the macro's default `BasicSuspendedThread`, stackful-only), one type
-// satisfies both `StackfulMutex` and `StacklessMutex`, so a single
-// instance is genuinely shared and contended between stackful and
-// stackless callers -- not two separate locks that happen to have the
-// same name.
+// Both default systems host stackless spawn_async-style tasks (the
+// blanket `StacklessTaskSystem` impl, automatic for any async-capable
+// `SchedulerSystem`) as well as stackful ULTs (`ThreadSystem`), and their
+// `Mutex`/`Barrier` are meant to be contended-together from either
+// calling convention -- so `ult_system!` (whose generated `Mutex`/
+// `Barrier` use the stackful-only `BasicSuspendedThread`, with no
+// async-wait capability) isn't used here. Everything it would have
+// generated is written out by hand instead, with `ThreadSystem::Mutex`/
+// `Barrier` bound to a `SuspendedTask`-parameterized `DualMutex`/
+// `DualBarrier`: since `SuspendedTask<S>` implements both
+// `StackfulResumable` and `StacklessResumable` (unlike the macro's
+// default `BasicSuspendedThread`, stackful-only), one type satisfies
+// both `StackfulMutex` and `StacklessMutex`, so a single instance is
+// genuinely shared and contended between stackful and stackless callers
+// -- not two separate locks that happen to have the same name.
 
 /// The default ULT system: runs on top of [`OsSystem`].
 pub struct DualTaskSystem;
@@ -123,15 +123,32 @@ impl resumable::stackful::system::StackfulSchedulerSystem for DualTaskSystem {
     }
 }
 
-impl StackfulSystem for DualTaskSystem {
+impl ThreadSystem for DualTaskSystem {
+    type Poller = resumable::stackful::waker::UltPoller<Self>;
+
+    fn yield_now() {
+        use resumable::stackful::worker::StackfulWorker;
+        match UltWorker::<Self>::current() {
+            Some(wk) => { wk.yield_now(); }
+            None => <<Self as SchedulerSystem>::Base as ThreadSystem>::yield_now(),
+        }
+    }
+
+    type JoinHandle<T: Send + 'static> = resumable::common::thread::JoinHandle<Self, T>;
+
+    fn spawn<T, F>(f: F) -> resumable::common::thread::JoinHandle<Self, T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        resumable::stackful::thread::spawn::<Self, T, F>(f)
+    }
+
     type Mutex<T: Send> = UltDualMutex<Self, T, SuspendedTask<Self>>;
     type Barrier         = UltDualBarrier<Self, SuspendedTask<Self>>;
+    type SuspendedThread = resumable::stackful::suspended::BasicSuspendedThread<Self>;
     type Delegator<C: DelegatorConsumer<Self>> = McsDelegator<Self, C>;
-}
-
-impl resumable::stackless::system::StacklessSystem for DualTaskSystem {
-    type Mutex<T: Send> = UltDualMutex<Self, T, SuspendedTask<Self>>;
-    type Barrier = UltDualBarrier<Self, SuspendedTask<Self>>;
+    type ThreadSpecific<T: 'static> = resumable::stackful::tls::UltTls<Self, T>;
 }
 
 /// A second-level ULT system: runs on top of [`DualTaskSystem`]'s ULTs.
@@ -174,15 +191,32 @@ impl resumable::stackful::system::StackfulSchedulerSystem for NestedDualTaskSyst
     }
 }
 
-impl StackfulSystem for NestedDualTaskSystem {
+impl ThreadSystem for NestedDualTaskSystem {
+    type Poller = resumable::stackful::waker::UltPoller<Self>;
+
+    fn yield_now() {
+        use resumable::stackful::worker::StackfulWorker;
+        match UltWorker::<Self>::current() {
+            Some(wk) => { wk.yield_now(); }
+            None => <<Self as SchedulerSystem>::Base as ThreadSystem>::yield_now(),
+        }
+    }
+
+    type JoinHandle<T: Send + 'static> = resumable::common::thread::JoinHandle<Self, T>;
+
+    fn spawn<T, F>(f: F) -> resumable::common::thread::JoinHandle<Self, T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        resumable::stackful::thread::spawn::<Self, T, F>(f)
+    }
+
     type Mutex<T: Send> = UltDualMutex<Self, T, SuspendedTask<Self>>;
     type Barrier         = UltDualBarrier<Self, SuspendedTask<Self>>;
+    type SuspendedThread = resumable::stackful::suspended::BasicSuspendedThread<Self>;
     type Delegator<C: DelegatorConsumer<Self>> = McsDelegator<Self, C>;
-}
-
-impl resumable::stackless::system::StacklessSystem for NestedDualTaskSystem {
-    type Mutex<T: Send> = UltDualMutex<Self, T, SuspendedTask<Self>>;
-    type Barrier = UltDualBarrier<Self, SuspendedTask<Self>>;
+    type ThreadSpecific<T: 'static> = resumable::stackful::tls::UltTls<Self, T>;
 }
 
 // ---------------------------------------------------------------------------

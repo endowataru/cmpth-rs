@@ -14,7 +14,7 @@ pub use delegator::{Delegator, DelegatorConsumer};
 pub use lock::{DualMutex, StackfulMutex, StacklessMutex};
 pub use scoped::{ScopedStackfulTaskSystem, ScopedStacklessTaskSystem};
 pub use poller::Poller;
-pub use system::{StackfulSystem, StackfulTaskSystem, StacklessSystem, StacklessTaskSystem};
+pub use system::{StackfulTaskSystem, StacklessTaskSystem};
 pub use thread_system::{JoinHandleLike, TaskSystem, TlsAnchor, TlsSlot, ThreadSystem};
 pub use wait::{Resumable, StackfulResumable, StacklessResumable};
 
@@ -23,7 +23,7 @@ pub use wait::{Resumable, StackfulResumable, StacklessResumable};
 pub mod stackful {
     pub use crate::traits::{
         Delegator, DelegatorConsumer, JoinHandleLike, Resumable, ScopedStackfulTaskSystem, StackfulBarrier,
-        StackfulMutex, StackfulResumable, StackfulSystem, StackfulTaskSystem, TaskSystem, ThreadSystem,
+        StackfulMutex, StackfulResumable, StackfulTaskSystem, TaskSystem, ThreadSystem,
     };
 }
 
@@ -32,6 +32,6 @@ pub mod stackful {
 pub mod stackless {
     pub use crate::traits::{
         Resumable, ScopedStacklessTaskSystem, StacklessBarrier, StacklessMutex, StacklessResumable,
-        StacklessSystem, StacklessTaskSystem, TaskSystem,
+        StacklessTaskSystem, TaskSystem,
     };
 }

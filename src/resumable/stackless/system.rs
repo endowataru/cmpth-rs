@@ -15,10 +15,10 @@ use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::stackless::desc::AsyncTaskDesc;
 use crate::traits::scoped::ScopedStacklessTaskSystem;
 
-// `StacklessSystem`/`StacklessTaskSystem` now live in `crate::traits::system`
-// — re-exported below for callers that still spell out
-// `resumable::stackless::system::StacklessSystem`/`StacklessTaskSystem`.
-pub use crate::traits::system::{StacklessSystem, StacklessTaskSystem};
+// `StacklessTaskSystem` now lives in `crate::traits::system` — re-exported
+// below for callers that still spell out
+// `resumable::stackless::system::StacklessTaskSystem`.
+pub use crate::traits::system::StacklessTaskSystem;
 
 impl<S: SchedulerSystem> StacklessTaskSystem for S
 where
@@ -90,8 +90,8 @@ where
 /// context-switch policy or stack allocator, because it has none. Its only
 /// entry points are [`crate::resumable::stackless::scheduler::run_async`] (run) and
 /// [`crate::resumable::stackless::thread::spawn_async`] (spawn); there is no `spawn`, no
-/// `block_on`, no `ThreadSystem` impl for it via the `StackfulSystem` blanket
-/// (that blanket requires stackful capability).
+/// `block_on`, no `ThreadSystem` impl at all for it (that requires
+/// stackful capability this system deliberately doesn't have).
 ///
 /// `Worker::execute`'s dispatch is [`crate::resumable::stackful::worker::execute_stackful`]
 /// -shaped in spirit but for polling instead of switching: it always polls,

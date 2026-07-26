@@ -783,7 +783,7 @@ fn arena_external_block_on() {
 }
 
 // ---------------------------------------------------------------------------
-// StackfulSystem implemented by hand (no ult_system! macro)
+// ThreadSystem implemented by hand (no ult_system! macro)
 // ---------------------------------------------------------------------------
 
 /// The ult_system! macro is convenience, not architecture: everything it
@@ -832,11 +832,34 @@ impl cmpth::StackfulSchedulerSystem for ManualSystem {
     type SuspendedThread = BasicSuspendedThread<Self>;
 }
 
-impl StackfulSystem for ManualSystem {
+impl ThreadSystem for ManualSystem {
+    type Poller = cmpth::resumable::stackful::waker::UltPoller<Self>;
+
+    fn yield_now() {
+        use cmpth::resumable::common::worker::Worker;
+        use cmpth::resumable::stackful::worker::StackfulWorker;
+        match UltWorker::<Self>::current() {
+            Some(wk) => { wk.yield_now(); }
+            None => <OsSystem as ThreadSystem>::yield_now(),
+        }
+    }
+
+    type JoinHandle<T: Send + 'static> = cmpth::resumable::common::thread::JoinHandle<Self, T>;
+
+    fn spawn<T, F>(f: F) -> cmpth::resumable::common::thread::JoinHandle<Self, T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        cmpth::resumable::stackful::thread::spawn::<Self, T, F>(f)
+    }
+
     type Mutex<T: Send> = cmpth::McsMutex<Self, T>;
     type Barrier        = cmpth::resumable::stackful::sync::Barrier<Self>;
+    type SuspendedThread = BasicSuspendedThread<Self>;
     type Delegator<C: cmpth::DelegatorConsumer<Self>> =
         cmpth::resumable::stackful::sync::McsDelegator<Self, C>;
+    type ThreadSpecific<T: 'static> = cmpth::resumable::stackful::tls::UltTls<Self, T>;
 }
 
 #[test]

@@ -5,8 +5,9 @@ use crate::resumable::common::desc::WakerTaskDesc;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
+use crate::resumable::stackful::suspended::UltSuspendedThread;
 use crate::resumable::stackful::worker::StackfulWorker;
-use crate::traits::StackfulSystem;
+use crate::traits::ThreadSystem;
 use crate::resumable::common::worker::Worker;
 
 use super::delegator::{Delegator, DelegatorNode, SyncQueue};
@@ -15,26 +16,26 @@ use super::delegator::{Delegator, DelegatorNode, SyncQueue};
 // RingBufQueue
 // ---------------------------------------------------------------------------
 
-pub struct RingBufQueue<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, const N: usize> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+pub struct RingBufQueue<S: StackfulSchedulerSystem + ThreadSystem, C: DelegatorConsumer<S>, const N: usize> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc, <S as ThreadSystem>::SuspendedThread: UltSuspendedThread {
     head:  AtomicUsize,
     tail:  AtomicUsize,
     nodes: Box<[RingSlot<S, C>; N]>,
 }
 
-struct RingSlot<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+struct RingSlot<S: StackfulSchedulerSystem + ThreadSystem, C: DelegatorConsumer<S>> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc, <S as ThreadSystem>::SuspendedThread: UltSuspendedThread {
     ready: AtomicBool,
     node:  std::cell::UnsafeCell<DelegatorNode<S, C>>,
 }
 
-unsafe impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, const N: usize> Send
-    for RingBufQueue<S, C, N> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {}
-unsafe impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, const N: usize> Sync
-    for RingBufQueue<S, C, N> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {}
+unsafe impl<S: StackfulSchedulerSystem + ThreadSystem, C: DelegatorConsumer<S>, const N: usize> Send
+    for RingBufQueue<S, C, N> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc, <S as ThreadSystem>::SuspendedThread: UltSuspendedThread {}
+unsafe impl<S: StackfulSchedulerSystem + ThreadSystem, C: DelegatorConsumer<S>, const N: usize> Sync
+    for RingBufQueue<S, C, N> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc, <S as ThreadSystem>::SuspendedThread: UltSuspendedThread {}
 
-impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, const N: usize> Default
-    for RingBufQueue<S, C, N> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc
+impl<S: StackfulSchedulerSystem + ThreadSystem, C: DelegatorConsumer<S>, const N: usize> Default
+    for RingBufQueue<S, C, N> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc, <S as ThreadSystem>::SuspendedThread: UltSuspendedThread
 {
-    fn default() -> Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+    fn default() -> Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc, <S as ThreadSystem>::SuspendedThread: UltSuspendedThread {
         assert!(N.is_power_of_two(), "RingBufQueue capacity must be a power of two");
         // SAFETY: array of UnsafeCell<DelegatorNode> initialized to Default.
         let nodes: Vec<RingSlot<S, C>> = (0..N)
@@ -53,20 +54,20 @@ impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, const
     }
 }
 
-impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, const N: usize> RingBufQueue<S, C, N> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
-    fn mask(idx: usize) -> usize where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc { idx & (N - 1) }
+impl<S: StackfulSchedulerSystem + ThreadSystem, C: DelegatorConsumer<S>, const N: usize> RingBufQueue<S, C, N> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc, <S as ThreadSystem>::SuspendedThread: UltSuspendedThread {
+    fn mask(idx: usize) -> usize where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc, <S as ThreadSystem>::SuspendedThread: UltSuspendedThread { idx & (N - 1) }
 
-    fn slot_node(&self, idx: usize) -> *mut DelegatorNode<S, C> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+    fn slot_node(&self, idx: usize) -> *mut DelegatorNode<S, C> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc, <S as ThreadSystem>::SuspendedThread: UltSuspendedThread {
         self.nodes[Self::mask(idx)].node.get()
     }
 }
 
-impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, const N: usize> SyncQueue<S, C>
-    for RingBufQueue<S, C, N> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc
+impl<S: StackfulSchedulerSystem + ThreadSystem, C: DelegatorConsumer<S>, const N: usize> SyncQueue<S, C>
+    for RingBufQueue<S, C, N> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc, <S as ThreadSystem>::SuspendedThread: UltSuspendedThread
 {
     fn start_lock(
         &self,
-    ) -> (bool, *mut DelegatorNode<S, C>, *mut DelegatorNode<S, C>) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+    ) -> (bool, *mut DelegatorNode<S, C>, *mut DelegatorNode<S, C>) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc, <S as ThreadSystem>::SuspendedThread: UltSuspendedThread {
         loop {
             let tail = self.tail.load(Ordering::Relaxed);
             let head = self.head.load(Ordering::Acquire);
@@ -102,18 +103,18 @@ impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, const
         &self,
         _prev: *mut DelegatorNode<S, C>,
         cur: *mut DelegatorNode<S, C>,
-    ) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+    ) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc, <S as ThreadSystem>::SuspendedThread: UltSuspendedThread {
         // For ring buffer, "set_next" means marking the slot as ready.
         // Find which slot `cur` belongs to.
         let slot_idx = self.slot_index(cur);
         self.nodes[Self::mask(slot_idx)].ready.store(true, Ordering::Release);
     }
 
-    fn get_head(&self) -> *mut DelegatorNode<S, C> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+    fn get_head(&self) -> *mut DelegatorNode<S, C> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc, <S as ThreadSystem>::SuspendedThread: UltSuspendedThread {
         self.slot_node(self.head.load(Ordering::Relaxed))
     }
 
-    fn try_unlock(&self, _head: *mut DelegatorNode<S, C>) -> bool where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+    fn try_unlock(&self, _head: *mut DelegatorNode<S, C>) -> bool where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc, <S as ThreadSystem>::SuspendedThread: UltSuspendedThread {
         let head = self.head.load(Ordering::Relaxed);
         let tail = self.tail.load(Ordering::Acquire);
         if head == tail {
@@ -125,7 +126,7 @@ impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, const
     fn try_follow_head(
         &self,
         head: *mut DelegatorNode<S, C>,
-    ) -> Option<*mut DelegatorNode<S, C>> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+    ) -> Option<*mut DelegatorNode<S, C>> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc, <S as ThreadSystem>::SuspendedThread: UltSuspendedThread {
         let head_idx = self.head.load(Ordering::Relaxed);
         let slot = &self.nodes[Self::mask(head_idx)];
         if slot.ready.load(Ordering::Acquire) {
@@ -140,8 +141,8 @@ impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, const
     }
 }
 
-impl<S: StackfulSchedulerSystem + StackfulSystem, C: DelegatorConsumer<S>, const N: usize> RingBufQueue<S, C, N> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
-    fn slot_index(&self, node: *mut DelegatorNode<S, C>) -> usize where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+impl<S: StackfulSchedulerSystem + ThreadSystem, C: DelegatorConsumer<S>, const N: usize> RingBufQueue<S, C, N> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc, <S as ThreadSystem>::SuspendedThread: UltSuspendedThread {
+    fn slot_index(&self, node: *mut DelegatorNode<S, C>) -> usize where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc, <S as ThreadSystem>::SuspendedThread: UltSuspendedThread {
         let base = self.nodes[0].node.get() as usize;
         let size = std::mem::size_of::<RingSlot<S, C>>();
         (node as usize - base) / size

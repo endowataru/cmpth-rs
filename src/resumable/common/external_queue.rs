@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::traits::thread_system::ThreadSystem;
 use crate::resumable::common::desc::SuspendedUlt;
 use crate::resumable::common::scheduler::Scheduler;
-use crate::traits::system::StackfulSystem;
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::stackful::thread::{ErasedBody, fork_parent_first};
@@ -111,7 +110,7 @@ impl<D: crate::resumable::common::desc::TaskDesc> Default for PollerUltQueue<D> 
     }
 }
 
-impl<S: StackfulSchedulerSystem + StackfulSystem> ExternalQueue<S> for PollerUltQueue<S::Desc>
+impl<S: StackfulSchedulerSystem + ThreadSystem> ExternalQueue<S> for PollerUltQueue<S::Desc>
 where
     S::Desc: crate::resumable::stackful::desc::StackfulTaskDesc + crate::resumable::common::desc::WakerTaskDesc,
 {

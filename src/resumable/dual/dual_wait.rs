@@ -10,7 +10,6 @@ use crate::traits::{Resumable, StackfulResumable, StacklessResumable};
 use crate::resumable::common::desc::{SuspendedUlt, TaskDesc};
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::stackless::desc::AsyncTaskDesc;
-use crate::resumable::stackless::system::StacklessSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
 use crate::resumable::stackful::worker::ContextSwitcher;
@@ -30,15 +29,15 @@ const ASYNC_TAG: usize = 1;
 /// possible into a genuine continuation. `wait_with`/`register` never need
 /// this: they only ever *write* a fresh registration into what must already
 /// be an empty slot, so there's no ambiguity about prior content.
-pub struct SuspendedTask<S: StackfulSchedulerSystem + StacklessSystem> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
+pub struct SuspendedTask<S: StackfulSchedulerSystem> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
     state: AtomicUsize,
     _marker: PhantomData<S>,
 }
 
-unsafe impl<S: StackfulSchedulerSystem + StacklessSystem> Send for SuspendedTask<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {}
-unsafe impl<S: StackfulSchedulerSystem + StacklessSystem> Sync for SuspendedTask<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {}
+unsafe impl<S: StackfulSchedulerSystem> Send for SuspendedTask<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {}
+unsafe impl<S: StackfulSchedulerSystem> Sync for SuspendedTask<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {}
 
-impl<S: StackfulSchedulerSystem + StacklessSystem> Default for SuspendedTask<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
+impl<S: StackfulSchedulerSystem> Default for SuspendedTask<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
     fn default() -> Self {
         SuspendedTask { state: AtomicUsize::new(EMPTY), _marker: PhantomData }
     }
@@ -63,7 +62,7 @@ where
     );
 }
 
-impl<S: StackfulSchedulerSystem + StacklessSystem> SuspendedTask<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
+impl<S: StackfulSchedulerSystem> SuspendedTask<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
     /// Wake whatever `v` (a raw slot value already taken via
     /// `state.swap(EMPTY, ..)`) represents: push a real ULT continuation to
     /// the local deque, or wake a boxed [`Waker`]. `v == EMPTY` is a no-op.
@@ -85,7 +84,7 @@ impl<S: StackfulSchedulerSystem + StacklessSystem> SuspendedTask<S> where S::Des
     }
 }
 
-impl<S: StackfulSchedulerSystem + StacklessSystem> Resumable<S> for SuspendedTask<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
+impl<S: StackfulSchedulerSystem> Resumable<S> for SuspendedTask<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
     fn is_set(&self) -> bool {
         self.state.load(Ordering::Acquire) != EMPTY
     }
@@ -96,7 +95,7 @@ impl<S: StackfulSchedulerSystem + StacklessSystem> Resumable<S> for SuspendedTas
     }
 }
 
-impl<S: StackfulSchedulerSystem + StacklessSystem> StackfulResumable<S> for SuspendedTask<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
+impl<S: StackfulSchedulerSystem> StackfulResumable<S> for SuspendedTask<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
     fn wait_with<F: FnOnce()>(&self, f: F) {
         let wk = UltWorker::<S>::current()
             .expect("cmpth: SuspendedTask::wait_with called outside a worker");
@@ -161,7 +160,7 @@ impl<S: StackfulSchedulerSystem + StacklessSystem> StackfulResumable<S> for Susp
     }
 }
 
-impl<S: StackfulSchedulerSystem + StacklessSystem> StacklessResumable<S> for SuspendedTask<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
+impl<S: StackfulSchedulerSystem> StacklessResumable<S> for SuspendedTask<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
     fn register(&self, cx: &mut Context<'_>) {
         let boxed = Box::new(cx.waker().clone());
         let ptr = Box::into_raw(boxed) as usize | ASYNC_TAG;
