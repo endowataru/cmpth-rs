@@ -1,4 +1,4 @@
-//! End-to-end tests for a pure stackful-only system built via `ult_system!`:
+//! End-to-end tests for a pure stackful-only system built via `UltIdentity`:
 //! `execute`'s dispatch is `execute_stackful` (always a real context switch,
 //! no `poll_fn` tag check) rather than `execute_dual`. Nothing in these
 //! tests calls `spawn_async` on this system — its dispatch never checks the
@@ -11,12 +11,18 @@ use std::sync::Arc;
 
 use cmpth::{JoinHandleLike, ScopedStackfulTaskSystem, ThreadSystem};
 
-cmpth::ult_system! {
-    struct StackfulOnlySystem {
-        base:       cmpth::OsSystem,
-        context:    cmpth::NativeContext,
-        deque:      cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>,
-        stack_size: 64 * 1024,
+struct StackfulOnlySystem;
+
+impl cmpth::UltIdentity for StackfulOnlySystem {
+    type Base = cmpth::OsSystem;
+    type Ctx = cmpth::NativeContext;
+    type Deque = cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>;
+    type Alloc = cmpth::HeapStack;
+    type Lookup = cmpth::TlsCurrent;
+
+    fn worker_tls_anchor() -> &'static <cmpth::OsSystem as ThreadSystem>::ThreadSpecific<cmpth::UltWorker<Self>> {
+        static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
+        cmpth::TlsSlot::from_anchor(&A)
     }
 }
 

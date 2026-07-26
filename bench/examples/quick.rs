@@ -11,28 +11,36 @@ use std::time::Instant;
 
 use cmpth::{JoinHandleLike, StackfulTaskSystem, ThreadSystem};
 
-cmpth::ult_system! {
-    /// Arena stacks + sp-based worker lookup.
-    pub struct ArenaSys {
-        base:        cmpth::OsSystem,
-        context:     cmpth::NativeContext,
-        deque:       cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>,
-        stack_size:  64 * 1024,
-        stack_alloc: cmpth::ArenaStack,
-        lookup:      cmpth::SpCurrent,
+/// Arena stacks + sp-based worker lookup.
+pub struct ArenaSys;
+
+impl cmpth::UltIdentity for ArenaSys {
+    type Base = cmpth::OsSystem;
+    type Ctx = cmpth::NativeContext;
+    type Deque = cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>;
+    type Alloc = cmpth::ArenaStack;
+    type Lookup = cmpth::SpCurrent;
+
+    fn worker_tls_anchor() -> &'static <cmpth::OsSystem as ThreadSystem>::ThreadSpecific<cmpth::UltWorker<Self>> {
+        static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
+        cmpth::TlsSlot::from_anchor(&A)
     }
 }
 
-cmpth::ult_system! {
-    /// Control: arena stacks but classic TLS lookup — separates the cost of
-    /// the stack allocator from the cost of the lookup.
-    pub struct ArenaTlsSys {
-        base:        cmpth::OsSystem,
-        context:     cmpth::NativeContext,
-        deque:       cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>,
-        stack_size:  64 * 1024,
-        stack_alloc: cmpth::ArenaStack,
-        lookup:      cmpth::TlsCurrent,
+/// Control: arena stacks but classic TLS lookup — separates the cost of
+/// the stack allocator from the cost of the lookup.
+pub struct ArenaTlsSys;
+
+impl cmpth::UltIdentity for ArenaTlsSys {
+    type Base = cmpth::OsSystem;
+    type Ctx = cmpth::NativeContext;
+    type Deque = cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>;
+    type Alloc = cmpth::ArenaStack;
+    type Lookup = cmpth::TlsCurrent;
+
+    fn worker_tls_anchor() -> &'static <cmpth::OsSystem as ThreadSystem>::ThreadSpecific<cmpth::UltWorker<Self>> {
+        static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
+        cmpth::TlsSlot::from_anchor(&A)
     }
 }
 

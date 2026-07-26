@@ -10,6 +10,7 @@ use crate::traits::stackful::ThreadSystem;
 use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::external_queue::ExternalQueue;
 use crate::resumable::common::desc::{SuspendedUlt, TaskDescAlloc};
+use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::pool::{DescPool, DynamicPool};
 use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
 
@@ -67,7 +68,7 @@ pub trait SchedulerSystem: Sized + Send + Sync + 'static {
     type RecursionPool: DynamicPool;
 
     /// Current-worker lookup policy.
-    type Lookup: crate::resumable::common::lookup::CurrentLookup<Self>;
+    type Lookup: CurrentLookup<Self>;
 
     /// Queue for continuations pushed by external (non-worker) OS threads.
     type ExternalQueue: ExternalQueue<Self>;

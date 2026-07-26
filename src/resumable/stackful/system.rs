@@ -1,39 +1,30 @@
 //! [`StackfulSchedulerSystem`] — extends
 //! [`SchedulerSystem`](crate::resumable::common::system::SchedulerSystem)
-//! with real-stack context-switch capability, and the
-//! [`ult_system!`](crate::ult_system) macro that generates a stackful-only
-//! system (a full [`ThreadSystem`] impl plus this trait).
+//! with real-stack context-switch capability, and the [`UltIdentity`]
+//! config trait that assembles a complete stackful-only system from a
+//! handful of associated types.
 //!
 //! # Nesting
 //!
-//! Every `ult_system!`-generated system is a full `ThreadSystem`, so setting
-//! `type Base = DualTaskSystem` in a second one stacks one ULT
-//! scheduler on top of another without any extra boilerplate:
+//! Every `UltIdentity` implementor is a full `ThreadSystem`, so naming a
+//! second one as `Base` stacks one ULT scheduler on top of another without
+//! any extra boilerplate:
 //!
 //! ```ignore
-//! cmpth::ult_system! {
-//!     pub struct DualTaskSystem {
-//!         base:       cmpth::OsSystem,
-//!         context:    cmpth::NativeContext,
-//!         deque:      cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>,
-//!         stack_size: 64 * 1024,
-//!     }
-//! }
+//! pub struct DualTaskSystem;
+//! impl cmpth::UltIdentity for DualTaskSystem { type Base = cmpth::OsSystem; ... }
 //!
-//! cmpth::ult_system! {
-//!     pub struct NestedDualTaskSystem {
-//!         base:       DualTaskSystem,   // runs on ULTs, not OS threads
-//!         context:    cmpth::NativeContext,
-//!         deque:      cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>,
-//!         stack_size: 64 * 1024,
-//!     }
-//! }
+//! pub struct NestedDualTaskSystem;
+//! impl cmpth::UltIdentity for NestedDualTaskSystem { type Base = DualTaskSystem; ... }
 //! ```
 
 use crate::context::ContextPolicy;
 use crate::traits::stackful::ThreadSystem;
+use crate::resumable::common::deque::WorkerDeque;
+use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::system::SchedulerSystem;
-use crate::resumable::common::desc::SuspendedUlt;
+use crate::resumable::common::desc::{BasicTaskDesc, SuspendedUlt};
+use crate::resumable::common::stack::StackAlloc;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::stackful::suspended::UltSuspendedThread;
 use crate::resumable::common::worker::UltWorker;
@@ -116,36 +107,64 @@ where
     }
 }
 
-/// Empty bundle: `ThreadSystem` is implemented directly (by the
-/// `ult_system!` macro or by hand); `ScopedStackfulTaskSystem` is
-/// blanket-derived from it just above. This impl just ties the two
-/// together as one bound.
+/// Empty bundle: `ThreadSystem` is implemented directly (via `UltIdentity`'s
+/// blanket impl or by hand); `ScopedStackfulTaskSystem` is blanket-derived
+/// from it just above. This impl just ties the two together as one bound.
 impl<S: crate::traits::scoped::ScopedStackfulTaskSystem + ThreadSystem> crate::traits::stackful::StackfulTaskSystem
     for S
 {
 }
 
 // ---------------------------------------------------------------------------
-// ult_system! macro
+// UltIdentity
 // ---------------------------------------------------------------------------
 
-/// Define a complete ULT system in one declaration.
+/// Assembles a complete stackful-only ULT system from a handful of
+/// associated types — the config-trait replacement for what used to be the
+/// `ult_system!` macro. Implement this for your own marker type and a
+/// blanket `SchedulerSystem`/`StackfulSchedulerSystem`/`ThreadSystem` impl
+/// covers the rest.
 ///
-/// Generates a marker struct, a [`SchedulerSystem`]/[`StackfulSchedulerSystem`]
-/// implementation, and a full [`ThreadSystem`] implementation (with the one
-/// `static` TLS slot for the per-worker pointer) — everything needed to
-/// `spawn`/`join`/`parallel_call`/`run` (the latter two via the blanket
-/// `ScopedStackfulTaskSystem` impl above).
+/// Not a generic struct (`UltSystem<Base, Ctx, ...>`) that callers would
+/// type-alias: Rust's orphan rules forbid implementing a foreign trait
+/// (`SchedulerIdentity`-shaped) for a foreign type (a type alias for a
+/// `cmpth`-defined generic struct is still `cmpth`'s type, not the
+/// caller's) — verified directly against a real downstream crate. A
+/// config trait sidesteps this: the caller's own marker type is what
+/// implements `UltIdentity`, and the blanket impls below (written inside
+/// `cmpth`, where they're allowed to name `cmpth`'s own traits freely) are
+/// what extend it with `SchedulerSystem`/etc.
+///
+/// `Lookup`/`worker_tls_anchor` are the two members that must be resolved
+/// through `Self`, not a free type parameter of some other type: `Lookup`
+/// exposing itself as a blanket-impl condition on an unrelated generic
+/// parameter would create a self-referential trait-resolution cycle
+/// through [`CurrentLookup`]'s own blanket impl
+/// (`impl<S: SchedulerSystem> CurrentLookup<S> for TlsCurrent`) — proving
+/// this trait's `SchedulerSystem` blanket impl would require re-entering
+/// that very impl (`error[E0275]: overflow evaluating the requirement`,
+/// reproduced directly). `worker_tls_anchor`'s `static` has the same
+/// requirement for an unrelated reason: a `static` declared inside a
+/// generic function body is one shared instance across every
+/// monomorphization, not one per instantiation (also verified directly) —
+/// every implementor needs its own `static`, anchored by its own function
+/// body.
 ///
 /// ```
 /// use cmpth::{ThreadSystem, ScopedStackfulTaskSystem, JoinHandleLike};
 ///
-/// cmpth::ult_system! {
-///     struct MySystem {
-///         base:       cmpth::OsSystem,
-///         context:    cmpth::NativeContext,
-///         deque:      cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>,
-///         stack_size: 64 * 1024,
+/// pub struct MySystem;
+///
+/// impl cmpth::UltIdentity for MySystem {
+///     type Base = cmpth::OsSystem;
+///     type Ctx = cmpth::NativeContext;
+///     type Deque = cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>;
+///     type Alloc = cmpth::HeapStack;
+///     type Lookup = cmpth::TlsCurrent;
+///
+///     fn worker_tls_anchor() -> &'static <cmpth::OsSystem as ThreadSystem>::ThreadSpecific<cmpth::UltWorker<Self>> {
+///         static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
+///         cmpth::TlsSlot::from_anchor(&A)
 ///     }
 /// }
 ///
@@ -155,137 +174,131 @@ impl<S: crate::traits::scoped::ScopedStackfulTaskSystem + ThreadSystem> crate::t
 /// });
 /// ```
 ///
-/// The full form adds the stack-allocation and worker-lookup policies
-/// (defaults: `HeapStack`, `TlsCurrent`):
+/// `STACK_SIZE` defaults to 64 KiB; override it like any other associated
+/// const. Naming `ArenaStack`/`SpCurrent` instead of the defaults (guard
+/// pages, stack-pointer-derived worker lookup) is the same shape, just
+/// different `Alloc`/`Lookup` choices:
 ///
 /// ```
-/// cmpth::ult_system! {
-///     struct GuardedSystem {
-///         base:        cmpth::OsSystem,
-///         context:     cmpth::NativeContext,
-///         deque:       cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>,
-///         stack_size:  64 * 1024,
-///         stack_alloc: cmpth::ArenaStack,  // guard pages, sp lookup support
-///         lookup:      cmpth::SpCurrent,   // worker from the stack pointer
+/// pub struct GuardedSystem;
+///
+/// impl cmpth::UltIdentity for GuardedSystem {
+///     type Base = cmpth::OsSystem;
+///     type Ctx = cmpth::NativeContext;
+///     type Deque = cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>;
+///     type Alloc = cmpth::ArenaStack;
+///     type Lookup = cmpth::SpCurrent;
+///
+///     fn worker_tls_anchor() -> &'static <cmpth::OsSystem as cmpth::ThreadSystem>::ThreadSpecific<cmpth::UltWorker<Self>> {
+///         static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
+///         cmpth::TlsSlot::from_anchor(&A)
 ///     }
 /// }
+///
 /// # use cmpth::ScopedStackfulTaskSystem;
 /// # GuardedSystem::run(1, || {});
 /// ```
-#[macro_export]
-macro_rules! ult_system {
-    // Short form: heap stacks + TLS lookup (the classic configuration).
-    ($(#[$meta:meta])* $vis:vis struct $name:ident {
-        base:       $base:ty,
-        context:    $ctx:ty,
-        deque:      $deque:ty,
-        stack_size: $stack:expr $(,)?
-    }) => {
-        $crate::ult_system! {
-            $(#[$meta])* $vis struct $name {
-                base:        $base,
-                context:     $ctx,
-                deque:       $deque,
-                stack_size:  $stack,
-                stack_alloc: $crate::resumable::common::stack::HeapStack,
-                lookup:      $crate::resumable::common::lookup::TlsCurrent,
-            }
+pub trait UltIdentity: Sized + Send + Sync + 'static {
+    /// The threading system this scheduler runs on.
+    type Base: ThreadSystem;
+
+    /// Context-switch implementation.
+    type Ctx: ContextPolicy;
+
+    /// Work-stealing deque implementation.
+    type Deque: WorkerDeque<BasicTaskDesc>;
+
+    /// Stack allocation policy.
+    type Alloc: StackAlloc;
+
+    /// Stack size for each ULT (in bytes).
+    const STACK_SIZE: usize = 64 * 1024;
+
+    /// Current-worker lookup policy.
+    type Lookup: CurrentLookup<Self>
+    where
+        Self: SchedulerSystem;
+
+    /// The per-system TLS anchor backing [`SchedulerSystem::worker_tls`].
+    fn worker_tls_anchor() -> &'static <<Self as UltIdentity>::Base as ThreadSystem>::ThreadSpecific<UltWorker<Self>>
+    where
+        Self: SchedulerSystem;
+}
+
+impl<M: UltIdentity> SchedulerSystem for M {
+    type Base  = M::Base;
+    type Desc  = BasicTaskDesc;
+    type Deque = M::Deque;
+    type ExternalQueue = crate::resumable::common::external_queue::StealPathQueue<BasicTaskDesc>;
+    type Pool          = crate::resumable::common::pool::ReturnPool<BasicTaskDesc, M::Alloc>;
+    // Never actually allocated through: nothing calls spawn_async on a
+    // stackful-only UltIdentity system (StacklessTaskSystem's blanket
+    // impl still applies, since BasicTaskDesc: AsyncTaskDesc
+    // unconditionally, but the capability just goes unused here). Mirrors
+    // UltAsyncIdentity's unused `Pool` in the other direction.
+    type AsyncPool = crate::resumable::common::pool::SimplePool<BasicTaskDesc>;
+    const ASYNC_POOL_SIZE: usize = 0;
+    // Never actually taken from: nothing calls `recurse` on a
+    // stackful-only UltIdentity system either. Mirrors `AsyncPool` above.
+    type RecursionPool = crate::resumable::common::pool::ThresholdPool<crate::resumable::common::pool::BlockPool>;
+    type Lookup = <M as UltIdentity>::Lookup;
+
+    fn worker_tls() -> &'static <M::Base as ThreadSystem>::ThreadSpecific<UltWorker<Self>> {
+        <M as UltIdentity>::worker_tls_anchor()
+    }
+
+    // Stackful-only: always a real context switch, no poll_fn tag check —
+    // `execute_stackful`'s whole point is that this bound never needs
+    // `AsyncTaskDesc` at all.
+    fn execute(wk: &UltWorker<Self>, cont: SuspendedUlt<BasicTaskDesc>) {
+        crate::resumable::stackful::worker::execute_stackful(wk, cont)
+    }
+
+    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut BasicTaskDesc) {
+        crate::resumable::stackful::worker::free_finished_desc_stackful(wk, desc)
+    }
+}
+
+impl<M: UltIdentity> StackfulSchedulerSystem for M
+where
+    <M as SchedulerSystem>::Desc: StackfulTaskDesc,
+{
+    type Ctx = M::Ctx;
+    type StackAlloc = M::Alloc;
+    const STACK_SIZE: usize = <M as UltIdentity>::STACK_SIZE;
+
+    type SuspendedThread = crate::resumable::stackful::suspended::BasicSuspendedThread<Self>;
+}
+
+impl<M: UltIdentity + StackfulSchedulerSystem> ThreadSystem for M
+where
+    <M as SchedulerSystem>::Desc: StackfulTaskDesc + crate::resumable::common::desc::WakerTaskDesc,
+{
+    type Poller = crate::resumable::stackful::waker::UltPoller<Self>;
+
+    fn yield_now() {
+        use crate::resumable::common::worker::Worker;
+        use crate::resumable::stackful::worker::StackfulWorker;
+        match UltWorker::<Self>::current() {
+            Some(wk) => { wk.yield_now(); }
+            None => <<M as UltIdentity>::Base as ThreadSystem>::yield_now(),
         }
-    };
-    // Full form: explicit stack-allocation and worker-lookup policies.
-    //
-    // `deque` must already name the fully-parametrized type (e.g.
-    // `cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>`) — a `ty` fragment can't
-    // have `<...>` appended to it after the fact inside the macro body, so
-    // the descriptor type argument has to be spelled out at the call site.
-    ($(#[$meta:meta])* $vis:vis struct $name:ident {
-        base:        $base:ty,
-        context:     $ctx:ty,
-        deque:       $deque:ty,
-        stack_size:  $stack:expr,
-        stack_alloc: $alloc:ty,
-        lookup:      $lookup:ty $(,)?
-    }) => {
-        $(#[$meta])*
-        $vis struct $name;
+    }
 
-        impl $crate::resumable::common::system::SchedulerSystem for $name {
-            type Base  = $base;
-            type Desc  = $crate::resumable::common::desc::BasicTaskDesc;
-            type Deque = $deque;
-            type ExternalQueue   = $crate::resumable::common::external_queue::StealPathQueue<$crate::resumable::common::desc::BasicTaskDesc>;
-            type Pool            = $crate::resumable::common::pool::ReturnPool<$crate::resumable::common::desc::BasicTaskDesc, $alloc>;
-            // Never actually allocated through: nothing calls spawn_async on
-            // a system built by this macro (StacklessTaskSystem's blanket
-            // impl still applies, since BasicTaskDesc: AsyncTaskDesc
-            // unconditionally, but the capability just goes unused here).
-            // Mirrors ult_async_system!'s unused `Pool` in the other
-            // direction.
-            type AsyncPool       = $crate::resumable::common::pool::SimplePool<$crate::resumable::common::desc::BasicTaskDesc>;
-            const ASYNC_POOL_SIZE: usize = 0;
-            // Never actually taken from: nothing calls `recurse` on a
-            // system built by this macro either. Mirrors `AsyncPool` above.
-            type RecursionPool   = $crate::resumable::common::pool::ThresholdPool<$crate::resumable::common::pool::BlockPool>;
-            type Lookup          = $lookup;
+    type JoinHandle<T: Send + 'static> = crate::resumable::common::thread::JoinHandle<Self, T>;
 
-            fn worker_tls()
-            -> &'static <$base as $crate::ThreadSystem>::ThreadSpecific<$crate::UltWorker<$name>>
-            {
-                static A: $crate::TlsAnchor = $crate::TlsAnchor::new();
-                $crate::TlsSlot::from_anchor(&A)
-            }
+    fn spawn<T, F>(f: F) -> crate::resumable::common::thread::JoinHandle<Self, T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        crate::resumable::stackful::thread::spawn::<Self, T, F>(f)
+    }
 
-            // Stackful-only: always a real context switch, no poll_fn tag
-            // check — `execute_stackful`'s whole point is that this bound
-            // never needs `AsyncTaskDesc` at all.
-            fn execute(
-                wk: &$crate::UltWorker<Self>,
-                cont: $crate::SuspendedUlt<$crate::resumable::common::desc::BasicTaskDesc>,
-            ) {
-                $crate::resumable::stackful::worker::execute_stackful(wk, cont)
-            }
-
-            fn free_finished_desc(wk: &$crate::UltWorker<Self>, desc: *mut $crate::resumable::common::desc::BasicTaskDesc) {
-                $crate::resumable::stackful::worker::free_finished_desc_stackful(wk, desc)
-            }
-        }
-
-        impl $crate::resumable::stackful::system::StackfulSchedulerSystem for $name {
-            type Ctx   = $ctx;
-            type StackAlloc = $alloc;
-            const STACK_SIZE: usize = $stack;
-
-            type SuspendedThread = $crate::resumable::stackful::suspended::BasicSuspendedThread<Self>;
-        }
-
-        impl $crate::ThreadSystem for $name {
-            type Poller = $crate::resumable::stackful::waker::UltPoller<$name>;
-
-            fn yield_now() {
-                use $crate::resumable::common::worker::Worker;
-                use $crate::resumable::stackful::worker::StackfulWorker;
-                match $crate::UltWorker::<$name>::current() {
-                    Some(wk) => { wk.yield_now(); }
-                    None => <$base as $crate::ThreadSystem>::yield_now(),
-                }
-            }
-
-            type JoinHandle<T: Send + 'static> = $crate::resumable::common::thread::JoinHandle<$name, T>;
-
-            fn spawn<T, F>(f: F) -> $crate::resumable::common::thread::JoinHandle<$name, T>
-            where
-                F: FnOnce() -> T + Send + 'static,
-                T: Send + 'static,
-            {
-                $crate::resumable::stackful::thread::spawn::<$name, T, F>(f)
-            }
-
-            type Mutex<T: Send>  = $crate::resumable::common::sync::DualMutex<Self, T, $crate::resumable::stackful::suspended::BasicSuspendedThread<Self>>;
-            type Barrier         = $crate::resumable::common::sync::DualBarrier<Self, $crate::resumable::stackful::suspended::BasicSuspendedThread<Self>>;
-            type SuspendedThread = $crate::resumable::stackful::suspended::BasicSuspendedThread<Self>;
-            type Delegator<C: $crate::DelegatorConsumer<Self>> =
-                $crate::resumable::stackful::sync::McsDelegator<Self, C>;
-            type ThreadSpecific<T: 'static> = $crate::resumable::stackful::tls::UltTls<$name, T>;
-        }
-    };
+    type Mutex<T: Send>  = crate::resumable::common::sync::DualMutex<Self, T, crate::resumable::stackful::suspended::BasicSuspendedThread<Self>>;
+    type Barrier         = crate::resumable::common::sync::DualBarrier<Self, crate::resumable::stackful::suspended::BasicSuspendedThread<Self>>;
+    type SuspendedThread = crate::resumable::stackful::suspended::BasicSuspendedThread<Self>;
+    type Delegator<C: crate::traits::stackful::DelegatorConsumer<Self>> =
+        crate::resumable::stackful::sync::McsDelegator<Self, C>;
+    type ThreadSpecific<T: 'static> = crate::resumable::stackful::tls::UltTls<Self, T>;
 }

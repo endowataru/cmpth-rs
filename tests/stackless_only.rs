@@ -1,4 +1,4 @@
-//! End-to-end tests for a pure stackless-only system (`ult_async_system!`):
+//! End-to-end tests for a pure stackless-only system (`UltAsyncIdentity`):
 //! no `Ctx`/`StackAlloc`/`StackfulSchedulerSystem` at all, `execute`'s dispatch is
 //! `execute_async` (always poll, no `poll_fn` tag check) instead of
 //! `execute_dual`/`execute_stackful`. Only `StacklessTaskSystem`'s
@@ -9,14 +9,22 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use cmpth::{ScopedStacklessTaskSystem, StacklessTaskSystem};
+use cmpth::{ScopedStacklessTaskSystem, StacklessTaskSystem, ThreadSystem};
 
-cmpth::ult_async_system! {
-    struct AsyncOnlySystem {
-        base:  cmpth::OsSystem,
-        deque: cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>,
+struct AsyncOnlyMarker;
+
+impl cmpth::UltAsyncIdentity for AsyncOnlyMarker {
+    type Base = cmpth::OsSystem;
+    type Deque = cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>;
+    type Lookup = cmpth::InlineTlsCurrent;
+
+    fn worker_tls_anchor() -> &'static <cmpth::OsSystem as ThreadSystem>::ThreadSpecific<cmpth::UltWorker<cmpth::UltAsyncSystem<Self>>> {
+        static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
+        cmpth::TlsSlot::from_anchor(&A)
     }
 }
+
+type AsyncOnlySystem = cmpth::UltAsyncSystem<AsyncOnlyMarker>;
 
 #[test]
 fn spawn_async_await_basic() {

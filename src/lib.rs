@@ -53,8 +53,8 @@ pub use resumable::stackful::sync::{Barrier as UltBarrier, McsDelegator, McsMute
 pub use resumable::common::sync::{DualBarrier as UltDualBarrier, DualMutex as UltDualMutex, DualMutexGuard as UltDualMutexGuard};
 pub use resumable::stackful::sync::{delegator, Producer as DelegatorProducer};
 pub use resumable::common::system::SchedulerSystem;
-pub use resumable::stackful::system::{StackfulSchedulerSystem, StackfulTaskSystem};
-pub use resumable::stackless::system::StacklessTaskSystem;
+pub use resumable::stackful::system::{StackfulSchedulerSystem, StackfulTaskSystem, UltIdentity};
+pub use resumable::stackless::system::{StacklessTaskSystem, UltAsyncIdentity, UltAsyncSystem};
 pub use resumable::stackful::tls::UltTls;
 pub use resumable::common::worker::{LocalQueue, TaskPool, UltWorker, Worker, current_worker};
 pub use resumable::stackful::worker::ContextSwitcher;
@@ -67,13 +67,13 @@ pub use resumable::stackful::worker::ContextSwitcher;
 // blanket `StacklessTaskSystem` impl, automatic for any async-capable
 // `SchedulerSystem`) as well as stackful ULTs (`ThreadSystem`), and their
 // `Mutex`/`Barrier` are meant to be contended-together from either
-// calling convention -- so `ult_system!` (whose generated `Mutex`/
+// calling convention -- so `UltIdentity` (whose blanket-derived `Mutex`/
 // `Barrier` use the stackful-only `BasicSuspendedThread`, with no
 // async-wait capability) isn't used here. Everything it would have
 // generated is written out by hand instead, with `ThreadSystem::Mutex`/
 // `Barrier` bound to a `SuspendedTask`-parameterized `DualMutex`/
 // `DualBarrier`: since `SuspendedTask<S>` implements both
-// `StackfulResumable` and `StacklessResumable` (unlike the macro's
+// `StackfulResumable` and `StacklessResumable` (unlike `UltIdentity`'s
 // default `BasicSuspendedThread`, stackful-only), one type satisfies
 // both `StackfulMutex` and `StacklessMutex`, so a single instance is
 // genuinely shared and contended between stackful and stackless callers

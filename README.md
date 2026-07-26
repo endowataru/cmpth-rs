@@ -63,12 +63,20 @@ context switch per poll.
 ```rust
 use cmpth::traits::stackless::*;
 
-cmpth::ult_async_system! {
-    struct MyAsyncSystem {
-        base:  cmpth::OsSystem,
-        deque: cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>,
+struct MyAsyncMarker;
+
+impl cmpth::UltAsyncIdentity for MyAsyncMarker {
+    type Base = cmpth::OsSystem;
+    type Deque = cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>;
+    type Lookup = cmpth::InlineTlsCurrent;
+
+    fn worker_tls_anchor() -> &'static <cmpth::OsSystem as cmpth::ThreadSystem>::ThreadSpecific<cmpth::UltWorker<cmpth::UltAsyncSystem<Self>>> {
+        static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
+        cmpth::TlsSlot::from_anchor(&A)
     }
 }
+
+type MyAsyncSystem = cmpth::UltAsyncSystem<MyAsyncMarker>;
 
 fn main() {
     MyAsyncSystem::run_async(2, async {
@@ -115,25 +123,33 @@ concrete "system" is a struct that picks one type per axis via associated
 types:
 
 ```rust
-cmpth::ult_system! {
-    pub struct MySystem {
-        base:       cmpth::OsSystem,        // what the workers run on
-        context:    cmpth::NativeContext,   // context-switch implementation
-        deque:      cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>,  // work-stealing deque
-        stack_size: 64 * 1024,
+pub struct MySystem;
+
+impl cmpth::UltIdentity for MySystem {
+    type Base = cmpth::OsSystem;                          // what the workers run on
+    type Ctx = cmpth::NativeContext;                       // context-switch implementation
+    type Deque = cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>; // work-stealing deque
+    type Alloc = cmpth::HeapStack;                         // stack allocator
+    type Lookup = cmpth::TlsCurrent;                       // current-worker lookup
+
+    fn worker_tls_anchor() -> &'static <cmpth::OsSystem as cmpth::ThreadSystem>::ThreadSpecific<cmpth::UltWorker<Self>> {
+        static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
+        cmpth::TlsSlot::from_anchor(&A)
     }
 }
 ```
 
-`ult_system!` builds a stackful system this way; `ult_async_system!` does
-the same for a stackless-only system. Both are shorthand for hand-writing
-the underlying trait implementations yourself — the escape hatch for when
-a macro's fixed shape doesn't fit, since every component the macros wire
-up is a public trait you can implement directly.
+`UltIdentity` builds a stackful system this way; `UltAsyncIdentity` does
+the same for a stackless-only system. Both are config traits — implement
+one for your own marker type and a blanket impl (written inside `cmpth`)
+supplies `SchedulerSystem`/`StackfulSchedulerSystem`/`ThreadSystem`. Both
+are shorthand for hand-writing the underlying trait implementations
+yourself — the escape hatch for when their fixed shape doesn't fit, since
+every component they wire up is a public trait you can implement directly.
 
 Every stackful system implements `ThreadSystem` directly, so schedulers
-**nest**: set `base: MySystem` in a second system and it runs ULTs on top
-of ULTs. Nesting doubles as a correctness check for the abstraction
+**nest**: set `type Base = MySystem` in a second system and it runs ULTs
+on top of ULTs. Nesting doubles as a correctness check for the abstraction
 boundaries — the same code must work at every level.
 
 All three models' traits share one root, `TaskSystem` — the declaration

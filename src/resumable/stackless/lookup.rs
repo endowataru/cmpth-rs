@@ -21,10 +21,11 @@ use crate::resumable::common::worker::UltWorker;
 /// function call per lookup.
 ///
 /// Only sound for systems that can never migrate a task across OS threads
-/// mid-poll, i.e. **stackless-only** systems (`ult_async_system!`'s output,
-/// which never implements `StackfulSchedulerSystem` and so never does a real
-/// context switch). `ult_async_system!` uses this as its default `Lookup`
-/// for exactly that reason. A stackful or dual config must keep using
+/// mid-poll, i.e. **stackless-only** systems (a
+/// [`UltAsyncIdentity`](crate::resumable::stackless::system::UltAsyncIdentity)
+/// implementor, which never implements `StackfulSchedulerSystem` and so
+/// never does a real context switch). The natural `Lookup` choice for
+/// exactly that reason. A stackful or dual config must keep using
 /// `TlsCurrent` — see `OsTls::get`'s doc comment for the CSE hazard this
 /// would otherwise reintroduce.
 pub struct InlineTlsCurrent;

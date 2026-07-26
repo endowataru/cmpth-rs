@@ -91,16 +91,22 @@ impl BenchSystem for CmpthBench {
 }
 
 // ---------------------------------------------------------------------------
-// StackfulOnlyBench — cmpth stackful-only system (ult_system!, no AsyncTaskDesc
+// StackfulOnlyBench — cmpth stackful-only system (UltIdentity, no AsyncTaskDesc
 // anywhere: Worker::execute is execute_stackful, no poll_fn tag check)
 // ---------------------------------------------------------------------------
 
-cmpth::ult_system! {
-    pub struct StackfulOnlySystem {
-        base:       cmpth::OsSystem,
-        context:    cmpth::NativeContext,
-        deque:      cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>,
-        stack_size: 64 * 1024,
+pub struct StackfulOnlySystem;
+
+impl cmpth::UltIdentity for StackfulOnlySystem {
+    type Base = cmpth::OsSystem;
+    type Ctx = cmpth::NativeContext;
+    type Deque = cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>;
+    type Alloc = cmpth::HeapStack;
+    type Lookup = cmpth::TlsCurrent;
+
+    fn worker_tls_anchor() -> &'static <cmpth::OsSystem as cmpth::ThreadSystem>::ThreadSpecific<cmpth::UltWorker<Self>> {
+        static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
+        cmpth::TlsSlot::from_anchor(&A)
     }
 }
 
@@ -124,17 +130,25 @@ impl BenchSystem for StackfulOnlyBench {
 }
 
 // ---------------------------------------------------------------------------
-// AsyncOnlySystem — cmpth stackless-only system (ult_async_system!, no
+// AsyncOnlySystem — cmpth stackless-only system (UltAsyncIdentity, no
 // StackfulSchedulerSystem at all). Doesn't fit BenchSystem (no blocking join);
 // used directly with `run_fib_async`/`fib_async` instead.
 // ---------------------------------------------------------------------------
 
-cmpth::ult_async_system! {
-    pub struct AsyncOnlySystem {
-        base:  cmpth::OsSystem,
-        deque: cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>,
+pub struct AsyncOnlyMarker;
+
+impl cmpth::UltAsyncIdentity for AsyncOnlyMarker {
+    type Base = cmpth::OsSystem;
+    type Deque = cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>;
+    type Lookup = cmpth::InlineTlsCurrent;
+
+    fn worker_tls_anchor() -> &'static <cmpth::OsSystem as cmpth::ThreadSystem>::ThreadSpecific<cmpth::UltWorker<cmpth::UltAsyncSystem<Self>>> {
+        static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
+        cmpth::TlsSlot::from_anchor(&A)
     }
 }
+
+pub type AsyncOnlySystem = cmpth::UltAsyncSystem<AsyncOnlyMarker>;
 
 // ---------------------------------------------------------------------------
 // OsThreadBench — raw std::thread (non-recursive benchmarks only)

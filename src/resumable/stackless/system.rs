@@ -1,7 +1,6 @@
 //! The blanket [`StacklessTaskSystem`]/[`ScopedStacklessTaskSystem`] impls
-//! for every async-capable [`SchedulerSystem`], and the
-//! [`ult_async_system!`](crate::ult_async_system) macro that generates a
-//! stackless-only system.
+//! for every async-capable [`SchedulerSystem`], and the [`UltAsyncIdentity`]
+//! config trait that assembles a stackless-only system.
 //!
 //! The trait declarations themselves live in [`crate::traits::stackless`]/
 //! [`crate::traits::scoped`] (pure interface, no `resumable`-layer types in
@@ -10,8 +9,14 @@
 //! (`JoinHandle`, `spawn_async`, `recurse`, `run_async`) is fine.
 
 use std::future::Future;
+use std::marker::PhantomData;
 
+use crate::traits::stackful::ThreadSystem;
+use crate::resumable::common::deque::WorkerDeque;
+use crate::resumable::common::desc::BasicTaskDesc;
+use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::system::SchedulerSystem;
+use crate::resumable::common::worker::UltWorker;
 use crate::resumable::stackless::desc::AsyncTaskDesc;
 use crate::traits::scoped::ScopedStacklessTaskSystem;
 
@@ -80,115 +85,131 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// ult_async_system! macro
+// UltAsyncIdentity
 // ---------------------------------------------------------------------------
 
-/// Define a complete **stackless-only** ULT system in one declaration.
+/// Assembles a complete **stackless-only** ULT system from a handful of
+/// associated types — the config-trait replacement for what used to be the
+/// `ult_async_system!` macro. Implement this for your own marker type and
+/// use [`UltAsyncSystem<M>`] as the actual system (the thing you call
+/// `run_async`/`spawn` on).
 ///
-/// Unlike [`ult_system!`](crate::ult_system), the generated marker struct implements only
-/// [`SchedulerSystem`] — never [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem), so it never names a
-/// context-switch policy or stack allocator, because it has none. Its only
-/// entry points are [`crate::resumable::stackless::scheduler::run_async`] (run) and
-/// [`crate::resumable::stackless::thread::spawn_async`] (spawn); there is no `spawn`, no
-/// `block_on`, no `ThreadSystem` impl at all for it (that requires
-/// stackful capability this system deliberately doesn't have).
+/// A bare blanket `impl<M: UltAsyncIdentity> SchedulerSystem for M` (mirroring
+/// [`UltIdentity`](crate::resumable::stackful::system::UltIdentity)'s
+/// bare-`M` shape) would conflict under Rust's coherence rules with
+/// `UltIdentity`'s own bare-`M` blanket impl — the compiler can't prove no
+/// type ever implements both traits, even though in practice none would.
+/// The [`UltAsyncSystem<M>`] wrapper sidesteps this by targeting a
+/// genuinely different type (verified directly against a real downstream
+/// crate: both flavors coexist and resolve to distinct per-marker
+/// `worker_tls` statics through the wrapper). See
+/// [`UltIdentity`](crate::resumable::stackful::system::UltIdentity)'s doc comment for why a config trait is used at all
+/// instead of a generic struct callers would type-alias (Rust's orphan
+/// rules forbid implementing a foreign trait for a type alias of a foreign
+/// generic struct) — [`UltAsyncSystem<M>`] itself is only ever *named*, never
+/// implemented against, by downstream code, so it doesn't reintroduce that
+/// problem.
+///
+/// Unlike `UltIdentity`, only implies [`SchedulerSystem`] — never
+/// [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem),
+/// so it never names a context-switch policy or stack allocator, because it
+/// has none. Its only entry points are
+/// [`crate::resumable::stackless::scheduler::run_async`] (run) and
+/// [`crate::resumable::stackless::thread::spawn_async`] (spawn); there is no
+/// `spawn`, no `block_on`, no `ThreadSystem` impl at all for it (that
+/// requires stackful capability this system deliberately doesn't have).
 ///
 /// `Worker::execute`'s dispatch is [`crate::resumable::stackful::worker::execute_stackful`]
 /// -shaped in spirit but for polling instead of switching: it always polls,
 /// with no `poll_fn`-tag branch, because every task on this system is one.
 ///
+/// `ASYNC_POOL_SIZE` defaults to 512. [`InlineTlsCurrent`](crate::resumable::stackless::lookup::InlineTlsCurrent)
+/// is the natural `Lookup` choice — sound specifically because this system
+/// never implements `StackfulSchedulerSystem` and so never does a real
+/// context switch (see that type's doc comment for the hazard that would
+/// otherwise apply) — but it isn't defaulted here, matching `UltIdentity`:
+/// associated types can't carry defaults on stable Rust.
+///
 /// ```
 /// use cmpth::SuspendedUlt;
-/// use cmpth::{ScopedStacklessTaskSystem, StacklessTaskSystem};
+/// use cmpth::{ScopedStacklessTaskSystem, StacklessTaskSystem, ThreadSystem};
 ///
-/// cmpth::ult_async_system! {
-///     struct MyAsyncSystem {
-///         base:  cmpth::OsSystem,
-///         deque: cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>,
+/// pub struct MyAsyncMarker;
+///
+/// impl cmpth::UltAsyncIdentity for MyAsyncMarker {
+///     type Base = cmpth::OsSystem;
+///     type Deque = cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>;
+///     type Lookup = cmpth::InlineTlsCurrent;
+///
+///     fn worker_tls_anchor() -> &'static <cmpth::OsSystem as ThreadSystem>::ThreadSpecific<cmpth::UltWorker<cmpth::UltAsyncSystem<Self>>> {
+///         static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
+///         cmpth::TlsSlot::from_anchor(&A)
 ///     }
 /// }
+///
+/// type MyAsyncSystem = cmpth::UltAsyncSystem<MyAsyncMarker>;
 ///
 /// MyAsyncSystem::run_async(2, async {
 ///     let h = MyAsyncSystem::spawn(|| async { 6 * 7 }).await;
 ///     assert_eq!(h.await, 42);
 /// });
 /// ```
-#[macro_export]
-macro_rules! ult_async_system {
-    ($(#[$meta:meta])* $vis:vis struct $name:ident {
-        base:  $base:ty,
-        deque: $deque:ty $(,)?
-    }) => {
-        $crate::ult_async_system! {
-            $(#[$meta])* $vis struct $name {
-                base:            $base,
-                deque:           $deque,
-                // Sound as the default here specifically: this macro's
-                // output never implements StackfulSchedulerSystem, so it never
-                // does a real context switch (see InlineTlsCurrent's doc
-                // comment for the hazard that would otherwise apply).
-                lookup:          $crate::resumable::stackless::lookup::InlineTlsCurrent,
-                async_pool_size: 512,
-            }
-        }
-    };
-    ($(#[$meta:meta])* $vis:vis struct $name:ident {
-        base:    $base:ty,
-        deque:   $deque:ty,
-        lookup:  $lookup:ty $(,)?
-    }) => {
-        $crate::ult_async_system! {
-            $(#[$meta])* $vis struct $name {
-                base:            $base,
-                deque:           $deque,
-                lookup:          $lookup,
-                async_pool_size: 512,
-            }
-        }
-    };
-    ($(#[$meta:meta])* $vis:vis struct $name:ident {
-        base:            $base:ty,
-        deque:           $deque:ty,
-        lookup:          $lookup:ty,
-        async_pool_size: $async_pool_size:expr $(,)?
-    }) => {
-        $(#[$meta])*
-        $vis struct $name;
+pub trait UltAsyncIdentity: Sized + Send + Sync + 'static {
+    /// The threading system this scheduler runs on.
+    type Base: ThreadSystem;
 
-        impl $crate::resumable::common::system::SchedulerSystem for $name {
-            type Base  = $base;
-            type Desc  = $crate::resumable::common::desc::BasicTaskDesc;
-            type Deque = $deque;
-            type ExternalQueue = $crate::resumable::common::external_queue::StealPathQueue<$crate::resumable::common::desc::BasicTaskDesc>;
-            // Never actually allocated through: this flavor has no `spawn`,
-            // only `spawn_async` (which goes through AsyncPool below).
-            // SimplePool is the cheapest DescPool to instantiate for a type
-            // that's never used.
-            type Pool = $crate::resumable::common::pool::SimplePool<$crate::resumable::common::desc::BasicTaskDesc>;
-            const ASYNC_POOL_SIZE: usize = $async_pool_size;
-            type AsyncPool = $crate::resumable::common::pool::ReturnPool<$crate::resumable::common::desc::BasicTaskDesc, $crate::resumable::stackless::stack::AsyncArenaStack>;
-            type RecursionPool = $crate::resumable::common::pool::ThresholdPool<$crate::resumable::common::pool::BlockPool>;
-            type Lookup = $lookup;
+    /// Work-stealing deque implementation.
+    type Deque: WorkerDeque<BasicTaskDesc>;
 
-            fn worker_tls()
-            -> &'static <$base as $crate::ThreadSystem>::ThreadSpecific<$crate::UltWorker<$name>>
-            {
-                static A: $crate::TlsAnchor = $crate::TlsAnchor::new();
-                $crate::TlsSlot::from_anchor(&A)
-            }
+    /// Fixed slot size for the `spawn_async` descriptor pool.
+    const ASYNC_POOL_SIZE: usize = 512;
 
-            // Stackless-only: always poll, never switch — no poll_fn tag
-            // check, because every task on this system is a poll_fn task.
-            fn execute(
-                wk: &$crate::UltWorker<Self>,
-                cont: $crate::SuspendedUlt<$crate::resumable::common::desc::BasicTaskDesc>,
-            ) {
-                $crate::resumable::stackless::worker::execute_async(wk, cont)
-            }
+    /// Current-worker lookup policy.
+    type Lookup: CurrentLookup<UltAsyncSystem<Self>>
+    where
+        UltAsyncSystem<Self>: SchedulerSystem;
 
-            fn free_finished_desc(wk: &$crate::UltWorker<Self>, desc: *mut $crate::resumable::common::desc::BasicTaskDesc) {
-                $crate::resumable::stackless::worker::free_finished_desc_async(wk, desc)
-            }
-        }
-    };
+    /// The per-system TLS anchor backing [`SchedulerSystem::worker_tls`].
+    /// Named in terms of [`UltAsyncSystem<Self>`] — the actual final
+    /// system type — not bare `Self`, since `Self` here is just the config
+    /// marker; see this trait's own doc comment for why.
+    fn worker_tls_anchor() -> &'static <<Self as UltAsyncIdentity>::Base as ThreadSystem>::ThreadSpecific<UltWorker<UltAsyncSystem<Self>>>
+    where
+        UltAsyncSystem<Self>: SchedulerSystem;
+}
+
+/// The actual stackless-only system type: call `run_async`/`spawn` on
+/// `UltAsyncSystem<M>`, not on `M` itself. See [`UltAsyncIdentity`]'s doc
+/// comment for why `M` alone can't directly implement `SchedulerSystem`.
+pub struct UltAsyncSystem<M: UltAsyncIdentity> {
+    _marker: PhantomData<fn() -> M>,
+}
+
+impl<M: UltAsyncIdentity> SchedulerSystem for UltAsyncSystem<M> {
+    type Base  = M::Base;
+    type Desc  = BasicTaskDesc;
+    type Deque = M::Deque;
+    type ExternalQueue = crate::resumable::common::external_queue::StealPathQueue<BasicTaskDesc>;
+    // Never actually allocated through: this flavor has no `spawn`, only
+    // `spawn_async` (which goes through AsyncPool below). SimplePool is the
+    // cheapest DescPool to instantiate for a type that's never used.
+    type Pool = crate::resumable::common::pool::SimplePool<BasicTaskDesc>;
+    const ASYNC_POOL_SIZE: usize = <M as UltAsyncIdentity>::ASYNC_POOL_SIZE;
+    type AsyncPool = crate::resumable::common::pool::ReturnPool<BasicTaskDesc, crate::resumable::stackless::stack::AsyncArenaStack>;
+    type RecursionPool = crate::resumable::common::pool::ThresholdPool<crate::resumable::common::pool::BlockPool>;
+    type Lookup = <M as UltAsyncIdentity>::Lookup;
+
+    fn worker_tls() -> &'static <M::Base as ThreadSystem>::ThreadSpecific<UltWorker<Self>> {
+        <M as UltAsyncIdentity>::worker_tls_anchor()
+    }
+
+    // Stackless-only: always poll, never switch — no poll_fn tag check,
+    // because every task on this system is a poll_fn task.
+    fn execute(wk: &UltWorker<Self>, cont: crate::resumable::common::desc::SuspendedUlt<BasicTaskDesc>) {
+        crate::resumable::stackless::worker::execute_async(wk, cont)
+    }
+
+    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut BasicTaskDesc) {
+        crate::resumable::stackless::worker::free_finished_desc_async(wk, desc)
+    }
 }
