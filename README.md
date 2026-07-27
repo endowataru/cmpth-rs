@@ -32,7 +32,7 @@ for stealing (the Cilk discipline), which keeps the working set depth-first
 and bounds memory.
 
 ```rust
-use cmpth::DefaultDualTaskSystem;
+use cmpth::DefaultStackfulOnlyTaskSystem;
 use cmpth::traits::stackful::*; // ThreadSystem, JoinHandleLike, StackfulTaskSystem, ...
 
 fn fib<S: ThreadSystem>(n: u64) -> u64 {
@@ -43,14 +43,16 @@ fn fib<S: ThreadSystem>(n: u64) -> u64 {
 }
 
 fn main() {
-    DefaultDualTaskSystem::run(4, || assert_eq!(fib::<DefaultDualTaskSystem>(34), 5_702_887));
+    DefaultStackfulOnlyTaskSystem::run(4, || {
+        assert_eq!(fib::<DefaultStackfulOnlyTaskSystem>(34), 5_702_887);
+    });
 }
 ```
 
-`DefaultDualTaskSystem` is cmpth's ready-made stackful system — see
+`DefaultStackfulOnlyTaskSystem` is cmpth's ready-made stackful system — see
 [Trait-based components](#trait-based-components-not-monoliths) below for
 why the example calls it through `S: ThreadSystem` rather than naming
-`DefaultDualTaskSystem` inside `fib` itself. `cmpth::traits::stackful::*` /
+`DefaultStackfulOnlyTaskSystem` inside `fib` itself. `cmpth::traits::stackful::*` /
 `cmpth::traits::stackless::*` pull in every trait for that model in one
 line, so you don't have to track down which single trait a given method
 lives on.
@@ -59,7 +61,7 @@ Spawned tasks aren't limited to fork/join — they can block on a shared
 `Mutex` too, since each one has its own stack to suspend:
 
 ```rust
-use cmpth::DefaultDualTaskSystem;
+use cmpth::DefaultStackfulOnlyTaskSystem;
 use cmpth::traits::stackful::*;
 use std::sync::Arc;
 
@@ -78,11 +80,17 @@ fn sum_concurrently<S: ThreadSystem>(n: u64) -> u64 {
 }
 
 fn main() {
-    DefaultDualTaskSystem::run(4, || {
-        assert_eq!(sum_concurrently::<DefaultDualTaskSystem>(100), (0..100).sum());
+    DefaultStackfulOnlyTaskSystem::run(4, || {
+        assert_eq!(sum_concurrently::<DefaultStackfulOnlyTaskSystem>(100), (0..100).sum());
     });
 }
 ```
+
+Need both `spawn`/`.join()` *and* `spawn_async`/`.await` live on the same
+tasks (e.g. a `Mutex` contended from both stackful and stackless callers)?
+`DefaultDualTaskSystem` provides both calling conventions on one system —
+the tradeoff, covered next, is a small per-task dispatch cost neither
+single-flavor default pays.
 
 ### Stackless — `spawn_async` / `.await`
 
@@ -90,8 +98,8 @@ A task is a `Future`, driven by polling in place: no stack allocation, no
 context switch per poll. `DefaultStacklessOnlyTaskSystem` is the ready-made
 system for this model — no separate setup needed, and genuinely no stackful
 capability at all (no context-switch policy, no stack allocator), so it
-skips the dual-flavor dispatch [`DefaultDualTaskSystem`](#stackful--real-user-level-threads)
-pays on every task (~10–15% faster on a pure-`spawn_async` workload):
+skips the dual-flavor dispatch `DefaultDualTaskSystem` pays on every task
+(~10–15% faster on a pure-`spawn_async` workload):
 
 ```rust
 use cmpth::DefaultStacklessOnlyTaskSystem;
@@ -141,10 +149,12 @@ fn main() {
 ```
 
 **Which one?** Stackful when tasks need to block on locks, barriers, or
-other blocking work alongside spawned tasks. Stackless when integrating
-with existing `async`/`.await` code, or to avoid paying for a stack per
-task. Scoped when the parallelism is a pure recursive divide-and-conquer
-with no blocking involved — it has the lowest overhead of the three.
+other blocking work alongside spawned tasks (add `DefaultDualTaskSystem`
+instead of `DefaultStackfulOnlyTaskSystem` if the same tasks also need
+`spawn_async`). Stackless when integrating with existing `async`/`.await`
+code, or to avoid paying for a stack per task. Scoped when the parallelism
+is a pure recursive divide-and-conquer with no blocking involved — it has
+the lowest overhead of the three.
 
 ## Trait-based components, not monoliths
 
@@ -170,11 +180,12 @@ impl cmpth::UltIdentity for MySystem {
 }
 ```
 
-`UltIdentity` builds a stackful system this way; `UltAsyncIdentity` does
-the same for a stackless-only system. Both are config traits — implement
-one for your own marker type and a blanket impl (written inside `cmpth`)
-supplies `SchedulerSystem`/`StackfulSchedulerSystem`/`ThreadSystem`. Both
-are shorthand for hand-writing the underlying trait implementations
+`UltIdentity` builds a stackful system this way (`DefaultStackfulOnlyTaskSystem`
+is wired up exactly like `MySystem` above, just with `HeapStack`/`TlsCurrent`);
+`UltAsyncIdentity` does the same for a stackless-only system. Both are config
+traits — implement one for your own marker type and a blanket impl (written
+inside `cmpth`) supplies `SchedulerSystem`/`StackfulSchedulerSystem`/`ThreadSystem`.
+Both are shorthand for hand-writing the underlying trait implementations
 yourself — the escape hatch for when their fixed shape doesn't fit, since
 every component they wire up is a public trait you can implement directly.
 
@@ -204,7 +215,7 @@ flags and spin-wait handshakes throughout the scheduler.
 All three quickstart examples above already follow this rule: each `fib`
 is generic over a trait (`S: ThreadSystem`, `S: StacklessTaskSystem`, `S:
 ScopedStackfulTaskSystem`), and the concrete system
-(`DefaultDualTaskSystem`, `DefaultStacklessOnlyTaskSystem`,
+(`DefaultStackfulOnlyTaskSystem`, `DefaultStacklessOnlyTaskSystem`,
 `ScopedTaskSystem`) only ever appears at the single "pick a system" call
 site (`main`), e.g. `S::run(4, move || fib::<S>(34))` invoked with `S =
 MySystem`. Naming a concrete system inside code that isn't itself that
