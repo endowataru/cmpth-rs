@@ -620,6 +620,22 @@ fn spawn_async_many() {
 }
 
 #[test]
+fn spawn_async_nested() {
+    // A spawn_async task itself spawning (and awaiting) a nested spawn_async
+    // task, under execute_dual dispatch — the async-task mirror of
+    // `nested_spawn_join`. Nested spawn must use the raw `StacklessTaskSystem`
+    // trait method (not the blocking `spawn_async` helper, which calls
+    // `block_on` and is only meant to be invoked from stackful ULT context).
+    run(2, || {
+        let h = spawn_async(async {
+            let inner = <DefaultDualTaskSystem as StacklessTaskSystem>::spawn(|| async { 10u64 }).await;
+            inner.await + 5
+        });
+        assert_eq!(h.join().unwrap(), 15);
+    });
+}
+
+#[test]
 fn spawn_async_join_handle_as_future() {
     // Await a spawn_async JoinHandle from within block_on.
     run(2, || {
