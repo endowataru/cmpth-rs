@@ -17,7 +17,7 @@
 //!   `parallel_call` call's own continuation is never reified/exposed,
 //!   so its implementation needs none of this machinery.
 //! * **`lib.rs`** — instantiations: [`DefaultDualTaskSystem`], [`DefaultNestedDualTaskSystem`],
-//!   [`DefaultStacklessOnlyTaskSystem`].
+//!   [`DefaultStackfulOnlyTaskSystem`], [`DefaultStacklessOnlyTaskSystem`].
 //!
 //! Every stackful system implements [`ThreadSystem`] directly, so schedulers
 //! nest: set `type Base = DefaultDualTaskSystem` in a second `ThreadSystem`
@@ -216,6 +216,35 @@ impl ThreadSystem for DefaultNestedDualTaskSystem {
     type SuspendedThread = resumable::stackful::suspended::BasicSuspendedThread<Self>;
     type Delegator<C: DelegatorConsumer<Self>> = McsDelegator<Self, C>;
     type ThreadSpecific<T: 'static> = resumable::stackful::tls::UltTls<Self, T>;
+}
+
+/// The default stackful-*only* ULT system: runs on top of [`OsSystem`],
+/// genuinely no stackless capability exercised (`spawn_async`'s blanket
+/// `StacklessTaskSystem` impl is technically still present, since
+/// `BasicTaskDesc: AsyncTaskDesc` unconditionally, but nothing on this
+/// system ever calls it) -- unlike [`DefaultDualTaskSystem`], which pays
+/// for dual-flavor dispatch (a `poll_fn`-tag check per popped
+/// continuation, a tagged-word wait slot) on every task even when nothing
+/// on it ever calls `spawn_async`.
+///
+/// Use this instead of `DefaultDualTaskSystem` whenever a system never
+/// needs `spawn_async`/async-capable waiting -- the same "pick a system"
+/// call site as any other. Implements [`UltIdentity`] directly: unlike
+/// [`DefaultStacklessOnlyTaskSystem`], no wrapper type is needed (see
+/// `UltIdentity`'s blanket `impl<M: UltIdentity> SchedulerSystem for M`).
+pub struct DefaultStackfulOnlyTaskSystem;
+
+impl UltIdentity for DefaultStackfulOnlyTaskSystem {
+    type Base = OsSystem;
+    type Ctx = NativeContext;
+    type Deque = CrossbeamDeque<BasicTaskDesc>;
+    type Alloc = HeapStack;
+    type Lookup = TlsCurrent;
+
+    fn worker_tls_anchor() -> &'static <OsSystem as ThreadSystem>::ThreadSpecific<UltWorker<Self>> {
+        static A: TlsAnchor = TlsAnchor::new();
+        TlsSlot::from_anchor(&A)
+    }
 }
 
 // `DefaultStacklessOnlyTaskSystem`'s marker: implements `UltAsyncIdentity`

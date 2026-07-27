@@ -91,41 +91,27 @@ impl BenchSystem for CmpthBench {
 }
 
 // ---------------------------------------------------------------------------
-// StackfulOnlyBench — cmpth stackful-only system (UltIdentity, no AsyncTaskDesc
-// anywhere: Worker::execute is execute_stackful, no poll_fn tag check)
+// StackfulOnlyBench — cmpth::DefaultStackfulOnlyTaskSystem (UltIdentity, no
+// AsyncTaskDesc anywhere: Worker::execute is execute_stackful, no poll_fn
+// tag check)
 // ---------------------------------------------------------------------------
-
-pub struct StackfulOnlySystem;
-
-impl cmpth::UltIdentity for StackfulOnlySystem {
-    type Base = cmpth::OsSystem;
-    type Ctx = cmpth::NativeContext;
-    type Deque = cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>;
-    type Alloc = cmpth::HeapStack;
-    type Lookup = cmpth::TlsCurrent;
-
-    fn worker_tls_anchor() -> &'static <cmpth::OsSystem as cmpth::ThreadSystem>::ThreadSpecific<cmpth::UltWorker<Self>> {
-        static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
-        cmpth::TlsSlot::from_anchor(&A)
-    }
-}
 
 pub struct StackfulOnlyBench;
 
 impl BenchSystem for StackfulOnlyBench {
     type JoinHandle<T: Send + 'static> =
-        <StackfulOnlySystem as cmpth::ThreadSystem>::JoinHandle<T>;
+        <cmpth::DefaultStackfulOnlyTaskSystem as cmpth::ThreadSystem>::JoinHandle<T>;
 
     fn run(num_workers: usize, f: impl FnOnce() + Send + 'static) {
         use cmpth::ScopedStackfulTaskSystem as _;
-        StackfulOnlySystem::run(num_workers, f);
+        cmpth::DefaultStackfulOnlyTaskSystem::run(num_workers, f);
     }
 
     fn spawn<T: Send + 'static>(
         f: impl FnOnce() -> T + Send + 'static,
     ) -> Self::JoinHandle<T> {
         use cmpth::ThreadSystem as _;
-        StackfulOnlySystem::spawn(f)
+        cmpth::DefaultStackfulOnlyTaskSystem::spawn(f)
     }
 }
 

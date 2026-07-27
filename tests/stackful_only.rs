@@ -1,4 +1,4 @@
-//! End-to-end tests for a pure stackful-only system built via `UltIdentity`:
+//! End-to-end tests for [`cmpth::DefaultStackfulOnlyTaskSystem`]:
 //! `execute`'s dispatch is `execute_stackful` (always a real context switch,
 //! no `poll_fn` tag check) rather than `execute_dual`. Nothing in these
 //! tests calls `spawn_async` on this system — its dispatch never checks the
@@ -9,27 +9,12 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use cmpth::{JoinHandleLike, ScopedStackfulTaskSystem, ThreadSystem};
-
-struct StackfulOnlySystem;
-
-impl cmpth::UltIdentity for StackfulOnlySystem {
-    type Base = cmpth::OsSystem;
-    type Ctx = cmpth::NativeContext;
-    type Deque = cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>;
-    type Alloc = cmpth::HeapStack;
-    type Lookup = cmpth::TlsCurrent;
-
-    fn worker_tls_anchor() -> &'static <cmpth::OsSystem as ThreadSystem>::ThreadSpecific<cmpth::UltWorker<Self>> {
-        static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
-        cmpth::TlsSlot::from_anchor(&A)
-    }
-}
+use cmpth::{DefaultStackfulOnlyTaskSystem, JoinHandleLike, ScopedStackfulTaskSystem, ThreadSystem};
 
 #[test]
 fn spawn_join_basic() {
-    StackfulOnlySystem::run(2, || {
-        let h = StackfulOnlySystem::spawn(|| 6 * 7);
+    DefaultStackfulOnlyTaskSystem::run(2, || {
+        let h = DefaultStackfulOnlyTaskSystem::spawn(|| 6 * 7);
         assert_eq!(JoinHandleLike::join(h), 42);
     });
 }
@@ -38,11 +23,11 @@ fn spawn_join_basic() {
 fn spawn_join_many_parallel() {
     let counter = Arc::new(AtomicU64::new(0));
     let counter2 = Arc::clone(&counter);
-    StackfulOnlySystem::run(4, move || {
+    DefaultStackfulOnlyTaskSystem::run(4, move || {
         let handles: Vec<_> = (0..200)
             .map(|i| {
                 let counter = Arc::clone(&counter2);
-                StackfulOnlySystem::spawn(move || {
+                DefaultStackfulOnlyTaskSystem::spawn(move || {
                     counter.fetch_add(1, Ordering::Relaxed);
                     i * 2u64
                 })
@@ -59,9 +44,9 @@ fn spawn_join_many_parallel() {
 
 #[test]
 fn spawn_nested() {
-    StackfulOnlySystem::run(2, || {
-        let h = StackfulOnlySystem::spawn(|| {
-            let inner = StackfulOnlySystem::spawn(|| 10);
+    DefaultStackfulOnlyTaskSystem::run(2, || {
+        let h = DefaultStackfulOnlyTaskSystem::spawn(|| {
+            let inner = DefaultStackfulOnlyTaskSystem::spawn(|| 10);
             JoinHandleLike::join(inner) + 5
         });
         assert_eq!(JoinHandleLike::join(h), 15);
@@ -70,8 +55,8 @@ fn spawn_nested() {
 
 #[test]
 fn spawn_panic_propagates() {
-    StackfulOnlySystem::run(1, || {
-        let h = StackfulOnlySystem::spawn::<(), _>(|| panic!("boom"));
+    DefaultStackfulOnlyTaskSystem::run(1, || {
+        let h = DefaultStackfulOnlyTaskSystem::spawn::<(), _>(|| panic!("boom"));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.join()));
         assert!(result.is_err() || result.unwrap().is_err());
     });
@@ -79,9 +64,9 @@ fn spawn_panic_propagates() {
 
 #[test]
 fn yield_now_roundtrips() {
-    StackfulOnlySystem::run(1, || {
+    DefaultStackfulOnlyTaskSystem::run(1, || {
         for _ in 0..1000 {
-            StackfulOnlySystem::yield_now();
+            DefaultStackfulOnlyTaskSystem::yield_now();
         }
     });
 }
