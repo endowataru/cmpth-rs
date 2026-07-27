@@ -21,10 +21,10 @@ use std::task::Poll;
 /// exist for a `spawn_async` task polled in place.
 ///
 /// ```
-/// use cmpth::ThreadSystem;
+/// use cmpth::{DefaultStackfulOnlyTaskSystem, ScopedStackfulTaskSystem, ThreadSystem};
 ///
-/// cmpth::default::run(2, || {
-///     cmpth::DefaultDualTaskSystem::block_on(async {
+/// DefaultStackfulOnlyTaskSystem::run(2, || {
+///     DefaultStackfulOnlyTaskSystem::block_on(async {
 ///         cmpth::future::yield_now().await;
 ///     });
 /// });

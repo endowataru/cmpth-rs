@@ -91,6 +91,46 @@ impl BenchSystem for CmpthBench {
 }
 
 // ---------------------------------------------------------------------------
+// dual::{run, spawn, spawn_async} — direct (non-BenchSystem) entry points for
+// benchmarks comparing cmpth's own stackful spawn against spawn_async on
+// DefaultDualTaskSystem, which doesn't fit BenchSystem (spawn_async has no
+// blocking-join equivalent on the trait).
+// ---------------------------------------------------------------------------
+
+pub mod dual {
+    use cmpth::{DefaultDualTaskSystem, ScopedStackfulTaskSystem, ThreadSystem};
+
+    pub fn run<F, R>(num_workers: usize, root: F) -> R
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        DefaultDualTaskSystem::run(num_workers, root)
+    }
+
+    pub fn spawn<T, F>(f: F) -> <DefaultDualTaskSystem as ThreadSystem>::JoinHandle<T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        DefaultDualTaskSystem::spawn(f)
+    }
+
+    pub fn spawn_async<T, F>(f: F) -> <DefaultDualTaskSystem as ThreadSystem>::JoinHandle<T>
+    where
+        F: std::future::Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        DefaultDualTaskSystem::block_on(cmpth::resumable::stackless::thread::spawn_async::<
+            DefaultDualTaskSystem,
+            T,
+            F,
+            _,
+        >(move || f))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // StackfulOnlyBench — cmpth::DefaultStackfulOnlyTaskSystem (UltIdentity, no
 // AsyncTaskDesc anywhere: Worker::execute is execute_stackful, no poll_fn
 // tag check)

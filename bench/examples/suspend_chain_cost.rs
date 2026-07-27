@@ -59,19 +59,19 @@ fn measure_build_and_run(depth: usize, iters: u64) -> f64 {
 /// Real stackful ULT context switch cost: two ULTs ping-ponging via
 /// `ThreadSystem::yield_now`, `iters` round trips total.
 fn measure_stackful_switch(iters: u64) -> f64 {
-    use cmpth::ThreadSystem;
+    use cmpth::{DefaultStackfulOnlyTaskSystem, ScopedStackfulTaskSystem, ThreadSystem};
     let counter = Arc::new(AtomicU64::new(0));
     let start = Instant::now();
-    cmpth::default::run(2, move || {
+    DefaultStackfulOnlyTaskSystem::run(2, move || {
         let counter2 = Arc::clone(&counter);
-        let h = cmpth::default::spawn(move || {
+        let h = DefaultStackfulOnlyTaskSystem::spawn(move || {
             while counter2.load(Ordering::Relaxed) < iters {
-                cmpth::DefaultDualTaskSystem::yield_now();
+                DefaultStackfulOnlyTaskSystem::yield_now();
             }
         });
         while counter.load(Ordering::Relaxed) < iters {
             counter.fetch_add(1, Ordering::Relaxed);
-            cmpth::DefaultDualTaskSystem::yield_now();
+            DefaultStackfulOnlyTaskSystem::yield_now();
         }
         h.join().unwrap();
     });

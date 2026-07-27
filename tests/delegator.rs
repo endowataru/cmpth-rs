@@ -8,9 +8,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use cmpth::default::*;
 use cmpth::traits::Delegator as DelegatorTrait;
 use cmpth::{BasicSuspendedThread, DefaultDualTaskSystem, DelegatorConsumer, McsDelegator};
+
+mod common;
+use common::*;
 
 /// Work item: an amount to add to the shared total, plus the slot the
 /// delegating caller parks on so `execute()` can wake them when done. Per

@@ -5,8 +5,10 @@
 
 use std::sync::Arc;
 
-use cmpth::default::*;
 use cmpth::{DefaultDualTaskSystem, SuspendedFuture, UltDualBarrier, UltDualMutex};
+
+mod common;
+use common::*;
 
 #[test]
 fn stackful_module_unlocks_lock_and_wait() {

@@ -198,7 +198,7 @@ All three models' traits share one root, `TaskSystem` — the declaration
 that a system provides an efficient (work-stealing) scheduler as its
 execution model. `ThreadSystem` (stackful spawn/join),
 `ScopedStackfulTaskSystem`/`ScopedStacklessTaskSystem` (`parallel_call`),
-and `StacklessTaskSystem` (`spawn_async`/`recurse`) each build on it with
+and `StacklessTaskSystem` (`spawn`/`recurse`) each build on it with
 their own capability. `StackfulTaskSystem`/`StacklessTaskSystem` are
 empty *bundles* on top of those — "everything a complete stackful/
 stackless system offers" as one bound — blanket-derived automatically
