@@ -65,9 +65,9 @@ pub trait StacklessBarrier: Sized + Send + Sync {
 /// stackless implementation needs the caller to defer itself to the
 /// FIFO/steal end of the local deque (`push_local_bottom`) so the target it
 /// hands off to isn't overtaken by the caller's own re-queued continuation,
-/// and `cmpth::future::yield_now()`'s self-wake path doesn't do that today
-/// (see `ISSUES.md`). Adding them before that's fixed would silently invert
-/// the intended priority.
+/// and [`StacklessTaskSystem::yield_now`]'s self-wake path doesn't do that
+/// today (see its doc comment). Adding them before that's fixed would
+/// silently invert the intended priority.
 pub trait StacklessResumable<S>: Resumable<S> {
     /// Register `cx`'s waker.
     fn register(&self, cx: &mut Context<'_>);
@@ -164,24 +164,41 @@ pub trait StacklessTaskSystem: ScopedStacklessTaskSystem {
         F: Future + Send,
         Mk: FnOnce() -> F;
 
-    /// Yield once to the executor from inside an async task on this
-    /// system — see [`crate::future::yield_now`], which this just
-    /// forwards to.  Not generic over `Self` at all (unlike
-    /// `spawn`/`recurse`/`run_async`): provided here purely so generic
-    /// code bounded by `S: StacklessTaskSystem` can write
-    /// `S::yield_now().await` instead of a separate `cmpth::future`
-    /// import, matching this trait's other methods.
+    /// Returns `Pending` on the first poll (waking itself immediately),
+    /// then `Ready` on the next — a single suspend/resume round-trip.
+    ///
+    /// **Not a fair yield**: the self-wake goes through the same generic
+    /// waker path any other wakeup does, which re-queues this task at the
+    /// *LIFO* end of its worker's local deque (`push_local_top`) — the
+    /// same end `pop_local` pops from next — not the FIFO end
+    /// (`push_local_bottom`) that would actually let already-queued
+    /// sibling tasks run first. A correct fair yield needs to reach the
+    /// scheduler directly (bypassing the waker) to request the FIFO end
+    /// specifically; nothing here does that yet. Useful today for "come
+    /// back to me after one poll round-trip" (e.g. a busy-poll retry
+    /// loop watching a flag another worker sets), not for cooperative
+    /// scheduling between tasks that share a worker.
     ///
     /// Deliberately shares its name with
     /// [`ThreadSystem::yield_now`](crate::traits::stackful::ThreadSystem::yield_now)
-    /// (the stackful, synchronous, whole-ULT-suspending version) rather
-    /// than being renamed to dodge the collision — on a dual system
+    /// (the stackful, synchronous, whole-ULT-suspending version, which
+    /// *is* fair — it goes through the real scheduler loop) rather than
+    /// being renamed to dodge the collision — on a dual system
     /// implementing both traits, calling `Concrete::yield_now()` is
     /// ambiguous by design (same resolution as `spawn` above) and must be
     /// disambiguated with `<Concrete as StacklessTaskSystem>::yield_now()`
     /// / `<Concrete as ThreadSystem>::yield_now()`; a generic caller
     /// bounded by only one of the two traits never sees the ambiguity.
     fn yield_now() -> impl Future<Output = ()> {
-        crate::future::yield_now()
+        let mut yielded = false;
+        std::future::poll_fn(move |cx| {
+            if yielded {
+                Poll::Ready(())
+            } else {
+                yielded = true;
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
     }
 }

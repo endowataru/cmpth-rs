@@ -33,7 +33,7 @@ and bounds memory.
 
 ```rust
 use cmpth::DefaultStackfulOnlyTaskSystem;
-use cmpth::traits::stackful::*; // ThreadSystem, JoinHandleLike, StackfulTaskSystem, ...
+use cmpth::traits::stackful::*;
 
 fn fib<S: ThreadSystem>(n: u64) -> u64 {
     if n <= 1 { return n; }

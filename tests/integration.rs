@@ -296,25 +296,11 @@ fn block_on_yield_once() {
 }
 
 #[test]
-fn future_yield_now_in_block_on() {
-    run(2, || {
-        let v = DefaultDualTaskSystem::block_on(async {
-            cmpth::future::yield_now().await;
-            42u32
-        });
-        assert_eq!(v, 42);
-    });
-}
-
-#[test]
-fn future_yield_now_without_worker() {
+fn block_on_without_worker_busy_polls() {
     // No `current()` worker: block_on falls back to OsPoller's busy-poll,
     // which re-polls regardless of the waker.
-    let v = OsSystem::block_on(async {
-        cmpth::future::yield_now().await;
-        7u32
-    });
-    assert_eq!(v, 7);
+    let v = OsSystem::block_on(YieldOnce(false));
+    assert_eq!(v, 42);
 }
 
 #[test]

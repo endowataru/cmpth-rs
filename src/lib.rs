@@ -27,7 +27,6 @@ mod context;
 pub mod traits;
 mod os;
 mod spin;
-pub mod future;
 pub mod resumable;
 pub mod scoped;
 
