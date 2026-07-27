@@ -25,13 +25,28 @@ fn block_on_busy(mut fut: Pin<&mut dyn Future<Output = ()>>) {
     }
 }
 
+/// One suspend point: `Pending` on the first poll (waking itself), `Ready`
+/// on the next.
+async fn yield_once() {
+    let mut yielded = false;
+    std::future::poll_fn(move |cx| {
+        if yielded {
+            Poll::Ready(())
+        } else {
+            yielded = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await
+}
+
 /// `depth` layers of plain `async move { inner.await }` wrapping a single
-/// genuine suspend point (`cmpth::future::yield_now`: Pending once, wakes
-/// itself, Ready next). Built at runtime (not via a recursive `async fn`,
-/// so no E0733) via repeated boxing — each layer is its own, non-recursive
-/// anonymous type.
+/// genuine suspend point ([`yield_once`]). Built at runtime (not via a
+/// recursive `async fn`, so no E0733) via repeated boxing — each layer is
+/// its own, non-recursive anonymous type.
 fn build_chain(depth: usize) -> Pin<Box<dyn Future<Output = ()>>> {
-    let mut fut: Pin<Box<dyn Future<Output = ()>>> = Box::pin(cmpth::future::yield_now());
+    let mut fut: Pin<Box<dyn Future<Output = ()>>> = Box::pin(yield_once());
     for _ in 0..depth {
         fut = Box::pin(async move { fut.await });
     }

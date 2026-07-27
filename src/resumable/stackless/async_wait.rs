@@ -12,8 +12,7 @@ use crate::traits::{Resumable, StacklessResumable};
 ///
 /// Deliberately holds a *standard* `Waker`, not cmpth's internal `UltDesc`
 /// pointer — this is what lets a primitive built on this type (e.g. an
-/// async-only mutex) compose with any executor, not just cmpth's own,
-/// matching [`crate::future::yield_now`]'s executor-agnostic philosophy.
+/// async-only mutex) compose with any executor, not just cmpth's own.
 pub struct SuspendedFuture<S> {
     waker: AtomicPtr<Waker>,
     _marker: PhantomData<S>,
