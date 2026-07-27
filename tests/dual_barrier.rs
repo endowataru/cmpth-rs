@@ -5,9 +5,11 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use cmpth::default::*;
 use cmpth::traits::{BarrierWaitResult, StackfulBarrier, StacklessBarrier};
 use cmpth::{BasicSuspendedThread, DefaultDualTaskSystem, SuspendedFuture, SuspendedTask, UltDualBarrier};
+
+mod common;
+use common::*;
 
 #[test]
 fn sync_only_flavor() {

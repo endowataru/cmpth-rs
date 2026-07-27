@@ -1,6 +1,6 @@
 //! Async-task benchmarks — cmpth only (async is not part of BenchSystem).
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
-use cmpth::default::{run, spawn, spawn_async};
+use cmpth_bench::dual::{run, spawn, spawn_async};
 
 fn bench_spawn_async(c: &mut Criterion) {
     let mut group = c.benchmark_group("spawn_async");

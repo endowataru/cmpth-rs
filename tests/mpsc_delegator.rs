@@ -7,9 +7,11 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use cmpth::default::*;
 use cmpth::resumable::stackful::sync::mcs_delegator::McsQueue;
 use cmpth::{delegator, BasicSuspendedThread, DefaultDualTaskSystem, DelegatorConsumer};
+
+mod common;
+use common::*;
 
 #[derive(Default)]
 struct AddWork {

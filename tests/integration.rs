@@ -1,10 +1,12 @@
 use cmpth::*;
-use cmpth::default::*;
 // Sync traits are not at crate root (name would clash with the type aliases).
 // Import them under aliases so that methods like lock(), wait(), notify_one()
 // resolve correctly, and for explicit UFCS in generic tests.
 use cmpth::traits::StackfulMutex;
 use cmpth::traits::StackfulBarrier;
+
+mod common;
+use common::*;
 
 // Shared static ULT-local slot used by the UltTls tests below.
 // Key is lazily assigned once; each new scheduler run gives each ULT a fresh

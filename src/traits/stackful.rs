@@ -31,10 +31,10 @@ pub trait ThreadSystem: TaskSystem {
     /// underneath keeps running other tasks.
     ///
     /// ```
-    /// use cmpth::ThreadSystem;
+    /// use cmpth::{DefaultStackfulOnlyTaskSystem, ScopedStackfulTaskSystem, ThreadSystem};
     ///
-    /// cmpth::default::run(2, || {
-    ///     let x = cmpth::DefaultDualTaskSystem::block_on(async { 6 * 7 });
+    /// DefaultStackfulOnlyTaskSystem::run(2, || {
+    ///     let x = DefaultStackfulOnlyTaskSystem::block_on(async { 6 * 7 });
     ///     assert_eq!(x, 42);
     /// });
     /// ```

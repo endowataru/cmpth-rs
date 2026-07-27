@@ -4,9 +4,11 @@
 
 use std::sync::Arc;
 
-use cmpth::default::*;
 use cmpth::traits::{StackfulMutex, StacklessMutex};
 use cmpth::{BasicSuspendedThread, DefaultDualTaskSystem, SuspendedFuture, SuspendedTask, ThreadSystem, UltDualMutex};
+
+mod common;
+use common::*;
 
 #[test]
 fn sync_only_flavor() {
