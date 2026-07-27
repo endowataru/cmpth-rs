@@ -1,14 +1,12 @@
 //! Shared task-stack allocation machinery: [`StackAlloc`] (the pluggable
-//! policy trait), [`StackMem`]/[`UltStackMemory`] (storage), and the generic
-//! arena mechanism (`Arena`/`ArenaMeta`/`ArenaKind`/`arena_init`/
-//! `alloc_arena_cell`/`slot_from_addr`) parameterized over an
-//! `ArenaKind` so it can back two
-//! independent arenas without collision — see
-//! [`stackful::stack`](crate::resumable::stackful::stack) for the real-ULT-stack
-//! kind (`HeapStack`/`ArenaStack`/`UltStackArenaKind`) and
+//! policy trait), [`StackMem`]/[`UltStackMemory`] (storage), [`HeapStack`]
+//! (the plain-heap implementation), and the generic arena mechanism
+//! (`Arena`/`ArenaMeta`/`ArenaKind`/`arena_init`/`alloc_arena_cell`/
+//! `slot_from_addr`) parameterized over an `ArenaKind` so it can back
+//! multiple independent arenas without collision — see
 //! [`stackless::stack`](crate::resumable::stackless::stack) for the
 //! `spawn_async`/`recurse` storage kind (`AsyncArenaStack`/
-//! `AsyncTaskArenaKind`).
+//! `AsyncTaskArenaKind`), currently its only user.
 //!
 //! # Arena cell layout
 //!
@@ -135,9 +133,9 @@ impl Drop for ArenaStackMem {
 // A cell being freed doesn't know its own `ArenaKind` (only its address and
 // stride); every kind's free list lives in its own `Arena`, keyed by the
 // same `(base, stride)` pair the cell was carved from, so this just walks
-// the process-wide registry of initialized arenas.  In practice there are
-// only ever one or two (`UltStackArenaKind`, `AsyncTaskArenaKind`), so a
-// linear scan under a lock is fine.
+// the process-wide registry of initialized arenas.  In practice there is
+// only ever one or two (`AsyncTaskArenaKind`, plus whatever future kinds
+// register), so a linear scan under a lock is fine.
 static ARENA_REGISTRY: Mutex<Vec<&'static Arena>> = Mutex::new(Vec::new());
 
 fn push_free_cell(cell: usize) {

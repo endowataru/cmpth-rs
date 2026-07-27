@@ -175,29 +175,7 @@ impl<S: crate::traits::scoped::ScopedStackfulTaskSystem + ThreadSystem> crate::t
 /// ```
 ///
 /// `STACK_SIZE` defaults to 64 KiB; override it like any other associated
-/// const. Naming `ArenaStack`/`SpCurrent` instead of the defaults (guard
-/// pages, stack-pointer-derived worker lookup) is the same shape, just
-/// different `Alloc`/`Lookup` choices:
-///
-/// ```
-/// pub struct GuardedSystem;
-///
-/// impl cmpth::UltIdentity for GuardedSystem {
-///     type Base = cmpth::OsSystem;
-///     type Ctx = cmpth::NativeContext;
-///     type Deque = cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>;
-///     type Alloc = cmpth::ArenaStack;
-///     type Lookup = cmpth::SpCurrent;
-///
-///     fn worker_tls_anchor() -> &'static <cmpth::OsSystem as cmpth::ThreadSystem>::ThreadSpecific<cmpth::UltWorker<Self>> {
-///         static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
-///         cmpth::TlsSlot::from_anchor(&A)
-///     }
-/// }
-///
-/// # use cmpth::ScopedStackfulTaskSystem;
-/// # GuardedSystem::run(1, || {});
-/// ```
+/// const.
 pub trait UltIdentity: Sized + Send + Sync + 'static {
     /// The threading system this scheduler runs on.
     type Base: ThreadSystem;

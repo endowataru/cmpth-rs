@@ -2,9 +2,8 @@
 //! inlinable TLS read, sound only because a stackless-only system never
 //! migrates a task across OS threads mid-poll) and
 //! `worker_from_async_arena_addr` (derive the worker from an address
-//! inside `spawn_async`/`recurse` arena storage — the async analogue of
-//! [`stackful::lookup::SpCurrent`](crate::resumable::stackful::lookup::SpCurrent)'s
-//! stack-pointer trick).
+//! inside `spawn_async`/`recurse` arena storage — a stack-pointer-like
+//! trick, but keyed off that storage's own arena instead of a real stack).
 
 use crate::traits::common::TlsSlot;
 use crate::resumable::common::lookup::{system_id, CurrentLookup};
@@ -42,8 +41,9 @@ impl<S: SchedulerSystem> CurrentLookup<S> for InlineTlsCurrent {
 // worker_from_async_arena_addr
 // ---------------------------------------------------------------------------
 
-/// Like `SpCurrent`, but for `spawn_async`/`recurse` storage instead of a
-/// real stack: `S::AsyncPool` is arena-allocated (see
+/// Derive the worker from an address inside `spawn_async`/`recurse`
+/// storage, the same way a stack pointer could map to a ULT's stack:
+/// `S::AsyncPool` is arena-allocated (see
 /// [`AsyncArenaStack`](crate::resumable::stackless::stack::AsyncArenaStack)), and a
 /// `spawn_async`'d future's fields (e.g. a `JoinHandle` awaited from within
 /// it) live inside that same descriptor's memory. So `self`'s own address,
