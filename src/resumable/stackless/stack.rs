@@ -3,12 +3,6 @@
 //! [`common::stack`](crate::resumable::common::stack) — see that module's
 //! docs for the shared machinery and cell layout this builds on, and
 //! [`crate::resumable::common::pool`] for how this storage is pooled.
-//!
-//! Same mechanism as
-//! [`stackful::stack::ArenaStack`](crate::resumable::stackful::stack::ArenaStack),
-//! but keyed by its own `ArenaKind` so its stride (sized for small
-//! `Future` payloads) can never collide with a stackful system's (much
-//! larger) `STACK_SIZE`.
 
 use crate::resumable::common::stack::{alloc_arena_cell, Arena, ArenaKind, ArenaMeta, ArenaStackMem, StackAlloc, ARENA_META_INIT};
 
@@ -23,10 +17,9 @@ impl StackAlloc for AsyncArenaStack {
     }
 }
 
-/// `spawn_async`/`recurse` task storage arena kind — independent stride from
-/// [`stackful::stack::UltStackArenaKind`](crate::resumable::stackful::stack::UltStackArenaKind),
-/// so a small async-task request can never collide with a stackful system's
-/// much larger `STACK_SIZE`.
+/// `spawn_async`/`recurse` task storage arena kind — its own reserved
+/// region and stride, independent of any other `ArenaKind` that might be
+/// registered.
 pub(crate) struct AsyncTaskArenaKind;
 
 static ASYNC_TASK_ARENA: std::sync::OnceLock<Arena> = std::sync::OnceLock::new();
