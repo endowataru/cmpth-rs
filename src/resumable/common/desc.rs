@@ -61,7 +61,7 @@
 use std::any::Any;
 use std::cell::{Cell, UnsafeCell};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Waker;
 
 use crate::resumable::stackful::desc::StackfulTaskDesc;
@@ -630,7 +630,9 @@ pub enum WakeOutcome {
 #[repr(C)]
 pub struct BasicTaskDesc {
     // --- Hot: touched on every spawn/exit/join ----------------------------
-    ctx: AtomicPtr<u8>,
+    // Plain Cell, not atomic: see StackfulTaskDesc::ctx's doc comment for
+    // the invariant this relies on instead.
+    ctx: Cell<*mut u8>,
     join_state: AtomicUsize,
     worker: Cell<*const ()>,
     slot: Cell<Option<*mut crate::resumable::common::stack::CellSlot>>,
@@ -674,7 +676,7 @@ impl TaskDesc for BasicTaskDesc {
 }
 
 impl StackfulTaskDesc for BasicTaskDesc {
-    fn ctx(&self) -> &AtomicPtr<u8> { &self.ctx }
+    fn ctx(&self) -> &Cell<*mut u8> { &self.ctx }
 }
 
 impl WakerTaskDesc for BasicTaskDesc {
@@ -722,7 +724,7 @@ impl BasicTaskDesc {
         // Compute slot before moving `stack` into the Box.
         let slot = stack.cell_slot();
         Box::into_raw(Box::new(BasicTaskDesc {
-            ctx: AtomicPtr::new(std::ptr::null_mut()),
+            ctx: Cell::new(std::ptr::null_mut()),
             is_root: false,
             join_state: AtomicUsize::new(if has_handle { JS_RUNNING } else { JS_DETACHED }),
             result: UnsafeCell::new(None),
@@ -742,7 +744,7 @@ impl BasicTaskDesc {
     /// Pseudo-descriptor for a worker's scheduler-loop context.
     pub(crate) fn new_root() -> BasicTaskDesc {
         BasicTaskDesc {
-            ctx: AtomicPtr::new(std::ptr::null_mut()),
+            ctx: Cell::new(std::ptr::null_mut()),
             is_root: true,
             join_state: AtomicUsize::new(JS_DETACHED),
             result: UnsafeCell::new(None),

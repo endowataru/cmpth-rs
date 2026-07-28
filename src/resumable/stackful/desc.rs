@@ -1,6 +1,6 @@
 //! Stackful-only descriptor operations: a real, switchable saved context.
 
-use std::sync::atomic::AtomicPtr;
+use std::cell::Cell;
 
 use crate::resumable::common::desc::TaskDesc;
 
@@ -11,45 +11,77 @@ use crate::resumable::common::desc::TaskDesc;
 pub trait StackfulTaskDesc: TaskDesc {
     /// Saved context pointer; null while the task is running.
     ///
-    /// Written with `Release` by the context-switch shim; claimed with
-    /// `Acquire` or `AcqRel` by resumer or waker.
-    fn ctx(&self) -> &AtomicPtr<u8>;
+    /// Deliberately a plain `Cell`, not an atomic: `ctx` carries no ordering
+    /// of its own. Its soundness rests entirely on two invariants holding
+    /// everywhere in the codebase, verified once (2026-07-28) rather than
+    /// re-proven per call site:
+    ///
+    /// 1. Every suspend goes through `suspend_shim`/`cond_suspend_shim`
+    ///    (`resumable::stackful::worker`), which write `ctx` (via
+    ///    [`publish_saved_context`](Self::publish_saved_context)) *before*
+    ///    running the caller-supplied closure that actually makes the
+    ///    continuation reachable by another thread — this ordering is
+    ///    structural (baked into the shim), not caller discipline.
+    /// 2. Whatever that closure uses to publish the continuation (a
+    ///    wait-slot's `AtomicPtr`, an MCS queue link, `join_state`,
+    ///    `waker_refs`, a deque push, an external queue) is itself a
+    ///    genuine atomic `Release` write, observed via a genuine `Acquire`
+    ///    on that *same* location by the resuming thread before it ever
+    ///    calls [`claim_saved_context`](Self::claim_saved_context)/
+    ///    [`peek_saved_context`](Self::peek_saved_context). By program
+    ///    order + release/acquire transitivity, that Acquire already makes
+    ///    `ctx`'s plain write visible — the same reason `Mutex<T>`'s
+    ///    guarded `T` needs no atomicity of its own.
+    ///
+    /// **Any new suspend/resume path or wait-primitive must preserve
+    /// invariant 2** (publish via a real `Release`, consume via a real
+    /// `Acquire` on that location, before touching `ctx`) or this needs to
+    /// go back to being an `AtomicPtr` with its own `Release`/`Acquire`.
+    /// This exact subsystem has already produced one ARM-only, CI-invisible
+    /// weak-memory race from getting a nearly identical invariant wrong
+    /// (a wait-slot published with a plain store racing a `Release`d
+    /// context save) — don't relax this without the same stress-test rigor
+    /// that caught it (`taskpolicy -c background`-pinned E-core runs, not
+    /// just `cargo test`).
+    ///
+    /// This is also why [`BasicTaskDesc`](crate::resumable::common::desc::BasicTaskDesc)'s
+    /// blanket `unsafe impl Sync` is sound despite `ctx` being a non-`Sync`
+    /// `Cell`: the invariants above, not the field's own type, are what
+    /// make cross-thread access safe.
+    fn ctx(&self) -> &Cell<*mut u8>;
 
-    /// Claim this task's saved context before switching into it (`Acquire`
-    /// swap-to-null). The caller is expected to `debug_assert` the returned
-    /// pointer is non-null (a null result means a double-resume — the exact
+    /// Claim this task's saved context before switching into it (swap to
+    /// null). The caller is expected to `debug_assert` the returned pointer
+    /// is non-null (a null result means a double-resume — the exact
     /// diagnostic message differs per call site, so that check stays there).
     fn claim_saved_context(&self) -> *mut u8 {
-        self.ctx().swap(std::ptr::null_mut(), std::sync::atomic::Ordering::Acquire)
+        self.ctx().replace(std::ptr::null_mut())
     }
 
-    /// Look at this task's saved context without consuming it (`Acquire`
-    /// load) — used when the caller might not actually commit to switching
+    /// Look at this task's saved context without consuming it — used when
+    /// the caller might not actually commit to switching
     /// (`cond_suspend_to_cont`).
     fn peek_saved_context(&self) -> *mut u8 {
-        self.ctx().load(std::sync::atomic::Ordering::Acquire)
+        self.ctx().get()
     }
 
-    /// Publish a just-saved context (`Release` swap), making this task
-    /// resumable. Returns the previous value so the caller can
-    /// `debug_assert` it was null (overwriting a live context is a bug).
+    /// Publish a just-saved context, making this task resumable. Returns
+    /// the previous value so the caller can `debug_assert` it was null
+    /// (overwriting a live context is a bug).
     fn publish_saved_context(&self, ptr: *mut u8) -> *mut u8 {
-        self.ctx().swap(ptr, std::sync::atomic::Ordering::Release)
+        self.ctx().replace(ptr)
     }
 
     /// Initialize the context of a freshly allocated task that has never
-    /// been suspended (`Release` store — cheaper than `publish_saved_context`
-    /// since there is provably nothing to overwrite, so no swap-and-check
-    /// is needed).
+    /// been suspended.
     fn init_saved_context(&self, ptr: *mut u8) {
-        self.ctx().store(ptr, std::sync::atomic::Ordering::Release);
+        self.ctx().set(ptr);
     }
 
-    /// Clear this task's saved context (`Relaxed` store) when synchronization
-    /// is already established by other means — used by `cond_suspend_shim`'s
+    /// Clear this task's saved context — used by `cond_suspend_shim`'s
     /// commit/cancel cleanup, after the ordering-relevant handoff already
     /// happened via the context switch itself.
     fn clear_saved_context(&self) {
-        self.ctx().store(std::ptr::null_mut(), std::sync::atomic::Ordering::Relaxed);
+        self.ctx().set(std::ptr::null_mut());
     }
 }
