@@ -13,7 +13,7 @@
 //!   Bits 2-62 hold the ref count; state bits 0-1 are still used for
 //!   POLLING/PARKED/NOTIFIED.  The EVER_SHARED flag is sticky.
 //!
-//! Both modes use `ctx` (AtomicPtr) for the suspend/resume handshake:
+//! Both modes use `ctx` for the suspend/resume handshake:
 //!   null     = task is running (POLLING or NOTIFIED)
 //!   non-null = task is parked, value is the saved context pointer
 //!
@@ -35,7 +35,6 @@
 
 use std::marker::PhantomData;
 use std::ptr::NonNull;
-use std::sync::atomic::Ordering;
 use std::task::{Context, RawWaker, RawWakerVTable, Waker};
 
 use crate::traits::Poller;
@@ -177,9 +176,12 @@ impl<S: StackfulSchedulerSystem> Drop for UltPoller<S> where <S as SchedulerSyst
 unsafe fn try_wake<S: StackfulSchedulerSystem>(desc: *const S::Desc) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     let desc = desc as *mut S::Desc;
     if let WakeOutcome::ClaimedParked = unsafe { (*desc).try_wake_state() } {
-        // The ctx store (Release) in cond_shim happened-before the Acquire
-        // CAS inside try_wake_state; we can now load ctx safely.
-        let _ctx = unsafe { (*desc).ctx().load(Ordering::Relaxed) };
+        // ctx is a plain Cell now (see StackfulTaskDesc::ctx's doc comment)
+        // — this debug_assert-only read was already relying on exactly that
+        // invariant even when ctx was atomic: the Acquire CAS inside
+        // try_wake_state already happened-after the ctx store (Release) in
+        // cond_shim, so no ordering of ctx's own is needed here either way.
+        let _ctx = unsafe { (*desc).ctx().get() };
         debug_assert!(!_ctx.is_null());
         unsafe { push_continuation::<S>(desc) };
     }
