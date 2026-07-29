@@ -23,7 +23,7 @@ use crate::traits::stackful::ThreadSystem;
 use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::system::SchedulerSystem;
-use crate::resumable::common::desc::{BasicTaskDesc, SuspendedUlt};
+use crate::resumable::common::desc::SuspendedUlt;
 use crate::resumable::common::stack::StackAlloc;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::stackful::suspended::UltSuspendedThread;
@@ -158,7 +158,8 @@ impl<S: crate::traits::scoped::ScopedStackfulTaskSystem + ThreadSystem> crate::t
 /// impl cmpth::UltIdentity for MySystem {
 ///     type Base = cmpth::OsSystem;
 ///     type Ctx = cmpth::NativeContext;
-///     type Deque = cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>;
+///     type Desc = cmpth::StackfulOnlyTaskDesc;
+///     type Deque = cmpth::CrossbeamDeque<cmpth::StackfulOnlyTaskDesc>;
 ///     type Alloc = cmpth::HeapStack;
 ///     type Lookup = cmpth::TlsCurrent;
 ///
@@ -183,8 +184,16 @@ pub trait UltIdentity: Sized + Send + Sync + 'static {
     /// Context-switch implementation.
     type Ctx: ContextPolicy;
 
+    /// Task descriptor type. Most implementors want
+    /// [`StackfulOnlyTaskDesc`](crate::resumable::common::desc::StackfulOnlyTaskDesc)
+    /// (no unused `poll_fn` slot); a system that also needs `spawn_async`/
+    /// dual capability on the same tasks wants
+    /// [`BasicTaskDesc`](crate::resumable::common::desc::BasicTaskDesc)
+    /// instead.
+    type Desc: crate::resumable::common::desc::TaskDescAlloc + StackfulTaskDesc + crate::resumable::common::desc::WakerTaskDesc;
+
     /// Work-stealing deque implementation.
-    type Deque: WorkerDeque<BasicTaskDesc>;
+    type Deque: WorkerDeque<Self::Desc>;
 
     /// Stack allocation policy.
     type Alloc: StackAlloc;
@@ -205,16 +214,16 @@ pub trait UltIdentity: Sized + Send + Sync + 'static {
 
 impl<M: UltIdentity> SchedulerSystem for M {
     type Base  = M::Base;
-    type Desc  = BasicTaskDesc;
+    type Desc  = M::Desc;
     type Deque = M::Deque;
-    type ExternalQueue = crate::resumable::common::external_queue::StealPathQueue<BasicTaskDesc>;
-    type Pool          = crate::resumable::common::pool::ReturnPool<BasicTaskDesc, M::Alloc>;
+    type ExternalQueue = crate::resumable::common::external_queue::StealPathQueue<M::Desc>;
+    type Pool          = crate::resumable::common::pool::ReturnPool<M::Desc, M::Alloc>;
     // Never actually allocated through: nothing calls spawn_async on a
     // stackful-only UltIdentity system (StacklessTaskSystem's blanket
-    // impl still applies, since BasicTaskDesc: AsyncTaskDesc
-    // unconditionally, but the capability just goes unused here). Mirrors
+    // impl still applies whenever M::Desc: AsyncTaskDesc, e.g. for
+    // BasicTaskDesc, but the capability just goes unused here). Mirrors
     // UltAsyncIdentity's unused `Pool` in the other direction.
-    type AsyncPool = crate::resumable::common::pool::SimplePool<BasicTaskDesc>;
+    type AsyncPool = crate::resumable::common::pool::SimplePool<M::Desc>;
     const ASYNC_POOL_SIZE: usize = 0;
     // Never actually taken from: nothing calls `recurse` on a
     // stackful-only UltIdentity system either. Mirrors `AsyncPool` above.
@@ -228,11 +237,11 @@ impl<M: UltIdentity> SchedulerSystem for M {
     // Stackful-only: always a real context switch, no poll_fn tag check —
     // `execute_stackful`'s whole point is that this bound never needs
     // `AsyncTaskDesc` at all.
-    fn execute(wk: &UltWorker<Self>, cont: SuspendedUlt<BasicTaskDesc>) {
+    fn execute(wk: &UltWorker<Self>, cont: SuspendedUlt<M::Desc>) {
         crate::resumable::stackful::worker::execute_stackful(wk, cont)
     }
 
-    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut BasicTaskDesc) {
+    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut M::Desc) {
         crate::resumable::stackful::worker::free_finished_desc_stackful(wk, desc)
     }
 }

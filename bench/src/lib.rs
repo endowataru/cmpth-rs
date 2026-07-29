@@ -165,7 +165,8 @@ pub struct AsyncOnlyMarker;
 
 impl cmpth::UltAsyncIdentity for AsyncOnlyMarker {
     type Base = cmpth::OsSystem;
-    type Deque = cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>;
+    type Desc = cmpth::StacklessOnlyTaskDesc;
+    type Deque = cmpth::CrossbeamDeque<cmpth::StacklessOnlyTaskDesc>;
     type Lookup = cmpth::InlineTlsCurrent;
 
     fn worker_tls_anchor() -> &'static <cmpth::OsSystem as cmpth::ThreadSystem>::ThreadSpecific<cmpth::UltWorker<cmpth::UltAsyncSystem<Self>>> {

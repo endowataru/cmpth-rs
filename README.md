@@ -169,7 +169,8 @@ pub struct MySystem;
 impl cmpth::UltIdentity for MySystem {
     type Base = cmpth::OsSystem;                          // what the workers run on
     type Ctx = cmpth::NativeContext;                       // context-switch implementation
-    type Deque = cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>; // work-stealing deque
+    type Desc = cmpth::StackfulOnlyTaskDesc;               // task descriptor
+    type Deque = cmpth::CrossbeamDeque<cmpth::StackfulOnlyTaskDesc>; // work-stealing deque
     type Alloc = cmpth::HeapStack;                         // stack allocator
     type Lookup = cmpth::TlsCurrent;                       // current-worker lookup
 

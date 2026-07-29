@@ -124,9 +124,12 @@ where
 {
     match wk.pop_local() {
         Some(popped) if std::ptr::eq(popped.desc(), desc) => {
-            match unsafe { (*desc).poll_fn().get() } {
-                Some(poll_fn) => crate::resumable::stackless::worker::run_async_poll(wk, desc, poll_fn),
-                None => wk.push_local_top(popped),
+            if unsafe { (*desc).is_poll_fn_dispatch() } {
+                let poll_fn = unsafe { (*desc).poll_fn().get() }
+                    .expect("cmpth: descriptor committed to poll_fn dispatch but poll_fn unset");
+                crate::resumable::stackless::worker::run_async_poll(wk, desc, poll_fn);
+            } else {
+                wk.push_local_top(popped);
             }
         }
         Some(other) => wk.push_local_top(other),
@@ -238,6 +241,7 @@ where
         result_layout.size() + result_layout.align() + f_layout.size() + f_layout.align() + 16;
 
     let desc = wk.shared().async_task_pool.alloc(wk.num(), true, stack_size);
+    unsafe { (*desc).commit_as_poll_fn() };
     unsafe { (*desc).scheduler().set(wk.shared.get() as *const ()) };
     // Arena-backed AsyncPool systems get a cell slot here; tag it with this
     // system's identity once (mirrors `spawn`'s own slot setup) so
@@ -513,6 +517,7 @@ where
     // rather than risking it being pushed onto a free list sized for
     // `S::ASYNC_POOL_SIZE`, which this allocation doesn't necessarily match.
     let desc = S::Desc::alloc(stack_size, false);
+    unsafe { (*desc).commit_as_poll_fn() };
     unsafe { (*desc).oversized().set(true) };
     unsafe { (*desc).scheduler().set(scheduler) };
 
