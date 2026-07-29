@@ -42,6 +42,7 @@ where
 {
     let wk = UltWorker::<S>::current().expect("cmpth: spawn called outside a worker");
     let desc = wk.alloc_task(true, S::STACK_SIZE);
+    unsafe { (*desc).commit_as_ctx() };
     unsafe { (*desc).scheduler().set(wk.shared.get() as *const ()) };
     if let Some(slot) = unsafe { (*desc).slot().get() } {
         unsafe { (*slot).system_id.set(crate::resumable::common::lookup::system_id::<S>()) };
@@ -98,6 +99,7 @@ where
 pub(crate) fn fork_parent_first<S: StackfulSchedulerSystem>(body: ErasedBody, scheduler: *const ()) -> SuspendedUlt<S::Desc> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     use crate::resumable::common::stack::StackAlloc as _;
     let desc = S::Desc::alloc_with(S::StackAlloc::alloc_stack(S::STACK_SIZE).into(), false);
+    unsafe { (*desc).commit_as_ctx() };
     unsafe { (*desc).scheduler().set(scheduler) };
     if let Some(slot) = unsafe { (*desc).slot().get() } {
         unsafe { (*slot).system_id.set(crate::resumable::common::lookup::system_id::<S>()) };

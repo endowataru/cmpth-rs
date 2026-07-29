@@ -50,6 +50,22 @@ pub trait StackfulTaskDesc: TaskDesc {
     /// make cross-thread access safe.
     fn ctx(&self) -> &Cell<*mut u8>;
 
+    /// Ensure this descriptor is configured for real-context-switch
+    /// dispatch. Called once by the allocating call site (`spawn`,
+    /// `fork_parent_first`) right after allocation, before
+    /// `init_saved_context`/`publish_saved_context` ever runs.
+    ///
+    /// No-op default: only meaningful for a descriptor type that also
+    /// implements [`AsyncTaskDesc`](crate::resumable::stackless::desc::AsyncTaskDesc)
+    /// on the same struct (i.e. [`BasicTaskDesc`](crate::resumable::common::desc::BasicTaskDesc)),
+    /// which overrides this to commit its `ctx`/`poll_fn` union to the
+    /// `Ctx` variant — the shared pool/`alloc_with` machinery that
+    /// constructs it also serves `spawn_async`'s non-oversized-future path
+    /// and can't tell from inside itself which role a given call is for.
+    /// A descriptor type with only one possible role (this trait but not
+    /// `AsyncTaskDesc`) has nothing to commit to.
+    fn commit_as_ctx(&self) {}
+
     /// Claim this task's saved context before switching into it (swap to
     /// null). The caller is expected to `debug_assert` the returned pointer
     /// is non-null (a null result means a double-resume — the exact

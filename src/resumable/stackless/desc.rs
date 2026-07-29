@@ -35,8 +35,18 @@ pub type TaskPollFn<D> = for<'cx> unsafe fn(*mut D, &mut Context<'cx>) -> TaskPo
 /// (a `spawn_async` task's own poll loop, `run_async_poll`, uses
 /// `mark_polling`/`park_after_poll` on itself just like `block_on` does).
 pub trait AsyncTaskDesc: WakerTaskDesc {
-    /// Non-null for async tasks spawned via `spawn_async`; null for sync
-    /// ULTs.
+    /// The type-erased poll entry point, non-null once `spawn_now`/
+    /// `fork_async_parent_first` finish setting up a `spawn_async` task.
+    ///
+    /// **Only call this once [`is_poll_fn_dispatch`](Self::is_poll_fn_dispatch)
+    /// has confirmed this descriptor is actually committed to poll_fn
+    /// dispatch** (or the caller otherwise already knows that, e.g. it's
+    /// working with a `StacklessOnlyTaskDesc`-like type where that's the
+    /// only possibility). On a type with more than one dispatch mode on the
+    /// same struct (i.e. `BasicTaskDesc`), calling this on a
+    /// `ctx`-committed descriptor is a logic error (`debug_assert`s in
+    /// debug builds, UB in release — see that type's `ctx`/`poll_fn`
+    /// accessors).
     ///
     /// When set, `Worker::execute` calls this instead of doing a context
     /// switch.  The function polls the Future stored in the task's "stack"
@@ -44,4 +54,29 @@ pub trait AsyncTaskDesc: WakerTaskDesc {
     /// don't touch `desc` again; `Pending`: park it; `ReadyAndContinue`:
     /// poll the named descriptor next instead).
     fn poll_fn(&self) -> &Cell<Option<TaskPollFn<Self>>>;
+
+    /// Ensure this descriptor is configured for poll_fn dispatch. Called
+    /// once by the allocating call site (`spawn_now`, `fork_async_parent_first`)
+    /// right after allocation, before `poll_fn().set(...)` ever runs — the
+    /// async analogue of
+    /// [`StackfulTaskDesc::commit_as_ctx`](crate::resumable::stackful::desc::StackfulTaskDesc::commit_as_ctx);
+    /// see that method's doc comment for why this exists and which
+    /// descriptor type actually needs it.
+    fn commit_as_poll_fn(&self) {}
+
+    /// Is this descriptor currently committed to poll_fn dispatch? The safe
+    /// way to ask "is this a `spawn_async` task or a real ULT" — unlike
+    /// checking `poll_fn()` directly, this never panics regardless of which
+    /// way the answer comes out. Used by dual dispatch
+    /// (`resumable::dual::worker`) wherever a popped continuation could
+    /// legitimately be either kind.
+    ///
+    /// Default `true`: correct unconditionally for any descriptor type that
+    /// implements `AsyncTaskDesc` but not
+    /// [`StackfulTaskDesc`](crate::resumable::stackful::desc::StackfulTaskDesc)
+    /// on the same struct (e.g. `StacklessOnlyTaskDesc`) — every task on
+    /// such a system is poll_fn, there is no other possibility.
+    /// `BasicTaskDesc` overrides this to check its `ctx`/`poll_fn` union's
+    /// actual current variant.
+    fn is_poll_fn_dispatch(&self) -> bool { true }
 }

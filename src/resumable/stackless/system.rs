@@ -13,7 +13,6 @@ use std::marker::PhantomData;
 
 use crate::traits::stackful::ThreadSystem;
 use crate::resumable::common::deque::WorkerDeque;
-use crate::resumable::common::desc::BasicTaskDesc;
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::worker::UltWorker;
@@ -138,7 +137,8 @@ where
 ///
 /// impl cmpth::UltAsyncIdentity for MyAsyncMarker {
 ///     type Base = cmpth::OsSystem;
-///     type Deque = cmpth::CrossbeamDeque<cmpth::BasicTaskDesc>;
+///     type Desc = cmpth::StacklessOnlyTaskDesc;
+///     type Deque = cmpth::CrossbeamDeque<cmpth::StacklessOnlyTaskDesc>;
 ///     type Lookup = cmpth::InlineTlsCurrent;
 ///
 ///     fn worker_tls_anchor() -> &'static <cmpth::OsSystem as ThreadSystem>::ThreadSpecific<cmpth::UltWorker<cmpth::UltAsyncSystem<Self>>> {
@@ -158,8 +158,16 @@ pub trait UltAsyncIdentity: Sized + Send + Sync + 'static {
     /// The threading system this scheduler runs on.
     type Base: ThreadSystem;
 
+    /// Task descriptor type. Most implementors want
+    /// [`StacklessOnlyTaskDesc`](crate::resumable::common::desc::StacklessOnlyTaskDesc)
+    /// (no unused `ctx` slot); a system that also needs stackful `spawn`/
+    /// dual capability on the same tasks wants
+    /// [`BasicTaskDesc`](crate::resumable::common::desc::BasicTaskDesc)
+    /// instead.
+    type Desc: crate::resumable::common::desc::TaskDescAlloc + AsyncTaskDesc;
+
     /// Work-stealing deque implementation.
-    type Deque: WorkerDeque<BasicTaskDesc>;
+    type Deque: WorkerDeque<Self::Desc>;
 
     /// Fixed slot size for the `spawn_async` descriptor pool.
     const ASYNC_POOL_SIZE: usize = 512;
@@ -187,15 +195,15 @@ pub struct UltAsyncSystem<M: UltAsyncIdentity> {
 
 impl<M: UltAsyncIdentity> SchedulerSystem for UltAsyncSystem<M> {
     type Base  = M::Base;
-    type Desc  = BasicTaskDesc;
+    type Desc  = M::Desc;
     type Deque = M::Deque;
-    type ExternalQueue = crate::resumable::common::external_queue::StealPathQueue<BasicTaskDesc>;
+    type ExternalQueue = crate::resumable::common::external_queue::StealPathQueue<M::Desc>;
     // Never actually allocated through: this flavor has no `spawn`, only
     // `spawn_async` (which goes through AsyncPool below). SimplePool is the
     // cheapest DescPool to instantiate for a type that's never used.
-    type Pool = crate::resumable::common::pool::SimplePool<BasicTaskDesc>;
+    type Pool = crate::resumable::common::pool::SimplePool<M::Desc>;
     const ASYNC_POOL_SIZE: usize = <M as UltAsyncIdentity>::ASYNC_POOL_SIZE;
-    type AsyncPool = crate::resumable::common::pool::ReturnPool<BasicTaskDesc, crate::resumable::stackless::stack::AsyncArenaStack>;
+    type AsyncPool = crate::resumable::common::pool::ReturnPool<M::Desc, crate::resumable::stackless::stack::AsyncArenaStack>;
     type RecursionPool = crate::resumable::common::pool::ThresholdPool<crate::resumable::common::pool::BlockPool>;
     type Lookup = <M as UltAsyncIdentity>::Lookup;
 
@@ -205,11 +213,11 @@ impl<M: UltAsyncIdentity> SchedulerSystem for UltAsyncSystem<M> {
 
     // Stackless-only: always poll, never switch — no poll_fn tag check,
     // because every task on this system is a poll_fn task.
-    fn execute(wk: &UltWorker<Self>, cont: crate::resumable::common::desc::SuspendedUlt<BasicTaskDesc>) {
+    fn execute(wk: &UltWorker<Self>, cont: crate::resumable::common::desc::SuspendedUlt<M::Desc>) {
         crate::resumable::stackless::worker::execute_async(wk, cont)
     }
 
-    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut BasicTaskDesc) {
+    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut M::Desc) {
         crate::resumable::stackless::worker::free_finished_desc_async(wk, desc)
     }
 }

@@ -36,7 +36,7 @@ pub use scoped::ScopedTaskSystem;
 pub use os::{OsBarrier, OsCondvar, OsMutex, OsPoller, OsSystem, OsTls};
 pub use resumable::stackful::waker::UltPoller;
 pub use resumable::common::deque::{CrossbeamDeque, SpinDeque, WorkerDeque};
-pub use resumable::common::desc::{BasicTaskDesc, SuspendedUlt, TaskDesc, TaskDescAlloc};
+pub use resumable::common::desc::{BasicTaskDesc, StackfulOnlyTaskDesc, StacklessOnlyTaskDesc, SuspendedUlt, TaskDesc, TaskDescAlloc};
 pub use resumable::stackful::desc::StackfulTaskDesc;
 pub use resumable::stackless::desc::AsyncTaskDesc;
 pub use resumable::common::external_queue::{ExternalQueue, PollerUltQueue, StealPathQueue};
@@ -236,7 +236,8 @@ pub struct DefaultStackfulOnlyTaskSystem;
 impl UltIdentity for DefaultStackfulOnlyTaskSystem {
     type Base = OsSystem;
     type Ctx = NativeContext;
-    type Deque = CrossbeamDeque<BasicTaskDesc>;
+    type Desc = resumable::common::desc::StackfulOnlyTaskDesc;
+    type Deque = CrossbeamDeque<resumable::common::desc::StackfulOnlyTaskDesc>;
     type Alloc = HeapStack;
     type Lookup = TlsCurrent;
 
@@ -255,7 +256,8 @@ pub struct DefaultStacklessOnlyMarker;
 
 impl resumable::stackless::system::UltAsyncIdentity for DefaultStacklessOnlyMarker {
     type Base = OsSystem;
-    type Deque = CrossbeamDeque<resumable::common::desc::BasicTaskDesc>;
+    type Desc = resumable::common::desc::StacklessOnlyTaskDesc;
+    type Deque = CrossbeamDeque<resumable::common::desc::StacklessOnlyTaskDesc>;
     type Lookup = InlineTlsCurrent;
 
     fn worker_tls_anchor()
