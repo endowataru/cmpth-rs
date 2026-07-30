@@ -36,8 +36,12 @@ pub(crate) fn run_async_poll<S>(
     S::Desc: AsyncTaskDesc,
 {
     // Whatever this worker was polling (if anything) before this call —
-    // restored once, after the whole chain below is done, not per
-    // iteration (see the loop body for why).
+    // restored once the chain below is done. Unlike the pre-2026-07-30
+    // version, the restore happens *before* a task we're done with
+    // becomes reachable by another thread (deque push), not after —
+    // otherwise `polling_async` briefly claims we're still driving a
+    // descriptor that has already left synchronous driving, which
+    // `JoinHandle::poll`'s fast path could observe as a false positive.
     let prev_polling = wk.polling_async.get();
 
     loop {
@@ -69,14 +73,24 @@ pub(crate) fn run_async_poll<S>(
         drop(waker);
 
         match result {
-            TaskPollResult::Ready => break,
+            TaskPollResult::Ready => {
+                wk.polling_async.set(prev_polling);
+                return;
+            }
             TaskPollResult::Pending => {
                 // Park, unless a wake raced in during poll() -- then
-                // re-queue immediately instead.
-                if !unsafe { (*desc).park_after_poll() } {
+                // re-queue immediately instead. `polling_async` is
+                // restored *before* the deque push, not after: once
+                // pushed, `desc` is immediately stealable by another
+                // worker, so the marker must stop claiming we're driving
+                // it before that happens, not a couple of statements
+                // later.
+                let parked = unsafe { (*desc).park_after_poll() };
+                wk.polling_async.set(prev_polling);
+                if !parked {
                     wk.push_local_top(SuspendedUlt(desc));
                 }
-                break;
+                return;
             }
             TaskPollResult::ReadyAndContinue(next) => {
                 poll_fn = unsafe { (*next).poll_fn().get() }.expect(
@@ -87,8 +101,6 @@ pub(crate) fn run_async_poll<S>(
             }
         }
     }
-
-    wk.polling_async.set(prev_polling);
 }
 
 /// `execute` body for stackless-only systems: every popped continuation is
