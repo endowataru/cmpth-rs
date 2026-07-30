@@ -19,7 +19,7 @@ use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::pool::DescPool;
 use crate::resumable::common::scheduler::Scheduler;
 use crate::resumable::common::system::SchedulerSystem;
-use crate::resumable::common::desc::{SuspendedUlt, TaskDescAlloc};
+use crate::resumable::common::desc::{RunningTask, SuspendedUlt, TaskDescAlloc};
 
 // ---------------------------------------------------------------------------
 // TaskPool (base)
@@ -91,7 +91,19 @@ pub trait Worker<S: SchedulerSystem>: TaskPool<S> + LocalQueue<S> + Send + Sync 
 pub struct UltWorker<S: SchedulerSystem> {
     num: usize,
     pub(crate) deque: S::Deque,
-    pub(crate) cur_task: Cell<*mut S::Desc>,
+    /// The task currently running on this worker, if any. `None` means
+    /// nothing is running (mirrors the old `Cell<*mut S::Desc>`'s null
+    /// convention). Deliberately `Option<RunningTask<S::Desc>>`, not a bare
+    /// pointer: `RunningTask` is move-only, so `.take()`-ing it out of this
+    /// cell is the *only* way to get a live handle, and the cell is
+    /// provably empty for as long as that handle is in use — see
+    /// `cur_task`/`take_cur_task`/`set_cur_task` below, and
+    /// `RunningTask`'s own doc comment (`resumable::common::desc`) for why
+    /// this exists (it closes a real, load-bearing aliasing window that
+    /// used to exist in `cond_suspend_shim`, verified by an Explore-agent
+    /// audit of every place a "current task" pointer flowed through this
+    /// scheduler, 2026-07-30).
+    cur_task_cell: Cell<Option<RunningTask<S::Desc>>>,
     root_desc: S::Desc,
     pub(crate) root_cont: Cell<*mut S::Desc>,
     steal_seed: Cell<usize>,
@@ -102,6 +114,15 @@ pub struct UltWorker<S: SchedulerSystem> {
     /// how `JoinHandle::poll` recognizes "the ambient waker is verifiably
     /// this task's own" without inspecting the waker itself, avoiding a
     /// `Box<Waker>` allocation on the common `spawn_async`/`.await` path.
+    /// A bare pointer, not `RunningTask`-wrapped: unlike `cur_task`, this
+    /// field is a marker read by a *different* call chain
+    /// (`JoinHandle::poll`) than the one that owns the descriptor
+    /// (`run_async_poll`'s own `desc` local) — it never itself grants
+    /// exclusive rights, so move discipline doesn't apply to it. The
+    /// aliasing risk here (a stale marker outliving the moment the
+    /// descriptor becomes reachable by another worker) is closed instead by
+    /// `run_async_poll` clearing it *before* publishing the descriptor to
+    /// the deque, not after — see that function.
     pub(crate) polling_async: Cell<*mut S::Desc>,
 }
 
@@ -115,7 +136,7 @@ impl<S: SchedulerSystem> UltWorker<S> {
         UltWorker {
             num,
             deque: S::Deque::default(),
-            cur_task: Cell::new(ptr::null_mut()),
+            cur_task_cell: Cell::new(None),
             root_desc: S::Desc::new_root(),
             root_cont: Cell::new(ptr::null_mut()),
             steal_seed: Cell::new(num.wrapping_mul(0x9E37_79B9).wrapping_add(1)),
@@ -126,6 +147,43 @@ impl<S: SchedulerSystem> UltWorker<S> {
 
     pub(crate) fn root_desc(&self) -> &S::Desc {
         &self.root_desc
+    }
+
+    /// Peek at the raw pointer to the task currently running on this
+    /// worker, without taking ownership — for callers that only need to
+    /// read "what am I running right now" (sanity checks, `UltTls`,
+    /// `UltPoller`, `SuspendedTask::assert_on_real_ult`), never to move or
+    /// replace it. Null if nothing is running.
+    ///
+    /// # Safety of the shared read
+    /// Constructs a `&Option<RunningTask<S::Desc>>` via `Cell::as_ptr`
+    /// instead of `Cell::get` (which would require `T: Copy`) — sound
+    /// under the same "only the owning base thread ever touches this
+    /// worker's `Cell` fields" protocol `UltWorker`'s `unsafe impl Sync`
+    /// already rests on (see that impl), same as every other `Cell` field
+    /// here.
+    pub(crate) fn cur_task(&self) -> *mut S::Desc {
+        let opt: &Option<RunningTask<S::Desc>> = unsafe { &*self.cur_task_cell.as_ptr() };
+        opt.as_ref().map_or(ptr::null_mut(), RunningTask::desc)
+    }
+
+    /// Take exclusive ownership of the currently-running task out of this
+    /// worker's slot, leaving it empty. Panics if nothing is running —
+    /// every real call site only calls this while a task is known to be
+    /// running (same implicit invariant the old `Cell<*mut S::Desc>`
+    /// carried, just now checked instead of silently dereferencing null).
+    pub(crate) fn take_cur_task(&self) -> RunningTask<S::Desc> {
+        self.cur_task_cell.take().expect("cmpth: no current task on worker")
+    }
+
+    /// Commit `task` as the task now running on this worker. Panics if the
+    /// slot wasn't already empty — every real call site is expected to
+    /// have `take_cur_task`d (or never populated) the slot first; silently
+    /// overwriting a live `RunningTask` would drop it without anyone
+    /// noticing the ownership it represented just vanished.
+    pub(crate) fn set_cur_task(&self, task: RunningTask<S::Desc>) {
+        let old = self.cur_task_cell.replace(Some(task));
+        debug_assert!(old.is_none(), "cmpth: overwriting a live cur_task");
     }
 
     pub(crate) fn shared(&self) -> &Scheduler<S> {

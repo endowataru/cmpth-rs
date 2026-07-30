@@ -54,7 +54,7 @@ fn assert_on_real_ult<S: StackfulSchedulerSystem>(wk: &UltWorker<S>)
 where
     S::Desc: StackfulTaskDesc,
 {
-    let is_root = unsafe { (*wk.cur_task.get()).is_root() };
+    let is_root = unsafe { (*wk.cur_task()).is_root() };
     assert!(
         !is_root,
         "cmpth: StackfulResumable operation called outside a real ULT \

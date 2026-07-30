@@ -72,7 +72,7 @@ impl<S: StackfulSchedulerSystem, T: 'static> TlsSlot<T> for UltTls<S, T> where <
     fn get(&self) -> *mut T where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
         let wk = UltWorker::<S>::current()
             .expect("cmpth: ULT-local storage accessed outside a worker");
-        let desc = wk.cur_task.get();
+        let desc = wk.cur_task();
         let map = unsafe { &*(*desc).tls().get() };
         map.as_ref()
             .and_then(|m| m.get(&self.key()).copied())
@@ -83,7 +83,7 @@ impl<S: StackfulSchedulerSystem, T: 'static> TlsSlot<T> for UltTls<S, T> where <
     fn set(&self, p: *mut T) where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
         let wk = UltWorker::<S>::current()
             .expect("cmpth: ULT-local storage accessed outside a worker");
-        let desc = wk.cur_task.get();
+        let desc = wk.cur_task();
         let map = unsafe { &mut *(*desc).tls().get() };
         map.get_or_insert_with(HashMap::new).insert(self.key(), p.cast());
     }

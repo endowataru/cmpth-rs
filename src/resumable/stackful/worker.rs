@@ -14,7 +14,7 @@ use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, Worker};
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::desc::{SuspendedUlt, TaskDesc};
+use crate::resumable::common::desc::{RunningTask, SuspendedUlt, TaskDesc};
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 
 // ---------------------------------------------------------------------------
@@ -321,13 +321,17 @@ where
         let payload = &mut *(a1 as *mut SuspendPayload<S, F>);
         (&*payload.wk, payload.next, ManuallyDrop::take(&mut payload.f))
     };
-    let prev_desc = wk.cur_task.get();
+    // Already-linear: `next` was consumed from a `SuspendedUlt` (or is a
+    // freshly allocated descriptor, `suspend_to_new`) at the call site
+    // before the switch, so it's already exclusively ours here.
+    let prev_task = wk.take_cur_task();
+    let prev_desc = prev_task.desc();
     let old = unsafe { (*prev_desc).publish_saved_context(prev.0) };
     debug_assert!(old.is_null(), "suspend over live ctx in suspend_shim (is_root={})", unsafe { (*prev_desc).is_root() });
-    wk.cur_task.set(next);
+    wk.set_cur_task(RunningTask(next));
     let wkp = wk as *const UltWorker<S> as *const ();
     unsafe { (*next).mark_resumed_on(wkp) };
-    f(wk, SuspendedUlt(prev_desc));
+    f(wk, prev_task.into_suspended());
     Transfer(wk as *const UltWorker<S> as *mut ())
 }
 
@@ -351,28 +355,45 @@ where
         let next_cont = (*payload.next).take().unwrap();
         (&*payload.wk, payload.next, next_cont, ManuallyDrop::take(&mut payload.f))
     };
-    let prev_desc = wk.cur_task.get();
+    let prev_task = wk.take_cur_task();
+    let prev_desc = prev_task.desc();
     let old = unsafe { (*prev_desc).publish_saved_context(prev.0) };
     debug_assert!(old.is_null(), "suspend over live ctx in cond_suspend_shim (is_root={})", unsafe { (*prev_desc).is_root() });
-    wk.cur_task.set(next_cont.desc());
-    let wkp = wk as *const UltWorker<S> as *const ();
-    unsafe { (*next_cont.desc()).mark_resumed_on(wkp) };
 
-    let mut prev_cont = Some(SuspendedUlt(prev_desc));
+    // Promote + commit immediately: `wk.cur_task()` correctly reflects
+    // physical reality (this *is* what's running) for the entire duration
+    // of `f` below, and nothing else holds a second, independent handle to
+    // the same descriptor at the same time -- unlike the old
+    // `Cell<*mut S::Desc>` design, there is no window where `cur_task` and
+    // a live `SuspendedUlt`/local variable alias the same task while
+    // owner-exclusive fields (`worker`/`slot`/`ctx`) are mutated through
+    // one of them. See `RunningTask`'s doc comment.
+    let next_running = next_cont.into_running();
+    let wkp = wk as *const UltWorker<S> as *const ();
+    unsafe { (*next_running.desc()).mark_resumed_on(wkp) };
+    wk.set_cur_task(next_running);
+
+    let mut prev_cont = Some(prev_task.into_suspended());
     f(wk, &mut prev_cont);
 
     match prev_cont {
         None => {
-            unsafe { (*next_cont.desc()).clear_saved_context() };
-            let _ = next_cont.into_raw();
+            // Committed: `next_running` is already `cur_task` -- just
+            // finish publishing it (peek, not take; nothing else needs to
+            // claim it right now).
+            let next_desc = wk.cur_task();
+            unsafe { (*next_desc).clear_saved_context() };
             CondTransfer { value: wk as *const UltWorker<S> as *mut (), flag: 1 }
         }
         Some(c) => {
+            // Cancelled: take the provisional commit back out, restore
+            // `prev` as the running task, hand `next` back to the caller
+            // as suspended again.
             debug_assert!(std::ptr::eq(c.desc(), prev_desc));
             unsafe { (*prev_desc).clear_saved_context() };
-            let _ = c.into_raw();
-            wk.cur_task.set(prev_desc);
-            unsafe { *next_slot = Some(next_cont) };
+            let next_running = wk.take_cur_task();
+            wk.set_cur_task(c.into_running());
+            unsafe { *next_slot = Some(next_running.into_suspended()) };
             CondTransfer { value: wk as *const UltWorker<S> as *mut (), flag: 0 }
         }
     }
@@ -397,7 +418,12 @@ where
         let payload = &mut *(a1 as *mut ExitPayload<S, F>);
         (&*payload.wk, payload.next, ManuallyDrop::take(&mut payload.f))
     };
-    wk.cur_task.set(next);
+    // The exiting task's own descriptor isn't being saved anywhere -- `f`
+    // is responsible for its cleanup/freeing via the join protocol -- so
+    // just take it out of `cur_task` and drop the (zero-cost, no `Drop`
+    // impl) `RunningTask` wrapper without doing anything else with it.
+    let _ = wk.take_cur_task();
+    wk.set_cur_task(RunningTask(next));
     let wkp = wk as *const UltWorker<S> as *const ();
     unsafe { (*next).mark_resumed_on(wkp) };
     f(wk);

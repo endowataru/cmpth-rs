@@ -1195,6 +1195,46 @@ impl<D: TaskDesc> SuspendedUlt<D> {
     pub(crate) fn into_raw(self) -> *mut D {
         self.0
     }
+
+    /// A switch shim just resumed into this continuation: promote it from
+    /// "suspended, sitting somewhere" to "running, held by the worker's
+    /// `cur_task`/`polling_async` slot". See [`RunningTask`] for why this
+    /// is a distinct type rather than reusing `SuspendedUlt` for both —
+    /// the name `SuspendedUlt` would be a lie for something that's
+    /// actively executing.
+    pub(crate) fn into_running(self) -> RunningTask<D> {
+        RunningTask(self.into_raw())
+    }
+}
+
+/// Owning handle to the task currently *running* on a worker (held in
+/// `UltWorker::cur_task`/`polling_async`) — the running-task counterpart to
+/// [`SuspendedUlt`]. Deliberately a separate type, not a reused
+/// `SuspendedUlt`: `SuspendedUlt` means "not currently executing", which is
+/// the opposite of what sits in `cur_task`/`polling_async`. Same move-only
+/// discipline (no `Clone`): at most one `RunningTask<D>` for a given
+/// descriptor exists at a time, either held by whichever code is actively
+/// driving it, or sitting in the worker's `cur_task`/`polling_async` cell
+/// (never both at once — see `UltWorker::cur_task`'s doc comment).
+pub struct RunningTask<D: TaskDesc>(pub(crate) *mut D);
+
+unsafe impl<D: TaskDesc> Send for RunningTask<D> {}
+
+impl<D: TaskDesc> RunningTask<D> {
+    pub(crate) fn desc(&self) -> *mut D {
+        self.0
+    }
+
+    pub(crate) fn into_raw(self) -> *mut D {
+        self.0
+    }
+
+    /// This task is being parked/hand back to a caller instead of
+    /// continuing to run: demote it back to a suspended continuation. The
+    /// counterpart to [`SuspendedUlt::into_running`].
+    pub(crate) fn into_suspended(self) -> SuspendedUlt<D> {
+        SuspendedUlt(self.into_raw())
+    }
 }
 
 #[cfg(test)]

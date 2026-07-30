@@ -84,7 +84,7 @@ where
         // than a TLS lookup.
         let wk = unsafe { &*((*desc).worker().get() as *const UltWorker<S>) };
         debug_assert!(std::ptr::eq(wk, UltWorker::<S>::current().expect("cmpth: worker vanished")));
-        debug_assert!(std::ptr::eq(wk.cur_task.get(), desc));
+        debug_assert!(std::ptr::eq(wk.cur_task(), desc));
         exit_with_result(wk, desc, result_ptr, val)
     });
 
@@ -114,13 +114,13 @@ pub(crate) fn fork_parent_first<S: StackfulSchedulerSystem>(body: ErasedBody, sc
 
 unsafe extern "C" fn task_entry<S: StackfulSchedulerSystem>(transfer: Transfer, arg: *mut ()) -> ! where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     let wk = unsafe { &*(transfer.0 as *const UltWorker<S>) };
-    let desc = wk.cur_task.get();
+    let desc = wk.cur_task();
     let body = *unsafe { Box::from_raw(arg as *mut ErasedBody) };
     let result = catch_unwind(AssertUnwindSafe(body));
     // See spawn: the descriptor tracks the current worker across migrations.
     let wk = unsafe { &*((*desc).worker().get() as *const UltWorker<S>) };
     debug_assert!(std::ptr::eq(wk, UltWorker::<S>::current().expect("cmpth: worker vanished")));
-    debug_assert!(std::ptr::eq(wk.cur_task.get(), desc));
+    debug_assert!(std::ptr::eq(wk.cur_task(), desc));
     unsafe { *(*desc).result().get() = Some(result) };
     exit(wk, desc)
 }

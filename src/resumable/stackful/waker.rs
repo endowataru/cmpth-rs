@@ -106,7 +106,7 @@ impl<S: StackfulSchedulerSystem> Poller for UltPoller<S> where <S as SchedulerSy
     fn new() -> Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
         match UltWorker::<S>::current() {
             Some(wk) => {
-                let desc = wk.cur_task.get();
+                let desc = wk.cur_task();
                 unsafe { (*desc).mark_polling() };
                 let raw = RawWaker::new(desc as *const (), private_vtable::<S>());
                 let waker = unsafe { Waker::from_raw(raw) };
