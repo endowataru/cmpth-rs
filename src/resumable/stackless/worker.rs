@@ -120,8 +120,8 @@ where
 
 /// `free_finished_desc` body for stackless-only systems: every descriptor
 /// is a `spawn_async` allocation, so always route it through `S::AsyncPool`
-/// (which itself decides pool-return vs. raw-free via
-/// [`TaskDesc::oversized`]).
+/// (which itself decides pool-return vs. raw-free based on whether the
+/// descriptor's `Node` wrapper was marked oversized at allocation time).
 pub fn free_finished_desc_async<S>(wk: &UltWorker<S>, desc: *mut S::Desc)
 where
     S: SchedulerSystem,

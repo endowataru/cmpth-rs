@@ -512,13 +512,15 @@ where
     // Allocated directly (not through S::AsyncPool): there's no current
     // worker yet to own a pool slot, and this runs exactly once per
     // `run_async` call anyway, so there's nothing to gain from pooling it.
-    // Marked `oversized` unconditionally so its eventual dealloc (through
-    // the pool, like any other completed async task) always raw-frees it
-    // rather than risking it being pushed onto a free list sized for
-    // `S::ASYNC_POOL_SIZE`, which this allocation doesn't necessarily match.
-    let desc = S::Desc::alloc(stack_size, false);
+    // Still wrapped via `Node::wrap_fresh` (not a bare `Box::new`), and
+    // marked `oversized` unconditionally, so its eventual dealloc (through
+    // the pool, like any other completed async task) can recover the node
+    // via `Node::node_of` and always raw-frees it, rather than risking it
+    // being pushed onto a free list sized for `S::ASYNC_POOL_SIZE`, which
+    // this allocation doesn't necessarily match.
+    let payload = S::Desc::alloc(stack_size, false);
+    let desc = crate::resumable::common::pool::Node::wrap_fresh(0, true, payload);
     unsafe { (*desc).commit_as_poll_fn() };
-    unsafe { (*desc).oversized().set(true) };
     unsafe { (*desc).scheduler().set(scheduler) };
 
     let stack_top = unsafe { (*desc).stack_top() } as usize;

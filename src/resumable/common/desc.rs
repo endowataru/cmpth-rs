@@ -168,24 +168,6 @@ pub trait TaskDesc: Send + Sync + Sized + 'static {
     /// result on their own stack.)
     fn result(&self) -> &UnsafeCell<Option<TaskResult>>;
 
-    /// Intrusive linked-list pointer used when this descriptor sits in the
-    /// task pool.  Undefined while the task is running.
-    fn pool_next(&self) -> &Cell<*mut Self>;
-
-    /// Index of the worker that allocated this descriptor.  Used by
-    /// [`ReturnPool`](crate::resumable::common::pool::ReturnPool) to route deallocation
-    /// back to the home worker. Meaningless when [`oversized`](Self::oversized)
-    /// is set (an oversized descriptor is never routed back to a free list).
-    fn alloc_wk(&self) -> &Cell<usize>;
-
-    /// True if this descriptor's storage is a one-off allocation that didn't
-    /// fit a [`DescPool`](crate::resumable::common::pool::DescPool)'s fixed slot size (see
-    /// `DescPool::alloc`) — `dealloc` must free it directly rather than
-    /// return it to the free list. Always false for descriptors that fit the
-    /// pool's configured size, which is the common case for both fixed-size
-    /// ULT stacks and most `spawn_async` futures.
-    fn oversized(&self) -> &Cell<bool>;
-
     /// Used by nested schedulers for their per-worker pointer (`UltTls`).
     /// Only touched by the OS thread currently running this task.
     fn tls(&self) -> &UnsafeCell<Option<HashMap<usize, *mut ()>>>;
@@ -398,24 +380,24 @@ pub trait TaskDesc: Send + Sync + Sized + 'static {
 /// here mirrors an existing `BasicTaskDesc` inherent fn byte-for-byte; this
 /// is a mechanical accessor split, not a behavior change.
 pub trait TaskDescAlloc: TaskDesc + Sized {
-    /// Allocate a descriptor whose stack storage is `stack` (heap or arena,
-    /// per the caller's `StackAlloc` policy). Used by the pool and by
-    /// `spawn`'s parent-first fork path.
-    fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> *mut Self;
+    /// Construct a descriptor value whose stack storage is `stack` (heap or
+    /// arena, per the caller's `StackAlloc` policy). Returns `Self` by
+    /// value, not a boxed pointer: pool bookkeeping (the old `pool_next`/
+    /// `alloc_wk`/`oversized` fields) no longer lives on the descriptor, so
+    /// wrapping it in a heap allocation (bare `Box<Self>`, or a pool's
+    /// `Node<Self>`) is entirely the caller's decision, not this trait's.
+    /// Used by the pool and by `spawn`'s parent-first fork path.
+    fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> Self;
 
-    /// Allocate a descriptor with a plain heap buffer of `stack_size` bytes,
-    /// bypassing any arena/guard-page policy. Used by `spawn_async`, whose
-    /// "stack" only ever stores a `Future` + result — no code runs on it, so
-    /// it never needs the arena.
-    fn alloc(stack_size: usize, has_handle: bool) -> *mut Self;
+    /// Construct a descriptor value with a plain heap buffer of
+    /// `stack_size` bytes, bypassing any arena/guard-page policy. Used by
+    /// `spawn_async`, whose "stack" only ever stores a `Future` + result —
+    /// no code runs on it, so it never needs the arena.
+    fn alloc(stack_size: usize, has_handle: bool) -> Self;
 
     /// Pseudo-descriptor for a worker's own scheduler-loop context (the
     /// "root continuation"), embedded by value in `UltWorker`.
     fn new_root() -> Self;
-
-    /// # Safety
-    /// Must be called exactly once, after no other references exist.
-    unsafe fn free(ptr: *mut Self);
 
     /// Reset a pooled descriptor for reuse (the stack allocation is kept).
     fn reinit(&mut self, has_handle: bool);
@@ -640,11 +622,6 @@ pub struct StackfulOnlyTaskDesc {
     waker_refs: AtomicUsize,
     scheduler: Cell<*const ()>,
 
-    // --- Pool metadata ------------------------------------------------------
-    pool_next: Cell<*mut StackfulOnlyTaskDesc>,
-    alloc_wk: Cell<usize>,
-    oversized: Cell<bool>,
-
     // --- ULT-local storage --------------------------------------------------
     tls: UnsafeCell<Option<HashMap<usize, *mut ()>>>,
 
@@ -661,9 +638,6 @@ impl TaskDesc for StackfulOnlyTaskDesc {
     fn slot(&self) -> &Cell<Option<*mut crate::resumable::common::stack::CellSlot>> { &self.slot }
     fn is_root(&self) -> bool { self.is_root }
     fn result(&self) -> &UnsafeCell<Option<TaskResult>> { &self.result }
-    fn pool_next(&self) -> &Cell<*mut Self> { &self.pool_next }
-    fn alloc_wk(&self) -> &Cell<usize> { &self.alloc_wk }
-    fn oversized(&self) -> &Cell<bool> { &self.oversized }
     fn tls(&self) -> &UnsafeCell<Option<HashMap<usize, *mut ()>>> { &self.tls }
     fn stack_top(&self) -> *mut u8 { self.stack.top() }
     fn scheduler(&self) -> &Cell<*const ()> { &self.scheduler }
@@ -678,20 +652,16 @@ impl WakerTaskDesc for StackfulOnlyTaskDesc {
 }
 
 impl TaskDescAlloc for StackfulOnlyTaskDesc {
-    fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> *mut Self {
+    fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> Self {
         StackfulOnlyTaskDesc::alloc_with(stack, has_handle)
     }
 
-    fn alloc(stack_size: usize, has_handle: bool) -> *mut Self {
+    fn alloc(stack_size: usize, has_handle: bool) -> Self {
         StackfulOnlyTaskDesc::alloc(stack_size, has_handle)
     }
 
     fn new_root() -> Self {
         StackfulOnlyTaskDesc::new_root()
-    }
-
-    unsafe fn free(ptr: *mut Self) {
-        unsafe { StackfulOnlyTaskDesc::free(ptr) }
     }
 
     fn reinit(&mut self, has_handle: bool) {
@@ -700,18 +670,17 @@ impl TaskDescAlloc for StackfulOnlyTaskDesc {
 }
 
 impl StackfulOnlyTaskDesc {
-    /// Allocate a descriptor with a heap stack. Freed with
-    /// [`StackfulOnlyTaskDesc::free`].
-    pub(crate) fn alloc(stack_size: usize, has_handle: bool) -> *mut StackfulOnlyTaskDesc {
+    /// Construct a descriptor value with a heap stack.
+    pub(crate) fn alloc(stack_size: usize, has_handle: bool) -> StackfulOnlyTaskDesc {
         use crate::resumable::common::stack::{HeapStack, StackAlloc as _};
         Self::alloc_with(HeapStack::alloc_stack(stack_size).into(), has_handle)
     }
 
-    /// Allocate a descriptor with a policy-allocated stack. For arena
+    /// Construct a descriptor value with a policy-allocated stack. For arena
     /// stacks, captures the cell slot pointer for use by the switch shims.
-    pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> *mut StackfulOnlyTaskDesc {
+    pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> StackfulOnlyTaskDesc {
         let slot = stack.cell_slot();
-        Box::into_raw(Box::new(StackfulOnlyTaskDesc {
+        StackfulOnlyTaskDesc {
             ctx: Cell::new(std::ptr::null_mut()),
             is_root: false,
             join_state: AtomicUsize::new(if has_handle { JS_RUNNING } else { JS_DETACHED }),
@@ -720,12 +689,9 @@ impl StackfulOnlyTaskDesc {
             scheduler: Cell::new(std::ptr::null()),
             worker: Cell::new(std::ptr::null()),
             slot: Cell::new(slot),
-            pool_next: Cell::new(std::ptr::null_mut()),
-            alloc_wk: Cell::new(0),
-            oversized: Cell::new(false),
             tls: UnsafeCell::new(None),
             stack,
-        }))
+        }
     }
 
     /// Pseudo-descriptor for a worker's scheduler-loop context.
@@ -739,18 +705,9 @@ impl StackfulOnlyTaskDesc {
             scheduler: Cell::new(std::ptr::null()),
             worker: Cell::new(std::ptr::null()),
             slot: Cell::new(None),
-            pool_next: Cell::new(std::ptr::null_mut()),
-            alloc_wk: Cell::new(0),
-            oversized: Cell::new(false),
             tls: UnsafeCell::new(None),
             stack: crate::resumable::common::stack::StackMem::None,
         }
-    }
-
-    /// # Safety
-    /// Must be called exactly once, after no other references exist.
-    pub(crate) unsafe fn free(ptr: *mut StackfulOnlyTaskDesc) {
-        unsafe { drop(Box::from_raw(ptr)) };
     }
 
     /// Reset a pooled descriptor for reuse (the stack allocation is kept).
@@ -789,11 +746,6 @@ pub struct StacklessOnlyTaskDesc {
     waker_refs: AtomicUsize,
     scheduler: Cell<*const ()>,
 
-    // --- Pool metadata ------------------------------------------------------
-    pool_next: Cell<*mut StacklessOnlyTaskDesc>,
-    alloc_wk: Cell<usize>,
-    oversized: Cell<bool>,
-
     // --- ULT-local storage --------------------------------------------------
     tls: UnsafeCell<Option<HashMap<usize, *mut ()>>>,
 
@@ -810,9 +762,6 @@ impl TaskDesc for StacklessOnlyTaskDesc {
     fn slot(&self) -> &Cell<Option<*mut crate::resumable::common::stack::CellSlot>> { &self.slot }
     fn is_root(&self) -> bool { self.is_root }
     fn result(&self) -> &UnsafeCell<Option<TaskResult>> { &self.result }
-    fn pool_next(&self) -> &Cell<*mut Self> { &self.pool_next }
-    fn alloc_wk(&self) -> &Cell<usize> { &self.alloc_wk }
-    fn oversized(&self) -> &Cell<bool> { &self.oversized }
     fn tls(&self) -> &UnsafeCell<Option<HashMap<usize, *mut ()>>> { &self.tls }
     fn stack_top(&self) -> *mut u8 { self.stack.top() }
     fn scheduler(&self) -> &Cell<*const ()> { &self.scheduler }
@@ -827,20 +776,16 @@ impl AsyncTaskDesc for StacklessOnlyTaskDesc {
 }
 
 impl TaskDescAlloc for StacklessOnlyTaskDesc {
-    fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> *mut Self {
+    fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> Self {
         StacklessOnlyTaskDesc::alloc_with(stack, has_handle)
     }
 
-    fn alloc(stack_size: usize, has_handle: bool) -> *mut Self {
+    fn alloc(stack_size: usize, has_handle: bool) -> Self {
         StacklessOnlyTaskDesc::alloc(stack_size, has_handle)
     }
 
     fn new_root() -> Self {
         StacklessOnlyTaskDesc::new_root()
-    }
-
-    unsafe fn free(ptr: *mut Self) {
-        unsafe { StacklessOnlyTaskDesc::free(ptr) }
     }
 
     fn reinit(&mut self, has_handle: bool) {
@@ -849,19 +794,20 @@ impl TaskDescAlloc for StacklessOnlyTaskDesc {
 }
 
 impl StacklessOnlyTaskDesc {
-    /// Allocate a descriptor with a heap stack. Used by `spawn_async`
-    /// (whose "stack" only stores the future — no code runs on it, so it
-    /// never needs the arena).
-    pub(crate) fn alloc(stack_size: usize, has_handle: bool) -> *mut StacklessOnlyTaskDesc {
+    /// Construct a descriptor value with a heap stack. Used by
+    /// `spawn_async` (whose "stack" only stores the future — no code runs
+    /// on it, so it never needs the arena).
+    pub(crate) fn alloc(stack_size: usize, has_handle: bool) -> StacklessOnlyTaskDesc {
         use crate::resumable::common::stack::{HeapStack, StackAlloc as _};
         Self::alloc_with(HeapStack::alloc_stack(stack_size).into(), has_handle)
     }
 
-    /// Allocate a descriptor with a policy-allocated stack (e.g. an async
-    /// arena). Captures the cell slot pointer for use by the wake path.
-    pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> *mut StacklessOnlyTaskDesc {
+    /// Construct a descriptor value with a policy-allocated stack (e.g. an
+    /// async arena). Captures the cell slot pointer for use by the wake
+    /// path.
+    pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> StacklessOnlyTaskDesc {
         let slot = stack.cell_slot();
-        Box::into_raw(Box::new(StacklessOnlyTaskDesc {
+        StacklessOnlyTaskDesc {
             is_root: false,
             join_state: AtomicUsize::new(if has_handle { JS_RUNNING } else { JS_DETACHED }),
             result: UnsafeCell::new(None),
@@ -870,12 +816,9 @@ impl StacklessOnlyTaskDesc {
             worker: Cell::new(std::ptr::null()),
             slot: Cell::new(slot),
             poll_fn: Cell::new(None),
-            pool_next: Cell::new(std::ptr::null_mut()),
-            alloc_wk: Cell::new(0),
-            oversized: Cell::new(false),
             tls: UnsafeCell::new(None),
             stack,
-        }))
+        }
     }
 
     /// Pseudo-descriptor for a worker's scheduler-loop context.
@@ -889,18 +832,9 @@ impl StacklessOnlyTaskDesc {
             worker: Cell::new(std::ptr::null()),
             slot: Cell::new(None),
             poll_fn: Cell::new(None),
-            pool_next: Cell::new(std::ptr::null_mut()),
-            alloc_wk: Cell::new(0),
-            oversized: Cell::new(false),
             tls: UnsafeCell::new(None),
             stack: crate::resumable::common::stack::StackMem::None,
         }
-    }
-
-    /// # Safety
-    /// Must be called exactly once, after no other references exist.
-    pub(crate) unsafe fn free(ptr: *mut StacklessOnlyTaskDesc) {
-        unsafe { drop(Box::from_raw(ptr)) };
     }
 
     /// Reset a pooled descriptor for reuse (the stack allocation is kept).
@@ -969,11 +903,6 @@ pub struct BasicTaskDesc {
     waker_refs: AtomicUsize,
     scheduler: Cell<*const ()>,
 
-    // --- Pool metadata ------------------------------------------------------
-    pool_next: Cell<*mut BasicTaskDesc>,
-    alloc_wk: Cell<usize>,
-    oversized: Cell<bool>,
-
     // --- ULT-local storage --------------------------------------------------
     tls: UnsafeCell<Option<HashMap<usize, *mut ()>>>,
 
@@ -990,9 +919,6 @@ impl TaskDesc for BasicTaskDesc {
     fn slot(&self) -> &Cell<Option<*mut crate::resumable::common::stack::CellSlot>> { &self.slot }
     fn is_root(&self) -> bool { self.is_root }
     fn result(&self) -> &UnsafeCell<Option<TaskResult>> { &self.result }
-    fn pool_next(&self) -> &Cell<*mut Self> { &self.pool_next }
-    fn alloc_wk(&self) -> &Cell<usize> { &self.alloc_wk }
-    fn oversized(&self) -> &Cell<bool> { &self.oversized }
     fn tls(&self) -> &UnsafeCell<Option<HashMap<usize, *mut ()>>> { &self.tls }
     fn stack_top(&self) -> *mut u8 { self.stack.top() }
     fn scheduler(&self) -> &Cell<*const ()> { &self.scheduler }
@@ -1051,20 +977,16 @@ impl AsyncTaskDesc for BasicTaskDesc {
 }
 
 impl TaskDescAlloc for BasicTaskDesc {
-    fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> *mut Self {
+    fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> Self {
         BasicTaskDesc::alloc_with(stack, has_handle)
     }
 
-    fn alloc(stack_size: usize, has_handle: bool) -> *mut Self {
+    fn alloc(stack_size: usize, has_handle: bool) -> Self {
         BasicTaskDesc::alloc(stack_size, has_handle)
     }
 
     fn new_root() -> Self {
         BasicTaskDesc::new_root()
-    }
-
-    unsafe fn free(ptr: *mut Self) {
-        unsafe { BasicTaskDesc::free(ptr) }
     }
 
     fn reinit(&mut self, has_handle: bool) {
@@ -1073,10 +995,9 @@ impl TaskDescAlloc for BasicTaskDesc {
 }
 
 impl BasicTaskDesc {
-    /// Allocate a descriptor with a heap stack.  Freed with
-    /// [`BasicTaskDesc::free`].  Used (among other things) by `spawn_async`
-    /// (whose "stack" only stores the future — no code runs on it, so it
-    /// never needs the arena).
+    /// Construct a descriptor value with a heap stack. Used (among other
+    /// things) by `spawn_async` (whose "stack" only stores the future — no
+    /// code runs on it, so it never needs the arena).
     ///
     /// `dispatch` starts as `Ctx` (an arbitrary placeholder — this
     /// constructor is shared by pooled allocation for *both* `S::Pool` and
@@ -1085,19 +1006,18 @@ impl BasicTaskDesc {
     /// `commit_as_poll_fn` immediately afterward, before anything else
     /// touches the descriptor. See `StackfulTaskDesc::commit_as_ctx`'s doc
     /// comment.
-    pub(crate) fn alloc(stack_size: usize, has_handle: bool) -> *mut BasicTaskDesc {
+    pub(crate) fn alloc(stack_size: usize, has_handle: bool) -> BasicTaskDesc {
         use crate::resumable::common::stack::{HeapStack, StackAlloc as _};
         Self::alloc_with(HeapStack::alloc_stack(stack_size).into(), has_handle)
     }
 
-    /// Allocate a descriptor with a policy-allocated stack.  For arena
-    /// stacks, captures the cell slot pointer for use by the switch shims.
-    /// See [`BasicTaskDesc::alloc`]'s doc comment for the `dispatch`
+    /// Construct a descriptor value with a policy-allocated stack.  For
+    /// arena stacks, captures the cell slot pointer for use by the switch
+    /// shims. See [`BasicTaskDesc::alloc`]'s doc comment for the `dispatch`
     /// placeholder-then-commit protocol this also follows.
-    pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> *mut BasicTaskDesc {
-        // Compute slot before moving `stack` into the Box.
+    pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> BasicTaskDesc {
         let slot = stack.cell_slot();
-        Box::into_raw(Box::new(BasicTaskDesc {
+        BasicTaskDesc {
             dispatch: Cell::new(TaskDispatch::Ctx(Cell::new(std::ptr::null_mut()))),
             is_root: false,
             join_state: AtomicUsize::new(if has_handle { JS_RUNNING } else { JS_DETACHED }),
@@ -1106,12 +1026,9 @@ impl BasicTaskDesc {
             scheduler: Cell::new(std::ptr::null()),
             worker: Cell::new(std::ptr::null()),
             slot: Cell::new(slot),
-            pool_next: Cell::new(std::ptr::null_mut()),
-            alloc_wk: Cell::new(0),
-            oversized: Cell::new(false),
             tls: UnsafeCell::new(None),
             stack,
-        }))
+        }
     }
 
     /// Pseudo-descriptor for a worker's scheduler-loop context. Always
@@ -1129,18 +1046,9 @@ impl BasicTaskDesc {
             scheduler: Cell::new(std::ptr::null()),
             worker: Cell::new(std::ptr::null()),
             slot: Cell::new(None),
-            pool_next: Cell::new(std::ptr::null_mut()),
-            alloc_wk: Cell::new(0),
-            oversized: Cell::new(false),
             tls: UnsafeCell::new(None),
             stack: crate::resumable::common::stack::StackMem::None,
         }
-    }
-
-    /// # Safety
-    /// Must be called exactly once, after no other references exist.
-    pub(crate) unsafe fn free(ptr: *mut BasicTaskDesc) {
-        unsafe { drop(Box::from_raw(ptr)) };
     }
 
     /// Reset a pooled descriptor for reuse (the stack allocation is kept).
