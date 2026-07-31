@@ -98,7 +98,14 @@ where
 /// descriptor for external-thread wake support.
 pub(crate) fn fork_parent_first<S: StackfulSchedulerSystem>(body: ErasedBody, scheduler: *const ()) -> SuspendedTaskToken<S::Desc> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     use crate::resumable::common::stack::StackAlloc as _;
-    let desc = S::Desc::alloc_with(S::StackAlloc::alloc_stack(S::STACK_SIZE).into(), false);
+    // Allocated directly (not through S::Pool), like `fork_async_parent_first`'s
+    // one-off root async descriptor: this runs once per `run`/`PollerUltQueue::on_start`
+    // call, so pooling it has nothing to gain. Still wrapped via `Node::wrap_fresh`
+    // (not a bare `Box::new`) and marked `oversized` unconditionally, so its
+    // eventual dealloc (through the pool, like any other finished task) can
+    // recover the node via `Node::node_of` and always raw-frees it.
+    let payload = S::Desc::alloc_with(S::StackAlloc::alloc_stack(S::STACK_SIZE).into(), false);
+    let desc = crate::resumable::common::pool::Node::wrap_fresh(0, true, payload);
     unsafe { (*desc).commit_as_ctx() };
     unsafe { (*desc).scheduler().set(scheduler) };
     if let Some(slot) = unsafe { (*desc).slot().get() } {

@@ -10,7 +10,8 @@ use std::any::Any;
 use std::marker::PhantomData;
 
 use crate::resumable::common::system::SchedulerSystem;
-use crate::resumable::common::desc::{TaskDesc, TaskDescAlloc};
+use crate::resumable::common::desc::TaskDesc;
+use crate::resumable::common::pool::free_desc;
 use crate::resumable::common::worker::{UltWorker, Worker};
 
 // Result stored directly on the child's stack, avoiding a Box for the success
@@ -60,7 +61,7 @@ impl<S: SchedulerSystem, T: Send + 'static> JoinHandle<S, T> {
         let result_ptr = self.result_ptr;
         std::mem::forget(self);
         let sr = unsafe { result_ptr.read() };
-        unsafe { S::Desc::free(desc) };
+        unsafe { free_desc(desc) };
         match sr {
             StackResult::Ok(val) => Ok(val),
             StackResult::Err(e) => Err(e),
@@ -90,7 +91,7 @@ impl<S: SchedulerSystem, T> Drop for JoinHandle<S, T> {
             unsafe { result_drop(result_ptr) };
             match UltWorker::<S>::current() {
                 Some(wk) => S::free_finished_desc(wk, desc),
-                None => unsafe { S::Desc::free(desc) },
+                None => unsafe { free_desc(desc) },
             }
         }
     }
