@@ -44,20 +44,20 @@
 //! [`stackful::waker::UltPoller`](crate::resumable::stackful::waker::UltPoller))
 //! and `spawn_async` (stackless, via
 //! `stackless::worker::run_async_poll`).
-//! [`StackfulTaskDesc`]
+//! [`StackfulTaskDesc`](crate::resumable::stackful::desc::StackfulTaskDesc)
 //! (real saved-context handling) and
-//! [`AsyncTaskDesc`]
+//! [`AsyncTaskDesc`](crate::resumable::stackless::desc::AsyncTaskDesc)
 //! (`poll_fn`) are the two genuinely flavor-specific extension traits, split
 //! out to `stackful::desc`/`stackless::desc`.
 
 use std::any::Any;
-use std::cell::{Cell, UnsafeCell};
+use std::cell::UnsafeCell;
 use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Waker;
 
-use crate::resumable::stackful::desc::StackfulTaskDesc;
-use crate::resumable::stackless::desc::{AsyncTaskDesc, TaskPollFn};
+use crate::resumable::stackless::desc::TaskPollFn;
 
 pub type TaskResult = Result<Box<dyn Any + Send>, Box<dyn Any + Send>>;
 
@@ -132,8 +132,66 @@ pub(crate) fn decode_join_state<D>(v: usize) -> JoinState<D> {
     }
 }
 
+/// The owner-exclusive fields every task descriptor has, regardless of
+/// flavor: touched only by whoever holds a live [`RunningTaskToken`]/
+/// [`SuspendedTaskToken`] for this descriptor, never concurrently (that's
+/// exactly the invariant those tokens' move-only discipline proves) — so
+/// unlike `join_state`/`waker_refs` (genuinely racy, touched by an external
+/// `wake()` at arbitrary times, and so left as plain `AtomicUsize` fields
+/// on the descriptor itself), these need no `Cell`/`UnsafeCell` wrapping at
+/// all. Reached only through a token's [`Deref`]/[`DerefMut`] (`Target =
+/// D::Owned`), the same "the token proves the precondition, `Deref` cashes
+/// it in" pattern as `MutexGuard`/`RefMut`.
+pub struct BaseOwned {
+    /// Type-erased `*const UltWorker<S>`: the worker that most recently
+    /// switched into this task, written by the switch shims alongside
+    /// `cur_task`.  A task cannot migrate between its last resume and its
+    /// next suspension, so the exit path reads this instead of doing a TLS
+    /// lookup.  Only valid while the task is running.
+    pub(crate) worker: *const (),
+
+    /// Points at the arena cell's `[worker, system_id]` slot for arena
+    /// stacks, or `None` for heap/root stacks.  The switch shims write the
+    /// resuming worker pointer here when present.
+    pub(crate) slot: Option<*mut crate::resumable::common::stack::CellSlot>,
+
+    /// Written by the task itself before exiting; read by the joiner after
+    /// `FINISHED` is observed.  (Root tasks only; spawned tasks put the
+    /// result on their own stack.)
+    pub(crate) result: Option<TaskResult>,
+
+    /// Used by nested schedulers for their per-worker pointer (`UltTls`).
+    /// Only touched by the OS thread currently running this task.
+    pub(crate) tls: Option<HashMap<usize, *mut ()>>,
+
+    /// Type-erased `*const Scheduler<S>`.  Set at task-creation time —
+    /// `spawn`, `spawn_async`, and `fork_parent_first` all record it,
+    /// regardless of task flavor — so that `wake()` called from an external
+    /// OS thread can reach the scheduler's `ExternalQueue` without going
+    /// through worker TLS.  Null for root pseudo-descriptors. Only actually
+    /// read by the `AsyncTaskDesc` wake path (`waker.rs::push_continuation`)
+    /// today, but writing it doesn't need `AsyncTaskDesc` capability, so it
+    /// lives on the base fields rather than gating every constructor on it.
+    pub(crate) scheduler: *const (),
+}
+
+impl BaseOwned {
+    const fn new() -> Self {
+        BaseOwned { worker: std::ptr::null(), slot: None, result: None, tls: None, scheduler: std::ptr::null() }
+    }
+}
+
+/// Implemented by every [`TaskDesc::Owned`] type: gives generic code (e.g.
+/// `RunningTaskToken::mark_resumed_on`) access to the fields every flavor
+/// shares, regardless of what flavor-specific fields (`ctx`, `poll_fn`,
+/// `dispatch`) the concrete `Owned` type adds alongside `base`.
+pub trait HasBaseOwned {
+    fn base(&self) -> &BaseOwned;
+    fn base_mut(&mut self) -> &mut BaseOwned;
+}
+
 /// Core per-task descriptor operations: every task, regardless of flavor,
-/// needs these (pool linkage, join protocol, per-worker TLS, result slot).
+/// needs these (join protocol, owner-exclusive field storage).
 ///
 /// Implementors are free to choose their own field layout, padding, and any
 /// extra members — callers only ever go through these named accessors, the
@@ -147,57 +205,20 @@ pub trait TaskDesc: Send + Sync + Sized + 'static {
     /// touches the descriptor after that store.
     fn join_state(&self) -> &AtomicUsize;
 
-    /// Type-erased `*const UltWorker<S>`: the worker that most recently
-    /// switched into this task, written by the switch shims alongside
-    /// `cur_task`.  A task cannot migrate between its last resume and its
-    /// next suspension, so the exit path reads this instead of doing a TLS
-    /// lookup.  Only valid while the task is running.
-    fn worker(&self) -> &Cell<*const ()>;
-
-    /// Points at the arena cell's `[worker, system_id]` slot for arena
-    /// stacks, or `None` for heap/root stacks.  The switch shims write the
-    /// resuming worker pointer here when present.
-    fn slot(&self) -> &Cell<Option<*mut crate::resumable::common::stack::CellSlot>>;
-
     /// True for the pseudo-descriptor representing a worker's scheduler-loop
     /// context (the "root continuation"). Fixed at construction.
     fn is_root(&self) -> bool;
-
-    /// Written by the task itself before exiting; read by the joiner after
-    /// `FINISHED` is observed.  (Root tasks only; spawned tasks put the
-    /// result on their own stack.)
-    fn result(&self) -> &UnsafeCell<Option<TaskResult>>;
-
-    /// Used by nested schedulers for their per-worker pointer (`UltTls`).
-    /// Only touched by the OS thread currently running this task.
-    fn tls(&self) -> &UnsafeCell<Option<HashMap<usize, *mut ()>>>;
 
     /// Top of this task's stack allocation (`StackMem::None` for root
     /// pseudo-descriptors, in which case this must never be called).
     fn stack_top(&self) -> *mut u8;
 
-    /// Type-erased `*const Scheduler<S>`.  Set at task-creation time —
-    /// `spawn`, `spawn_async`, and `fork_parent_first` all record it,
-    /// regardless of task flavor — so that `wake()` called from an external
-    /// OS thread can reach the scheduler's `ExternalQueue` without going
-    /// through worker TLS.  Null for root pseudo-descriptors. Only actually
-    /// read by the `AsyncTaskDesc` wake path (`waker.rs::push_continuation`)
-    /// today, but writing it doesn't need `AsyncTaskDesc` capability, so it
-    /// lives on the base trait rather than gating every constructor on it.
-    fn scheduler(&self) -> &Cell<*const ()>;
-
-    /// Record that this task is now running on `worker_ptr` — called by
-    /// every context-switch shim immediately after deciding `self` is the
-    /// task being switched into.  Propagates to the arena cell slot too
-    /// (when present), since every caller that sets `worker()` here has
-    /// always also needed to update `slot()` in the same breath.
-    #[inline]
-    fn mark_resumed_on(&self, worker_ptr: *const ()) {
-        self.worker().set(worker_ptr);
-        if let Some(slot) = self.slot().get() {
-            unsafe { (*slot).worker.set(worker_ptr) };
-        }
-    }
+    /// This descriptor's owner-exclusive fields (see [`BaseOwned`]/
+    /// [`HasBaseOwned`]).  Reached only through a live
+    /// [`RunningTaskToken`]/[`SuspendedTaskToken`]'s `Deref`/`DerefMut` —
+    /// never called directly outside this module.
+    type Owned: HasBaseOwned;
+    fn owned_cell(&self) -> &UnsafeCell<Self::Owned>;
 
     // --- join-protocol operations, built on join_state() ------------------
 
@@ -407,7 +428,7 @@ pub trait TaskDescAlloc: TaskDesc + Sized {
 /// [`std::task::Waker`] — both `block_on` (polling an arbitrary `Future`
 /// from a real ULT) and `spawn_async` tasks need this `waker_refs` state
 /// machine; `spawn_async` additionally needs
-/// [`AsyncTaskDesc`] on
+/// [`AsyncTaskDesc`](crate::resumable::stackless::desc::AsyncTaskDesc) on
 /// top for its `poll_fn` task representation. Kept separate from
 /// `AsyncTaskDesc` so that `ThreadSystem::block_on` (and anything generic
 /// over `S: ThreadSystem`, like `DelegatorConsumer`) doesn't drag in
@@ -601,31 +622,33 @@ pub enum WakeOutcome {
 // StackfulOnlyTaskDesc — UltIdentity systems (real ULTs, no spawn_async)
 // ---------------------------------------------------------------------------
 
+/// Owner-exclusive fields for [`StackfulOnlyTaskDesc`]: [`BaseOwned`] plus
+/// the real saved-context pointer (no `poll_fn` slot — this flavor never
+/// has one).
+pub struct StackfulOnlyOwned {
+    base: BaseOwned,
+    ctx: *mut u8,
+}
+
+impl HasBaseOwned for StackfulOnlyOwned {
+    fn base(&self) -> &BaseOwned { &self.base }
+    fn base_mut(&mut self) -> &mut BaseOwned { &mut self.base }
+}
+
+impl crate::resumable::stackful::desc::HasCtx for StackfulOnlyOwned {
+    fn ctx(&self) -> *mut u8 { self.ctx }
+    fn set_ctx(&mut self, ptr: *mut u8) { self.ctx = ptr; }
+}
+
 /// Concrete descriptor for `UltIdentity`-based (stackful-only) systems: a
 /// real ULT with no `spawn_async` capability, so no `poll_fn` slot exists
 /// at all (contrast [`BasicTaskDesc`], which needs both on the same
-/// struct). `repr(C)`: hot fields (touched on every spawn/exit/join) laid
-/// out first, mirroring `BasicTaskDesc`'s grouping minus `poll_fn`.
-#[repr(C)]
+/// struct).
 pub struct StackfulOnlyTaskDesc {
-    // --- Hot: touched on every spawn/exit/join ----------------------------
-    ctx: Cell<*mut u8>,
+    owned: UnsafeCell<StackfulOnlyOwned>,
     join_state: AtomicUsize,
-    worker: Cell<*const ()>,
-    slot: Cell<Option<*mut crate::resumable::common::stack::CellSlot>>,
     is_root: bool,
-
-    // --- Warm -------------------------------------------------------------
-    result: UnsafeCell<Option<TaskResult>>,
-
-    // --- Async waker (block_on) --------------------------------------------
     waker_refs: AtomicUsize,
-    scheduler: Cell<*const ()>,
-
-    // --- ULT-local storage --------------------------------------------------
-    tls: UnsafeCell<Option<HashMap<usize, *mut ()>>>,
-
-    // --- Stack ----------------------------------------------------------------
     stack: crate::resumable::common::stack::StackMem,
 }
 
@@ -634,17 +657,10 @@ unsafe impl Sync for StackfulOnlyTaskDesc {}
 
 impl TaskDesc for StackfulOnlyTaskDesc {
     fn join_state(&self) -> &AtomicUsize { &self.join_state }
-    fn worker(&self) -> &Cell<*const ()> { &self.worker }
-    fn slot(&self) -> &Cell<Option<*mut crate::resumable::common::stack::CellSlot>> { &self.slot }
     fn is_root(&self) -> bool { self.is_root }
-    fn result(&self) -> &UnsafeCell<Option<TaskResult>> { &self.result }
-    fn tls(&self) -> &UnsafeCell<Option<HashMap<usize, *mut ()>>> { &self.tls }
     fn stack_top(&self) -> *mut u8 { self.stack.top() }
-    fn scheduler(&self) -> &Cell<*const ()> { &self.scheduler }
-}
-
-impl StackfulTaskDesc for StackfulOnlyTaskDesc {
-    fn ctx(&self) -> &Cell<*mut u8> { &self.ctx }
+    type Owned = StackfulOnlyOwned;
+    fn owned_cell(&self) -> &UnsafeCell<StackfulOnlyOwned> { &self.owned }
 }
 
 impl WakerTaskDesc for StackfulOnlyTaskDesc {
@@ -679,17 +695,13 @@ impl StackfulOnlyTaskDesc {
     /// Construct a descriptor value with a policy-allocated stack. For arena
     /// stacks, captures the cell slot pointer for use by the switch shims.
     pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> StackfulOnlyTaskDesc {
-        let slot = stack.cell_slot();
+        let mut base = BaseOwned::new();
+        base.slot = stack.cell_slot();
         StackfulOnlyTaskDesc {
-            ctx: Cell::new(std::ptr::null_mut()),
+            owned: UnsafeCell::new(StackfulOnlyOwned { base, ctx: std::ptr::null_mut() }),
             is_root: false,
             join_state: AtomicUsize::new(if has_handle { JS_RUNNING } else { JS_DETACHED }),
-            result: UnsafeCell::new(None),
             waker_refs: AtomicUsize::new(0),
-            scheduler: Cell::new(std::ptr::null()),
-            worker: Cell::new(std::ptr::null()),
-            slot: Cell::new(slot),
-            tls: UnsafeCell::new(None),
             stack,
         }
     }
@@ -697,15 +709,10 @@ impl StackfulOnlyTaskDesc {
     /// Pseudo-descriptor for a worker's scheduler-loop context.
     pub(crate) fn new_root() -> StackfulOnlyTaskDesc {
         StackfulOnlyTaskDesc {
-            ctx: Cell::new(std::ptr::null_mut()),
+            owned: UnsafeCell::new(StackfulOnlyOwned { base: BaseOwned::new(), ctx: std::ptr::null_mut() }),
             is_root: true,
             join_state: AtomicUsize::new(JS_DETACHED),
-            result: UnsafeCell::new(None),
             waker_refs: AtomicUsize::new(0),
-            scheduler: Cell::new(std::ptr::null()),
-            worker: Cell::new(std::ptr::null()),
-            slot: Cell::new(None),
-            tls: UnsafeCell::new(None),
             stack: crate::resumable::common::stack::StackMem::None,
         }
     }
@@ -713,11 +720,12 @@ impl StackfulOnlyTaskDesc {
     /// Reset a pooled descriptor for reuse (the stack allocation is kept).
     pub(crate) fn reinit(&mut self, has_handle: bool) {
         debug_assert!(!self.is_root);
-        *self.ctx.get_mut() = std::ptr::null_mut();
+        let owned = self.owned.get_mut();
+        owned.ctx = std::ptr::null_mut();
+        owned.base.result = None;
+        owned.base.tls = None;
         *self.join_state.get_mut() = if has_handle { JS_RUNNING } else { JS_DETACHED };
         *self.waker_refs.get_mut() = 0;
-        *self.result.get_mut() = None;
-        *self.tls.get_mut() = None;
     }
 }
 
@@ -726,30 +734,32 @@ impl StackfulOnlyTaskDesc {
 // context switch)
 // ---------------------------------------------------------------------------
 
+/// Owner-exclusive fields for [`StacklessOnlyTaskDesc`]: [`BaseOwned`] plus
+/// the poll_fn entry point (no `ctx` slot — this flavor never does a real
+/// context switch).
+pub struct StacklessOnlyOwned {
+    base: BaseOwned,
+    poll_fn: Option<TaskPollFn<StacklessOnlyTaskDesc>>,
+}
+
+impl HasBaseOwned for StacklessOnlyOwned {
+    fn base(&self) -> &BaseOwned { &self.base }
+    fn base_mut(&mut self) -> &mut BaseOwned { &mut self.base }
+}
+
+impl crate::resumable::stackless::desc::HasPollFn<StacklessOnlyTaskDesc> for StacklessOnlyOwned {
+    fn poll_fn(&self) -> Option<TaskPollFn<StacklessOnlyTaskDesc>> { self.poll_fn }
+    fn set_poll_fn(&mut self, f: Option<TaskPollFn<StacklessOnlyTaskDesc>>) { self.poll_fn = f; }
+}
+
 /// Concrete descriptor for `UltAsyncIdentity`-based (stackless-only)
 /// systems: a `spawn_async` task with no real context switch, so no `ctx`
-/// slot exists at all. `repr(C)`: hot fields laid out first, mirroring
-/// `BasicTaskDesc`'s grouping minus `ctx`.
-#[repr(C)]
+/// slot exists at all.
 pub struct StacklessOnlyTaskDesc {
-    // --- Hot: touched on every spawn/exit/join ----------------------------
+    owned: UnsafeCell<StacklessOnlyOwned>,
     join_state: AtomicUsize,
-    worker: Cell<*const ()>,
-    slot: Cell<Option<*mut crate::resumable::common::stack::CellSlot>>,
-    poll_fn: Cell<Option<TaskPollFn<StacklessOnlyTaskDesc>>>,
     is_root: bool,
-
-    // --- Warm -------------------------------------------------------------
-    result: UnsafeCell<Option<TaskResult>>,
-
-    // --- Async waker (spawn_async's own poll loop uses this too) ----------
     waker_refs: AtomicUsize,
-    scheduler: Cell<*const ()>,
-
-    // --- ULT-local storage --------------------------------------------------
-    tls: UnsafeCell<Option<HashMap<usize, *mut ()>>>,
-
-    // --- Stack (spawn_async's Future + result storage) -----------------------
     stack: crate::resumable::common::stack::StackMem,
 }
 
@@ -758,21 +768,14 @@ unsafe impl Sync for StacklessOnlyTaskDesc {}
 
 impl TaskDesc for StacklessOnlyTaskDesc {
     fn join_state(&self) -> &AtomicUsize { &self.join_state }
-    fn worker(&self) -> &Cell<*const ()> { &self.worker }
-    fn slot(&self) -> &Cell<Option<*mut crate::resumable::common::stack::CellSlot>> { &self.slot }
     fn is_root(&self) -> bool { self.is_root }
-    fn result(&self) -> &UnsafeCell<Option<TaskResult>> { &self.result }
-    fn tls(&self) -> &UnsafeCell<Option<HashMap<usize, *mut ()>>> { &self.tls }
     fn stack_top(&self) -> *mut u8 { self.stack.top() }
-    fn scheduler(&self) -> &Cell<*const ()> { &self.scheduler }
+    type Owned = StacklessOnlyOwned;
+    fn owned_cell(&self) -> &UnsafeCell<StacklessOnlyOwned> { &self.owned }
 }
 
 impl WakerTaskDesc for StacklessOnlyTaskDesc {
     fn waker_refs(&self) -> &AtomicUsize { &self.waker_refs }
-}
-
-impl AsyncTaskDesc for StacklessOnlyTaskDesc {
-    fn poll_fn(&self) -> &Cell<Option<TaskPollFn<Self>>> { &self.poll_fn }
 }
 
 impl TaskDescAlloc for StacklessOnlyTaskDesc {
@@ -806,17 +809,13 @@ impl StacklessOnlyTaskDesc {
     /// async arena). Captures the cell slot pointer for use by the wake
     /// path.
     pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> StacklessOnlyTaskDesc {
-        let slot = stack.cell_slot();
+        let mut base = BaseOwned::new();
+        base.slot = stack.cell_slot();
         StacklessOnlyTaskDesc {
+            owned: UnsafeCell::new(StacklessOnlyOwned { base, poll_fn: None }),
             is_root: false,
             join_state: AtomicUsize::new(if has_handle { JS_RUNNING } else { JS_DETACHED }),
-            result: UnsafeCell::new(None),
             waker_refs: AtomicUsize::new(0),
-            scheduler: Cell::new(std::ptr::null()),
-            worker: Cell::new(std::ptr::null()),
-            slot: Cell::new(slot),
-            poll_fn: Cell::new(None),
-            tls: UnsafeCell::new(None),
             stack,
         }
     }
@@ -824,15 +823,10 @@ impl StacklessOnlyTaskDesc {
     /// Pseudo-descriptor for a worker's scheduler-loop context.
     pub(crate) fn new_root() -> StacklessOnlyTaskDesc {
         StacklessOnlyTaskDesc {
+            owned: UnsafeCell::new(StacklessOnlyOwned { base: BaseOwned::new(), poll_fn: None }),
             is_root: true,
             join_state: AtomicUsize::new(JS_DETACHED),
-            result: UnsafeCell::new(None),
             waker_refs: AtomicUsize::new(0),
-            scheduler: Cell::new(std::ptr::null()),
-            worker: Cell::new(std::ptr::null()),
-            slot: Cell::new(None),
-            poll_fn: Cell::new(None),
-            tls: UnsafeCell::new(None),
             stack: crate::resumable::common::stack::StackMem::None,
         }
     }
@@ -840,11 +834,12 @@ impl StacklessOnlyTaskDesc {
     /// Reset a pooled descriptor for reuse (the stack allocation is kept).
     pub(crate) fn reinit(&mut self, has_handle: bool) {
         debug_assert!(!self.is_root);
+        let owned = self.owned.get_mut();
+        owned.poll_fn = None;
+        owned.base.result = None;
+        owned.base.tls = None;
         *self.join_state.get_mut() = if has_handle { JS_RUNNING } else { JS_DETACHED };
         *self.waker_refs.get_mut() = 0;
-        *self.result.get_mut() = None;
-        *self.tls.get_mut() = None;
-        self.poll_fn.set(None);
     }
 }
 
@@ -859,82 +854,35 @@ impl StacklessOnlyTaskDesc {
 /// Verified zero-cost (2026-07-29, `rustc -O --emit=asm` on AArch64): a
 /// *safe* accessor that panics via `unreachable!()` on the wrong variant
 /// compiles to a real branch, but `debug_assert!` + `unreachable_unchecked()`
-/// (what [`BasicTaskDesc`]'s `ctx()`/`poll_fn()` use below) compiles to the
-/// exact same code as a direct field access (`add x0, x0, #8; ret`) — no
-/// discriminant check survives release codegen.
-///
-/// Naively, this looks like it should also save memory over two separate
-/// fields — it doesn't: `size_of::<TaskDispatch<D>>() == 16`, same as
-/// `Cell<*mut u8>` (8) + `Cell<Option<TaskPollFn<D>>>` (8) today, confirmed
-/// via `size_of`. Raw pointers (unlike `&T`/`NonNull<T>`) have no spare
-/// niche — `ctx` legitimately holds null as live data from construction
-/// (`alloc_with`'s initial value) — so the compiler can't fold the
-/// discriminant into an unused bit pattern of either variant; it costs a
-/// real extra word. The enum's value here is exclusively the unrepresentable-
-/// illegal-state guarantee, not size.
+/// (what [`BasicOwned`]'s `HasCtx`/`HasPollFn` impls use below) compiles to
+/// the exact same code as a direct field access (`add x0, x0, #8; ret`) —
+/// no discriminant check survives release codegen. Plain values now (not
+/// `Cell`-wrapped): `Owned`'s own mutation is already gated by a token's
+/// `&mut self`, so the variant fields need no interior mutability of their
+/// own.
 enum TaskDispatch<D> {
-    Ctx(Cell<*mut u8>),
-    PollFn(Cell<Option<TaskPollFn<D>>>),
+    Ctx(*mut u8),
+    PollFn(Option<TaskPollFn<D>>),
 }
 
-/// The descriptor implementation for dual (stackful + stackless) systems:
-/// implements every trait at once, since a stackful sync joiner and a
-/// stackless async waker can race to register on the *same* task
-/// regardless of which one the task itself turns out to be. `repr(C)`: the
-/// fields touched by every spawn/exit/join round-trip (`dispatch`,
-/// `join_state`, `worker`, `slot`, `is_root`) are laid out first so they
-/// share one cache line, mirroring `StackfulOnlyTaskDesc`/
-/// `StacklessOnlyTaskDesc`'s grouping.
-#[repr(C)]
-pub struct BasicTaskDesc {
-    // --- Hot: touched on every spawn/exit/join ----------------------------
-    // Cell-wrapped so commit_as_ctx/commit_as_poll_fn can overwrite the
-    // variant through &self (Cell::set), matching every other field here.
-    dispatch: Cell<TaskDispatch<BasicTaskDesc>>,
-    join_state: AtomicUsize,
-    worker: Cell<*const ()>,
-    slot: Cell<Option<*mut crate::resumable::common::stack::CellSlot>>,
-    is_root: bool,
-
-    // --- Warm -------------------------------------------------------------
-    result: UnsafeCell<Option<TaskResult>>,
-
-    // --- Async waker (block_on) --------------------------------------------
-    waker_refs: AtomicUsize,
-    scheduler: Cell<*const ()>,
-
-    // --- ULT-local storage --------------------------------------------------
-    tls: UnsafeCell<Option<HashMap<usize, *mut ()>>>,
-
-    // --- Stack ----------------------------------------------------------------
-    stack: crate::resumable::common::stack::StackMem,
+/// Owner-exclusive fields for [`BasicTaskDesc`]: [`BaseOwned`] plus the
+/// `ctx`/`poll_fn` union — a dual task is never both a real ULT and a
+/// `spawn_async` future at once, but which one it is isn't known until the
+/// allocating call site commits (see [`HasCtx::commit_as_ctx`](crate::resumable::stackful::desc::HasCtx::commit_as_ctx)/
+/// [`HasPollFn::commit_as_poll_fn`](crate::resumable::stackless::desc::HasPollFn::commit_as_poll_fn)).
+pub struct BasicOwned {
+    base: BaseOwned,
+    dispatch: TaskDispatch<BasicTaskDesc>,
 }
 
-unsafe impl Send for BasicTaskDesc {}
-unsafe impl Sync for BasicTaskDesc {}
-
-impl TaskDesc for BasicTaskDesc {
-    fn join_state(&self) -> &AtomicUsize { &self.join_state }
-    fn worker(&self) -> &Cell<*const ()> { &self.worker }
-    fn slot(&self) -> &Cell<Option<*mut crate::resumable::common::stack::CellSlot>> { &self.slot }
-    fn is_root(&self) -> bool { self.is_root }
-    fn result(&self) -> &UnsafeCell<Option<TaskResult>> { &self.result }
-    fn tls(&self) -> &UnsafeCell<Option<HashMap<usize, *mut ()>>> { &self.tls }
-    fn stack_top(&self) -> *mut u8 { self.stack.top() }
-    fn scheduler(&self) -> &Cell<*const ()> { &self.scheduler }
+impl HasBaseOwned for BasicOwned {
+    fn base(&self) -> &BaseOwned { &self.base }
+    fn base_mut(&mut self) -> &mut BaseOwned { &mut self.base }
 }
 
-impl StackfulTaskDesc for BasicTaskDesc {
-    fn ctx(&self) -> &Cell<*mut u8> {
-        // Safety: `dispatch`'s variant is fixed by `commit_as_ctx`/
-        // `commit_as_poll_fn`, called exactly once by the allocating call
-        // site (see their doc comments) before the descriptor is ever
-        // shared with another thread or handed to code that would call
-        // `ctx()`/`poll_fn()` — so by the time any accessor runs, the
-        // variant is settled and stays settled for the descriptor's whole
-        // life. `Cell::as_ptr` + deref is the standard way to borrow into
-        // a `Cell`'s contents without requiring `T: Copy`.
-        match unsafe { &*self.dispatch.as_ptr() } {
+impl crate::resumable::stackful::desc::HasCtx for BasicOwned {
+    fn ctx(&self) -> *mut u8 {
+        match self.dispatch {
             TaskDispatch::Ctx(ctx) => ctx,
             TaskDispatch::PollFn(_) => {
                 debug_assert!(false, "ctx() called on a descriptor committed to poll_fn dispatch");
@@ -943,19 +891,24 @@ impl StackfulTaskDesc for BasicTaskDesc {
         }
     }
 
-    fn commit_as_ctx(&self) {
-        self.dispatch.set(TaskDispatch::Ctx(Cell::new(std::ptr::null_mut())));
+    fn set_ctx(&mut self, ptr: *mut u8) {
+        match &mut self.dispatch {
+            TaskDispatch::Ctx(ctx) => *ctx = ptr,
+            TaskDispatch::PollFn(_) => {
+                debug_assert!(false, "set_ctx() called on a descriptor committed to poll_fn dispatch");
+                unsafe { std::hint::unreachable_unchecked() }
+            }
+        }
+    }
+
+    fn commit_as_ctx(&mut self) {
+        self.dispatch = TaskDispatch::Ctx(std::ptr::null_mut());
     }
 }
 
-impl WakerTaskDesc for BasicTaskDesc {
-    fn waker_refs(&self) -> &AtomicUsize { &self.waker_refs }
-}
-
-impl AsyncTaskDesc for BasicTaskDesc {
-    fn poll_fn(&self) -> &Cell<Option<TaskPollFn<Self>>> {
-        // Safety: see StackfulTaskDesc::ctx's matching comment above.
-        match unsafe { &*self.dispatch.as_ptr() } {
+impl crate::resumable::stackless::desc::HasPollFn<BasicTaskDesc> for BasicOwned {
+    fn poll_fn(&self) -> Option<TaskPollFn<BasicTaskDesc>> {
+        match self.dispatch {
             TaskDispatch::PollFn(poll_fn) => poll_fn,
             TaskDispatch::Ctx(_) => {
                 debug_assert!(false, "poll_fn() called on a descriptor committed to ctx dispatch");
@@ -964,16 +917,50 @@ impl AsyncTaskDesc for BasicTaskDesc {
         }
     }
 
-    fn commit_as_poll_fn(&self) {
-        self.dispatch.set(TaskDispatch::PollFn(Cell::new(None)));
+    fn set_poll_fn(&mut self, f: Option<TaskPollFn<BasicTaskDesc>>) {
+        match &mut self.dispatch {
+            TaskDispatch::PollFn(poll_fn) => *poll_fn = f,
+            TaskDispatch::Ctx(_) => {
+                debug_assert!(false, "set_poll_fn() called on a descriptor committed to ctx dispatch");
+                unsafe { std::hint::unreachable_unchecked() }
+            }
+        }
+    }
+
+    fn commit_as_poll_fn(&mut self) {
+        self.dispatch = TaskDispatch::PollFn(None);
     }
 
     fn is_poll_fn_dispatch(&self) -> bool {
-        // Safety: see StackfulTaskDesc::ctx's matching comment above — this
-        // one never panics on the "wrong" variant since that's the whole
-        // point (it's the safe way to find out).
-        matches!(unsafe { &*self.dispatch.as_ptr() }, TaskDispatch::PollFn(_))
+        matches!(self.dispatch, TaskDispatch::PollFn(_))
     }
+}
+
+/// The descriptor implementation for dual (stackful + stackless) systems:
+/// implements every trait at once, since a stackful sync joiner and a
+/// stackless async waker can race to register on the *same* task
+/// regardless of which one the task itself turns out to be.
+pub struct BasicTaskDesc {
+    owned: UnsafeCell<BasicOwned>,
+    join_state: AtomicUsize,
+    is_root: bool,
+    waker_refs: AtomicUsize,
+    stack: crate::resumable::common::stack::StackMem,
+}
+
+unsafe impl Send for BasicTaskDesc {}
+unsafe impl Sync for BasicTaskDesc {}
+
+impl TaskDesc for BasicTaskDesc {
+    fn join_state(&self) -> &AtomicUsize { &self.join_state }
+    fn is_root(&self) -> bool { self.is_root }
+    fn stack_top(&self) -> *mut u8 { self.stack.top() }
+    type Owned = BasicOwned;
+    fn owned_cell(&self) -> &UnsafeCell<BasicOwned> { &self.owned }
+}
+
+impl WakerTaskDesc for BasicTaskDesc {
+    fn waker_refs(&self) -> &AtomicUsize { &self.waker_refs }
 }
 
 impl TaskDescAlloc for BasicTaskDesc {
@@ -1004,8 +991,7 @@ impl BasicTaskDesc {
     /// `S::AsyncPool`, so it cannot know its eventual role); the allocating
     /// call site is responsible for calling `commit_as_ctx`/
     /// `commit_as_poll_fn` immediately afterward, before anything else
-    /// touches the descriptor. See `StackfulTaskDesc::commit_as_ctx`'s doc
-    /// comment.
+    /// touches the descriptor. See `HasCtx::commit_as_ctx`'s doc comment.
     pub(crate) fn alloc(stack_size: usize, has_handle: bool) -> BasicTaskDesc {
         use crate::resumable::common::stack::{HeapStack, StackAlloc as _};
         Self::alloc_with(HeapStack::alloc_stack(stack_size).into(), has_handle)
@@ -1016,17 +1002,13 @@ impl BasicTaskDesc {
     /// shims. See [`BasicTaskDesc::alloc`]'s doc comment for the `dispatch`
     /// placeholder-then-commit protocol this also follows.
     pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> BasicTaskDesc {
-        let slot = stack.cell_slot();
+        let mut base = BaseOwned::new();
+        base.slot = stack.cell_slot();
         BasicTaskDesc {
-            dispatch: Cell::new(TaskDispatch::Ctx(Cell::new(std::ptr::null_mut()))),
+            owned: UnsafeCell::new(BasicOwned { base, dispatch: TaskDispatch::Ctx(std::ptr::null_mut()) }),
             is_root: false,
             join_state: AtomicUsize::new(if has_handle { JS_RUNNING } else { JS_DETACHED }),
-            result: UnsafeCell::new(None),
             waker_refs: AtomicUsize::new(0),
-            scheduler: Cell::new(std::ptr::null()),
-            worker: Cell::new(std::ptr::null()),
-            slot: Cell::new(slot),
-            tls: UnsafeCell::new(None),
             stack,
         }
     }
@@ -1038,15 +1020,10 @@ impl BasicTaskDesc {
     /// per-call-site ambiguity to resolve here.
     pub(crate) fn new_root() -> BasicTaskDesc {
         BasicTaskDesc {
-            dispatch: Cell::new(TaskDispatch::Ctx(Cell::new(std::ptr::null_mut()))),
+            owned: UnsafeCell::new(BasicOwned { base: BaseOwned::new(), dispatch: TaskDispatch::Ctx(std::ptr::null_mut()) }),
             is_root: true,
             join_state: AtomicUsize::new(JS_DETACHED),
-            result: UnsafeCell::new(None),
             waker_refs: AtomicUsize::new(0),
-            scheduler: Cell::new(std::ptr::null()),
-            worker: Cell::new(std::ptr::null()),
-            slot: Cell::new(None),
-            tls: UnsafeCell::new(None),
             stack: crate::resumable::common::stack::StackMem::None,
         }
     }
@@ -1067,15 +1044,33 @@ impl BasicTaskDesc {
     /// that is a harmless idempotent overwrite with an equivalent value.)
     pub(crate) fn reinit(&mut self, has_handle: bool) {
         debug_assert!(!self.is_root);
-        match self.dispatch.get_mut() {
-            TaskDispatch::Ctx(ctx) => *ctx.get_mut() = std::ptr::null_mut(),
-            TaskDispatch::PollFn(poll_fn) => *poll_fn.get_mut() = None,
+        let owned = self.owned.get_mut();
+        match &mut owned.dispatch {
+            TaskDispatch::Ctx(ctx) => *ctx = std::ptr::null_mut(),
+            TaskDispatch::PollFn(poll_fn) => *poll_fn = None,
         }
+        owned.base.result = None;
+        owned.base.tls = None;
         *self.join_state.get_mut() = if has_handle { JS_RUNNING } else { JS_DETACHED };
         *self.waker_refs.get_mut() = 0;
-        *self.result.get_mut() = None;
-        *self.tls.get_mut() = None;
     }
+}
+
+/// Peek at `desc`'s owner-exclusive `worker` field without going through a
+/// token. For the handful of call sites that know, by construction, that
+/// they're currently executing as `desc`'s own task, but have no token
+/// value in local scope to route through — typically because they're using
+/// `worker` to *rediscover* which `UltWorker` they're now running on after
+/// a possible cross-worker migration, so there's no `wk` handy yet either.
+/// Same peek discipline as [`UltWorker::cur_task`](crate::resumable::common::worker::UltWorker::cur_task):
+/// sound because the caller is the only thread that could possibly be
+/// touching this descriptor right now.
+///
+/// # Safety
+/// The calling OS thread must currently be driving `desc` (mid-execution of
+/// its body, between resume and suspend/exit).
+pub(crate) unsafe fn peek_worker<D: TaskDesc>(desc: *mut D) -> *const () {
+    unsafe { (*(*desc).owned_cell().get()).base().worker }
 }
 
 /// Owning handle to a suspended task.  Not `Clone`, not `Drop`: ownership is
@@ -1090,6 +1085,25 @@ impl BasicTaskDesc {
 pub struct SuspendedTaskToken<D: TaskDesc>(pub(crate) *mut D);
 
 unsafe impl<D: TaskDesc> Send for SuspendedTaskToken<D> {}
+
+/// Cashes in the token's proof of exclusive ownership: sound because a live
+/// `SuspendedTaskToken<D>` is the only handle able to reach `D::Owned`
+/// while it exists (move-only, no `Clone` — see the struct's own doc
+/// comment). `join_state`/`waker_refs` live outside `Owned` specifically so
+/// this never claims exclusivity over the genuinely-shared fields `wake()`
+/// touches concurrently.
+impl<D: TaskDesc> Deref for SuspendedTaskToken<D> {
+    type Target = D::Owned;
+    fn deref(&self) -> &D::Owned {
+        unsafe { &*(*self.0).owned_cell().get() }
+    }
+}
+
+impl<D: TaskDesc> DerefMut for SuspendedTaskToken<D> {
+    fn deref_mut(&mut self) -> &mut D::Owned {
+        unsafe { &mut *(*self.0).owned_cell().get() }
+    }
+}
 
 impl<D: TaskDesc> SuspendedTaskToken<D> {
     pub(crate) fn desc(&self) -> *mut D {
@@ -1128,6 +1142,21 @@ pub struct RunningTaskToken<D: TaskDesc>(pub(crate) *mut D);
 
 unsafe impl<D: TaskDesc> Send for RunningTaskToken<D> {}
 
+/// See [`SuspendedTaskToken`]'s matching impl — identical reasoning, same
+/// move-only exclusivity proof.
+impl<D: TaskDesc> Deref for RunningTaskToken<D> {
+    type Target = D::Owned;
+    fn deref(&self) -> &D::Owned {
+        unsafe { &*(*self.0).owned_cell().get() }
+    }
+}
+
+impl<D: TaskDesc> DerefMut for RunningTaskToken<D> {
+    fn deref_mut(&mut self) -> &mut D::Owned {
+        unsafe { &mut *(*self.0).owned_cell().get() }
+    }
+}
+
 impl<D: TaskDesc> RunningTaskToken<D> {
     pub(crate) fn desc(&self) -> *mut D {
         self.0
@@ -1142,6 +1171,20 @@ impl<D: TaskDesc> RunningTaskToken<D> {
     /// counterpart to [`SuspendedTaskToken::into_running`].
     pub(crate) fn into_suspended(self) -> SuspendedTaskToken<D> {
         SuspendedTaskToken(self.into_raw())
+    }
+
+    /// Record that this task is now running on `worker_ptr` — called by
+    /// every context-switch shim immediately after promoting `self` to
+    /// `RunningTaskToken`. Propagates to the arena cell slot too (when
+    /// present), since every caller that sets `worker` here has always also
+    /// needed to update `slot` in the same breath.
+    #[inline]
+    pub(crate) fn mark_resumed_on(&mut self, worker_ptr: *const ()) {
+        let base = self.base_mut();
+        base.worker = worker_ptr;
+        if let Some(slot) = base.slot {
+            unsafe { (*slot).worker.set(worker_ptr) };
+        }
     }
 }
 
