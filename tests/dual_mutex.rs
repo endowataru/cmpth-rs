@@ -1,11 +1,11 @@
 //! Exercises the `docs/sync-async-unification.md` prototype: `UltDualMutex<S, T, N>`
-//! generic over `BasicSuspendedThread<S>` (sync-only), `SuspendedFuture<S>`
-//! (async-only), and `SuspendedTask<S>` (dual).
+//! generic over `BasicStackfulOnlyResumable<S>` (sync-only), `SuspendedFuture<S>`
+//! (async-only), and `DualResumable<S>` (dual).
 
 use std::sync::Arc;
 
 use cmpth::traits::{StackfulMutex, StacklessMutex};
-use cmpth::{BasicSuspendedThread, DefaultDualTaskSystem, SuspendedFuture, SuspendedTask, ThreadSystem, UltDualMutex};
+use cmpth::{BasicStackfulOnlyResumable, DefaultDualTaskSystem, SuspendedFuture, DualResumable, ThreadSystem, UltDualMutex};
 
 mod common;
 use common::*;
@@ -13,7 +13,7 @@ use common::*;
 #[test]
 fn sync_only_flavor() {
     run(4, || {
-        let m: Arc<UltDualMutex<DefaultDualTaskSystem, u64, BasicSuspendedThread<DefaultDualTaskSystem>>> =
+        let m: Arc<UltDualMutex<DefaultDualTaskSystem, u64, BasicStackfulOnlyResumable<DefaultDualTaskSystem>>> =
             Arc::new(UltDualMutex::new(0));
         let handles: Vec<_> = (0..8)
             .map(|_| {
@@ -68,10 +68,10 @@ fn dual_flavor_from_both_sync_and_async() {
     // The key claim under test: one mutex instance, contended simultaneously
     // by real spawned ULTs (via StackfulMutex) and spawn_async tasks (via
     // StacklessMutex), stays correct. Fully-qualified calls throughout since
-    // SuspendedTask implements both StackfulResumable and StacklessResumable, so
+    // DualResumable implements both StackfulResumable and StacklessResumable, so
     // `.lock()` alone would be ambiguous if both traits were `use`d.
     run(4, || {
-        let m: Arc<UltDualMutex<DefaultDualTaskSystem, u64, SuspendedTask<DefaultDualTaskSystem>>> =
+        let m: Arc<UltDualMutex<DefaultDualTaskSystem, u64, DualResumable<DefaultDualTaskSystem>>> =
             Arc::new(UltDualMutex::new(0));
 
         let sync_handles: Vec<_> = (0..16)
@@ -118,7 +118,7 @@ fn sync_wait_from_inside_async_poll_panics_cleanly() {
     use cmpth::traits::StackfulResumable;
     run(1, || {
         let h = spawn_async(async {
-            let slot: SuspendedTask<DefaultDualTaskSystem> = Default::default();
+            let slot: DualResumable<DefaultDualTaskSystem> = Default::default();
             // Misuse: this must panic, not attempt a real context switch on
             // top of run_async_poll's shared stack.
             StackfulResumable::wait_with(&slot, || {});

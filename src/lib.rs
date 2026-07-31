@@ -12,7 +12,7 @@
 //!   *continuation* is reified into something independently resumable
 //!   later (a real context-switch continuation for stackful ULTs, a
 //!   pollable task for stackless ones): [`UltWorker<S>`],
-//!   [`BasicSuspendedThread<S>`], sync primitives, scheduler. Sibling to
+//!   [`BasicStackfulOnlyResumable<S>`], sync primitives, scheduler. Sibling to
 //!   [`scoped`], whose defining property is the opposite — a
 //!   `parallel_call` call's own continuation is never reified/exposed,
 //!   so its implementation needs none of this machinery.
@@ -45,8 +45,8 @@ pub use resumable::stackless::lookup::InlineTlsCurrent;
 pub use resumable::common::pool::{DescPool, ReturnPool, SimplePool};
 pub use resumable::common::stack::{HeapStack, StackAlloc};
 pub use resumable::stackless::async_wait::SuspendedFuture;
-pub use resumable::dual::dual_wait::SuspendedTask;
-pub use resumable::stackful::suspended::{BasicSuspendedThread, UltSuspendedThread};
+pub use resumable::dual::dual_wait::DualResumable;
+pub use resumable::stackful::suspended::{BasicStackfulOnlyResumable, StackfulOnlyResumable};
 pub use resumable::stackful::sync::{Barrier as UltBarrier, McsDelegator, McsMutex, McsMutexGuard, McsCondvar, BarrierCore, MutexCore};
 pub use resumable::common::sync::{DualBarrier as UltDualBarrier, DualMutex as UltDualMutex, DualMutexGuard as UltDualMutexGuard};
 pub use resumable::stackful::sync::{delegator, Producer as DelegatorProducer};
@@ -66,13 +66,13 @@ pub use resumable::stackful::worker::ContextSwitcher;
 // `SchedulerSystem`) as well as stackful ULTs (`ThreadSystem`), and their
 // `Mutex`/`Barrier` are meant to be contended-together from either
 // calling convention -- so `UltIdentity` (whose blanket-derived `Mutex`/
-// `Barrier` use the stackful-only `BasicSuspendedThread`, with no
+// `Barrier` use the stackful-only `BasicStackfulOnlyResumable`, with no
 // async-wait capability) isn't used here. Everything it would have
 // generated is written out by hand instead, with `ThreadSystem::Mutex`/
-// `Barrier` bound to a `SuspendedTask`-parameterized `DualMutex`/
-// `DualBarrier`: since `SuspendedTask<S>` implements both
+// `Barrier` bound to a `DualResumable`-parameterized `DualMutex`/
+// `DualBarrier`: since `DualResumable<S>` implements both
 // `StackfulResumable` and `StacklessResumable` (unlike `UltIdentity`'s
-// default `BasicSuspendedThread`, stackful-only), one type satisfies
+// default `BasicStackfulOnlyResumable`, stackful-only), one type satisfies
 // both `StackfulMutex` and `StacklessMutex`, so a single instance is
 // genuinely shared and contended between stackful and stackless callers
 // -- not two separate locks that happen to have the same name.
@@ -114,7 +114,7 @@ impl resumable::stackful::system::StackfulSchedulerSystem for DefaultDualTaskSys
     type StackAlloc = resumable::common::stack::HeapStack;
     const STACK_SIZE: usize = 64 * 1024;
 
-    type SuspendedThread = resumable::stackful::suspended::BasicSuspendedThread<Self>;
+    type SuspendedThread = resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>;
 
     fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedTaskToken<resumable::common::desc::BasicTaskDesc> {
         resumable::dual::worker::pop_or_root_dual(wk)
@@ -142,9 +142,9 @@ impl ThreadSystem for DefaultDualTaskSystem {
         resumable::stackful::thread::spawn::<Self, T, F>(f)
     }
 
-    type Mutex<T: Send> = UltDualMutex<Self, T, SuspendedTask<Self>>;
-    type Barrier         = UltDualBarrier<Self, SuspendedTask<Self>>;
-    type SuspendedThread = resumable::stackful::suspended::BasicSuspendedThread<Self>;
+    type Mutex<T: Send> = UltDualMutex<Self, T, DualResumable<Self>>;
+    type Barrier         = UltDualBarrier<Self, DualResumable<Self>>;
+    type SuspendedThread = resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>;
     type Delegator<C: DelegatorConsumer<Self>> = McsDelegator<Self, C>;
     type ThreadSpecific<T: 'static> = resumable::stackful::tls::UltTls<Self, T>;
 }
@@ -182,7 +182,7 @@ impl resumable::stackful::system::StackfulSchedulerSystem for DefaultNestedDualT
     type StackAlloc = resumable::common::stack::HeapStack;
     const STACK_SIZE: usize = 64 * 1024;
 
-    type SuspendedThread = resumable::stackful::suspended::BasicSuspendedThread<Self>;
+    type SuspendedThread = resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>;
 
     fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedTaskToken<resumable::common::desc::BasicTaskDesc> {
         resumable::dual::worker::pop_or_root_dual(wk)
@@ -210,9 +210,9 @@ impl ThreadSystem for DefaultNestedDualTaskSystem {
         resumable::stackful::thread::spawn::<Self, T, F>(f)
     }
 
-    type Mutex<T: Send> = UltDualMutex<Self, T, SuspendedTask<Self>>;
-    type Barrier         = UltDualBarrier<Self, SuspendedTask<Self>>;
-    type SuspendedThread = resumable::stackful::suspended::BasicSuspendedThread<Self>;
+    type Mutex<T: Send> = UltDualMutex<Self, T, DualResumable<Self>>;
+    type Barrier         = UltDualBarrier<Self, DualResumable<Self>>;
+    type SuspendedThread = resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>;
     type Delegator<C: DelegatorConsumer<Self>> = McsDelegator<Self, C>;
     type ThreadSpecific<T: 'static> = resumable::stackful::tls::UltTls<Self, T>;
 }

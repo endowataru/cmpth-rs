@@ -152,7 +152,7 @@ impl<S: SchedulerSystem> UltWorker<S> {
     /// Peek at the raw pointer to the task currently running on this
     /// worker, without taking ownership — for callers that only need to
     /// read "what am I running right now" (sanity checks, `UltTls`,
-    /// `UltPoller`, `SuspendedTask::assert_on_real_ult`), never to move or
+    /// `UltPoller`, `DualResumable::assert_on_real_ult`), never to move or
     /// replace it. Null if nothing is running.
     ///
     /// # Safety of the shared read

@@ -4,7 +4,7 @@
 //! `stackless`-only) because `DualMutex<S, T, N>`/`DualBarrier<S, N>`
 //! conditionally implement `StackfulMutex`/`StacklessMutex` independently
 //! depending on what `N` provides; today's only concrete user
-//! (`SuspendedTask<S>`, satisfying both) happens to make them dual in
+//! (`DualResumable<S>`, satisfying both) happens to make them dual in
 //! practice, but nothing here requires that.
 
 pub mod dual_barrier;

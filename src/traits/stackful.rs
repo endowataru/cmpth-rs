@@ -235,7 +235,7 @@ pub trait StackfulResumable<S>: Resumable<S> {
     /// Switch directly to the parked continuation, pushing the caller's own
     /// continuation to the local deque. If the slot didn't hold a real
     /// continuation — only possible when `Self` also admits async waiters
-    /// (e.g. `SuspendedTask`) — falls back to waking it the
+    /// (e.g. `DualResumable`) — falls back to waking it the
     /// [`Resumable::notify`] way internally, so callers never need to
     /// branch on whether a real switch happened.
     fn enter(&self);

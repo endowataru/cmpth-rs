@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use cmpth::traits::Delegator as DelegatorTrait;
-use cmpth::{BasicSuspendedThread, DefaultDualTaskSystem, DelegatorConsumer, McsDelegator};
+use cmpth::{BasicStackfulOnlyResumable, DefaultDualTaskSystem, DelegatorConsumer, McsDelegator};
 
 mod common;
 use common::*;
@@ -24,7 +24,7 @@ use common::*;
 #[derive(Default)]
 struct AddWork {
     amount: u64,
-    sth: BasicSuspendedThread<DefaultDualTaskSystem>,
+    sth: BasicStackfulOnlyResumable<DefaultDualTaskSystem>,
 }
 
 struct Counter {
@@ -37,14 +37,14 @@ impl DelegatorConsumer<DefaultDualTaskSystem> for Counter {
     fn execute(
         &mut self,
         work: &mut AddWork,
-    ) -> (bool, Option<BasicSuspendedThread<DefaultDualTaskSystem>>) {
+    ) -> (bool, Option<BasicStackfulOnlyResumable<DefaultDualTaskSystem>>) {
         self.total.fetch_add(work.amount, Ordering::SeqCst);
         // Extract the delegator's parked continuation by value (it can't be
         // cloned) so consume() can notify() it after this returns.
         (true, Some(std::mem::take(&mut work.sth)))
     }
 
-    fn progress(&mut self) -> Option<BasicSuspendedThread<DefaultDualTaskSystem>> {
+    fn progress(&mut self) -> Option<BasicStackfulOnlyResumable<DefaultDualTaskSystem>> {
         None
     }
 

@@ -1,4 +1,4 @@
-//! [`SuspendedTask`] — the dual (ULT-or-async) wait-slot from
+//! [`DualResumable`] — the dual (ULT-or-async) wait-slot from
 //! `docs/sync-async-unification.md`.
 
 use crate::resumable::stackful::worker::StackfulWorker;
@@ -29,17 +29,17 @@ const ASYNC_TAG: usize = 1;
 /// possible into a genuine continuation. `wait_with`/`register` never need
 /// this: they only ever *write* a fresh registration into what must already
 /// be an empty slot, so there's no ambiguity about prior content.
-pub struct SuspendedTask<S: StackfulSchedulerSystem> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
+pub struct DualResumable<S: StackfulSchedulerSystem> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
     state: AtomicUsize,
     _marker: PhantomData<S>,
 }
 
-unsafe impl<S: StackfulSchedulerSystem> Send for SuspendedTask<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {}
-unsafe impl<S: StackfulSchedulerSystem> Sync for SuspendedTask<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {}
+unsafe impl<S: StackfulSchedulerSystem> Send for DualResumable<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {}
+unsafe impl<S: StackfulSchedulerSystem> Sync for DualResumable<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {}
 
-impl<S: StackfulSchedulerSystem> Default for SuspendedTask<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
+impl<S: StackfulSchedulerSystem> Default for DualResumable<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
     fn default() -> Self {
-        SuspendedTask { state: AtomicUsize::new(EMPTY), _marker: PhantomData }
+        DualResumable { state: AtomicUsize::new(EMPTY), _marker: PhantomData }
     }
 }
 
@@ -62,7 +62,7 @@ where
     );
 }
 
-impl<S: StackfulSchedulerSystem> SuspendedTask<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
+impl<S: StackfulSchedulerSystem> DualResumable<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
     /// Wake whatever `v` (a raw slot value already taken via
     /// `state.swap(EMPTY, ..)`) represents: push a real ULT continuation to
     /// the local deque, or wake a boxed [`Waker`]. `v == EMPTY` is a no-op.
@@ -78,13 +78,13 @@ impl<S: StackfulSchedulerSystem> SuspendedTask<S> where S::Desc: StackfulTaskDes
             w.wake();
         } else {
             let wk = UltWorker::<S>::current()
-                .expect("cmpth: SuspendedTask wake called outside a worker");
+                .expect("cmpth: DualResumable wake called outside a worker");
             wk.push_local_top(SuspendedTaskToken(v as *mut S::Desc));
         }
     }
 }
 
-impl<S: StackfulSchedulerSystem> Resumable<S> for SuspendedTask<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
+impl<S: StackfulSchedulerSystem> Resumable<S> for DualResumable<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
     fn is_set(&self) -> bool {
         self.state.load(Ordering::Acquire) != EMPTY
     }
@@ -95,10 +95,10 @@ impl<S: StackfulSchedulerSystem> Resumable<S> for SuspendedTask<S> where S::Desc
     }
 }
 
-impl<S: StackfulSchedulerSystem> StackfulResumable<S> for SuspendedTask<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
+impl<S: StackfulSchedulerSystem> StackfulResumable<S> for DualResumable<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
     fn wait_with<F: FnOnce()>(&self, f: F) {
         let wk = UltWorker::<S>::current()
-            .expect("cmpth: SuspendedTask::wait_with called outside a worker");
+            .expect("cmpth: DualResumable::wait_with called outside a worker");
         assert_on_real_ult(wk);
         let slot = &self.state as *const AtomicUsize;
         wk.suspend_to_sched(move |_wk, prev| {
@@ -110,7 +110,7 @@ impl<S: StackfulSchedulerSystem> StackfulResumable<S> for SuspendedTask<S> where
 
     fn wait_with_cond<F: FnOnce() -> bool>(&self, f: F) {
         let wk = UltWorker::<S>::current()
-            .expect("cmpth: SuspendedTask::wait_with_cond called outside a worker");
+            .expect("cmpth: DualResumable::wait_with_cond called outside a worker");
         assert_on_real_ult(wk);
         let slot = &self.state as *const AtomicUsize;
         wk.cond_suspend_to_sched(move |_wk, prev| {
@@ -127,7 +127,7 @@ impl<S: StackfulSchedulerSystem> StackfulResumable<S> for SuspendedTask<S> where
 
     fn enter(&self) {
         let wk = UltWorker::<S>::current()
-            .expect("cmpth: SuspendedTask::enter called outside a worker");
+            .expect("cmpth: DualResumable::enter called outside a worker");
         assert_on_real_ult(wk);
         let v = self.state.swap(EMPTY, Ordering::AcqRel);
         if v != EMPTY && v & ASYNC_TAG == 0 {
@@ -141,9 +141,9 @@ impl<S: StackfulSchedulerSystem> StackfulResumable<S> for SuspendedTask<S> where
     }
 
     fn swap(&self, next: &Self) {
-        debug_assert!(!self.is_set(), "SuspendedTask::swap: self must be empty");
+        debug_assert!(!self.is_set(), "DualResumable::swap: self must be empty");
         let wk = UltWorker::<S>::current()
-            .expect("cmpth: SuspendedTask::swap called outside a worker");
+            .expect("cmpth: DualResumable::swap called outside a worker");
         assert_on_real_ult(wk);
         let v = next.state.swap(EMPTY, Ordering::AcqRel);
         if v != EMPTY && v & ASYNC_TAG == 0 {
@@ -160,11 +160,11 @@ impl<S: StackfulSchedulerSystem> StackfulResumable<S> for SuspendedTask<S> where
     }
 }
 
-impl<S: StackfulSchedulerSystem> StacklessResumable<S> for SuspendedTask<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
+impl<S: StackfulSchedulerSystem> StacklessResumable<S> for DualResumable<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
     fn register(&self, cx: &mut Context<'_>) {
         let boxed = Box::new(cx.waker().clone());
         let ptr = Box::into_raw(boxed) as usize | ASYNC_TAG;
         let old = self.state.swap(ptr, Ordering::AcqRel);
-        debug_assert_eq!(old, EMPTY, "SuspendedTask::register called on an already-set slot");
+        debug_assert_eq!(old, EMPTY, "DualResumable::register called on an already-set slot");
     }
 }

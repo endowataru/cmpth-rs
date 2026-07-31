@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use cmpth::resumable::stackful::sync::mcs_delegator::McsQueue;
-use cmpth::{delegator, BasicSuspendedThread, DefaultDualTaskSystem, DelegatorConsumer};
+use cmpth::{delegator, BasicStackfulOnlyResumable, DefaultDualTaskSystem, DelegatorConsumer};
 
 mod common;
 use common::*;
@@ -16,7 +16,7 @@ use common::*;
 #[derive(Default)]
 struct AddWork {
     amount: u64,
-    sth: BasicSuspendedThread<DefaultDualTaskSystem>,
+    sth: BasicStackfulOnlyResumable<DefaultDualTaskSystem>,
 }
 
 struct Counter {
@@ -29,12 +29,12 @@ impl DelegatorConsumer<DefaultDualTaskSystem> for Counter {
     fn execute(
         &mut self,
         work: &mut AddWork,
-    ) -> (bool, Option<BasicSuspendedThread<DefaultDualTaskSystem>>) {
+    ) -> (bool, Option<BasicStackfulOnlyResumable<DefaultDualTaskSystem>>) {
         self.total.fetch_add(work.amount, Ordering::SeqCst);
         (true, Some(std::mem::take(&mut work.sth)))
     }
 
-    fn progress(&mut self) -> Option<BasicSuspendedThread<DefaultDualTaskSystem>> {
+    fn progress(&mut self) -> Option<BasicStackfulOnlyResumable<DefaultDualTaskSystem>> {
         None
     }
 
