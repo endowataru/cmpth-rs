@@ -7,21 +7,21 @@ use std::cell::UnsafeCell;
 use std::collections::VecDeque;
 
 use crate::spin::SpinLock;
-use crate::resumable::common::desc::{SuspendedUlt, TaskDesc};
+use crate::resumable::common::desc::{SuspendedTaskToken, TaskDesc};
 
 /// Contract: `push_top`, `push_bottom` and `try_pop_top` are only called by
 /// the worker that owns the deque; `try_steal_bottom` may be called from any
 /// thread.
 ///
-/// Generic over the descriptor type `D` (see [`SuspendedUlt`]); every
+/// Generic over the descriptor type `D` (see [`SuspendedTaskToken`]); every
 /// concrete system today sets `D = BasicTaskDesc` via
 /// [`crate::SchedulerSystem::Desc`].
 pub trait WorkerDeque<D: TaskDesc>: Default + Send + Sync + 'static {
-    fn push_top(&self, c: SuspendedUlt<D>);
-    fn push_bottom(&self, c: SuspendedUlt<D>);
-    fn try_pop_top(&self) -> Option<SuspendedUlt<D>>;
+    fn push_top(&self, c: SuspendedTaskToken<D>);
+    fn push_bottom(&self, c: SuspendedTaskToken<D>);
+    fn try_pop_top(&self) -> Option<SuspendedTaskToken<D>>;
     /// Called from thief workers.
-    fn try_steal_bottom(&self) -> Option<SuspendedUlt<D>>;
+    fn try_steal_bottom(&self) -> Option<SuspendedTaskToken<D>>;
 }
 
 /// Default deque: lock-free Chase-Lev (crossbeam).  The owner pushes/pops the
@@ -34,8 +34,8 @@ pub trait WorkerDeque<D: TaskDesc>: Default + Send + Sync + 'static {
 /// [`SpinDeque`] if exact yield ordering matters more than throughput.
 pub struct CrossbeamDeque<D: TaskDesc> {
     /// Owner-only end (see the trait contract above).
-    local: UnsafeCell<crossbeam_deque::Worker<SuspendedUlt<D>>>,
-    stealer: crossbeam_deque::Stealer<SuspendedUlt<D>>,
+    local: UnsafeCell<crossbeam_deque::Worker<SuspendedTaskToken<D>>>,
+    stealer: crossbeam_deque::Stealer<SuspendedTaskToken<D>>,
 }
 
 unsafe impl<D: TaskDesc> Send for CrossbeamDeque<D> {}
@@ -52,19 +52,19 @@ impl<D: TaskDesc> Default for CrossbeamDeque<D> {
 }
 
 impl<D: TaskDesc> WorkerDeque<D> for CrossbeamDeque<D> {
-    fn push_top(&self, c: SuspendedUlt<D>) {
+    fn push_top(&self, c: SuspendedTaskToken<D>) {
         unsafe { &*self.local.get() }.push(c);
     }
 
-    fn push_bottom(&self, c: SuspendedUlt<D>) {
+    fn push_bottom(&self, c: SuspendedTaskToken<D>) {
         unsafe { &*self.local.get() }.push(c);
     }
 
-    fn try_pop_top(&self) -> Option<SuspendedUlt<D>> {
+    fn try_pop_top(&self) -> Option<SuspendedTaskToken<D>> {
         unsafe { &*self.local.get() }.pop()
     }
 
-    fn try_steal_bottom(&self) -> Option<SuspendedUlt<D>> {
+    fn try_steal_bottom(&self) -> Option<SuspendedTaskToken<D>> {
         loop {
             match self.stealer.steal() {
                 crossbeam_deque::Steal::Success(c) => return Some(c),
@@ -79,7 +79,7 @@ impl<D: TaskDesc> WorkerDeque<D> for CrossbeamDeque<D> {
 /// replace with a lock-free Chase-Lev deque via the policy when profiling
 /// says so.
 pub struct SpinDeque<D: TaskDesc> {
-    q: SpinLock<VecDeque<SuspendedUlt<D>>>,
+    q: SpinLock<VecDeque<SuspendedTaskToken<D>>>,
 }
 
 impl<D: TaskDesc> Default for SpinDeque<D> {
@@ -89,19 +89,19 @@ impl<D: TaskDesc> Default for SpinDeque<D> {
 }
 
 impl<D: TaskDesc> WorkerDeque<D> for SpinDeque<D> {
-    fn push_top(&self, c: SuspendedUlt<D>) {
+    fn push_top(&self, c: SuspendedTaskToken<D>) {
         self.q.lock().push_front(c);
     }
 
-    fn push_bottom(&self, c: SuspendedUlt<D>) {
+    fn push_bottom(&self, c: SuspendedTaskToken<D>) {
         self.q.lock().push_back(c);
     }
 
-    fn try_pop_top(&self) -> Option<SuspendedUlt<D>> {
+    fn try_pop_top(&self) -> Option<SuspendedTaskToken<D>> {
         self.q.lock().pop_front()
     }
 
-    fn try_steal_bottom(&self) -> Option<SuspendedUlt<D>> {
+    fn try_steal_bottom(&self) -> Option<SuspendedTaskToken<D>> {
         self.q.lock().pop_back()
     }
 }

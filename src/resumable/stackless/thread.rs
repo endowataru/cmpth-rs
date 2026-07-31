@@ -12,7 +12,7 @@ use std::task::{Context, Poll};
 
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
-use crate::resumable::common::desc::{JoinState, SuspendedUlt, TaskDesc, TaskDescAlloc, WakeOutcome, WakerTaskDesc};
+use crate::resumable::common::desc::{JoinState, SuspendedTaskToken, TaskDesc, TaskDescAlloc, WakeOutcome, WakerTaskDesc};
 use crate::resumable::stackless::desc::{AsyncTaskDesc, TaskPollResult};
 use crate::resumable::common::pool::{DescPool, DynamicPool};
 use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
@@ -262,7 +262,7 @@ where
     unsafe { (*desc).poll_fn().set(Some(poll_spawned_task::<S, T, F>)) };
 
     // Push to the deque as a ready-to-poll task.
-    wk.push_local_top(SuspendedUlt(desc));
+    wk.push_local_top(SuspendedTaskToken(desc));
 
     JoinHandle { desc, result_ptr, result_drop: drop_stack_result::<T>, _marker: PhantomData }
 }
@@ -350,7 +350,7 @@ where
             // from within a worker (execute → run_async_poll → poll_fn).
             let wk = UltWorker::<S>::current()
                 .expect("cmpth: poll_spawned_task called outside a worker");
-            wk.push_local_top(SuspendedUlt(j_desc));
+            wk.push_local_top(SuspendedTaskToken(j_desc));
         }
         JoinState::AsyncWaker(w) => unsafe { Box::from_raw(w) }.wake(),
         JoinState::AsyncJoiner(j) => {
@@ -495,7 +495,7 @@ impl<S: SchedulerSystem, F> Drop for RecursionFrame<S, F> {
 /// stackful root. `has_handle = false` (no `JoinHandle` is produced), so
 /// completion runs the same `JoinState::Detached` path as the stackful
 /// root's `exit()` — reuses [`poll_spawned_task`] directly with `T = ()`.
-pub(crate) fn fork_async_parent_first<S, F>(f: F, scheduler: *const ()) -> SuspendedUlt<S::Desc>
+pub(crate) fn fork_async_parent_first<S, F>(f: F, scheduler: *const ()) -> SuspendedTaskToken<S::Desc>
 where
     S: SchedulerSystem,
     S::Desc: AsyncTaskDesc,
@@ -529,5 +529,5 @@ where
     unsafe { f_ptr.write(f) };
     unsafe { (*desc).poll_fn().set(Some(poll_spawned_task::<S, (), F>)) };
 
-    SuspendedUlt(desc)
+    SuspendedTaskToken(desc)
 }

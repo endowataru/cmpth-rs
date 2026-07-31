@@ -8,14 +8,14 @@
 use crate::resumable::common::scheduler::Scheduler;
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
-use crate::resumable::common::desc::{SuspendedUlt, TaskDesc, WakerTaskDesc};
+use crate::resumable::common::desc::{SuspendedTaskToken, TaskDesc, WakerTaskDesc};
 use crate::resumable::common::external_queue::ExternalQueue;
 
 /// # Safety
 /// `desc` must be a currently-suspended task whose ctx has just been cleared.
 pub(crate) unsafe fn push_continuation<S: SchedulerSystem>(desc: *mut S::Desc) where <S as SchedulerSystem>::Desc: WakerTaskDesc {
     match UltWorker::<S>::current() {
-        Some(wk) => wk.push_local_top(SuspendedUlt(desc)),
+        Some(wk) => wk.push_local_top(SuspendedTaskToken(desc)),
         None => {
             let scheduler = unsafe { (*desc).scheduler().get() };
             assert!(
@@ -24,7 +24,7 @@ pub(crate) unsafe fn push_continuation<S: SchedulerSystem>(desc: *mut S::Desc) w
                  and task has no scheduler reference"
             );
             let scheduler = unsafe { &*(scheduler as *const Scheduler<S>) };
-            scheduler.external_queue.push(SuspendedUlt(desc));
+            scheduler.external_queue.push(SuspendedTaskToken(desc));
         }
     }
 }

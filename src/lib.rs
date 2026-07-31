@@ -36,7 +36,7 @@ pub use scoped::ScopedTaskSystem;
 pub use os::{OsBarrier, OsCondvar, OsMutex, OsPoller, OsSystem, OsTls};
 pub use resumable::stackful::waker::UltPoller;
 pub use resumable::common::deque::{CrossbeamDeque, SpinDeque, WorkerDeque};
-pub use resumable::common::desc::{BasicTaskDesc, StackfulOnlyTaskDesc, StacklessOnlyTaskDesc, SuspendedUlt, TaskDesc, TaskDescAlloc};
+pub use resumable::common::desc::{BasicTaskDesc, StackfulOnlyTaskDesc, StacklessOnlyTaskDesc, SuspendedTaskToken, TaskDesc, TaskDescAlloc};
 pub use resumable::stackful::desc::StackfulTaskDesc;
 pub use resumable::stackless::desc::AsyncTaskDesc;
 pub use resumable::common::external_queue::{ExternalQueue, PollerUltQueue, StealPathQueue};
@@ -100,7 +100,7 @@ impl resumable::common::system::SchedulerSystem for DefaultDualTaskSystem {
     // async task, so dispatch needs the poll_fn check (see execute_dual's
     // doc comment / StackfulSchedulerSystem::pop_or_root below for why this
     // can't just be the stackful-only default).
-    fn execute(wk: &UltWorker<Self>, cont: SuspendedUlt<resumable::common::desc::BasicTaskDesc>) {
+    fn execute(wk: &UltWorker<Self>, cont: SuspendedTaskToken<resumable::common::desc::BasicTaskDesc>) {
         resumable::dual::worker::execute_dual(wk, cont)
     }
 
@@ -116,7 +116,7 @@ impl resumable::stackful::system::StackfulSchedulerSystem for DefaultDualTaskSys
 
     type SuspendedThread = resumable::stackful::suspended::BasicSuspendedThread<Self>;
 
-    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedUlt<resumable::common::desc::BasicTaskDesc> {
+    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedTaskToken<resumable::common::desc::BasicTaskDesc> {
         resumable::dual::worker::pop_or_root_dual(wk)
     }
 }
@@ -168,7 +168,7 @@ impl resumable::common::system::SchedulerSystem for DefaultNestedDualTaskSystem 
         TlsSlot::from_anchor(&A)
     }
 
-    fn execute(wk: &UltWorker<Self>, cont: SuspendedUlt<resumable::common::desc::BasicTaskDesc>) {
+    fn execute(wk: &UltWorker<Self>, cont: SuspendedTaskToken<resumable::common::desc::BasicTaskDesc>) {
         resumable::dual::worker::execute_dual(wk, cont)
     }
 
@@ -184,7 +184,7 @@ impl resumable::stackful::system::StackfulSchedulerSystem for DefaultNestedDualT
 
     type SuspendedThread = resumable::stackful::suspended::BasicSuspendedThread<Self>;
 
-    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedUlt<resumable::common::desc::BasicTaskDesc> {
+    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedTaskToken<resumable::common::desc::BasicTaskDesc> {
         resumable::dual::worker::pop_or_root_dual(wk)
     }
 }

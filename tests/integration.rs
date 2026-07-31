@@ -716,7 +716,7 @@ impl cmpth::SchedulerSystem for ManualSystem {
     }
 
     // Stackful-only: no poll_fn tag check, see `execute_stackful`'s doc comment.
-    fn execute(wk: &UltWorker<Self>, cont: cmpth::SuspendedUlt<BasicTaskDesc>) {
+    fn execute(wk: &UltWorker<Self>, cont: cmpth::SuspendedTaskToken<BasicTaskDesc>) {
         cmpth::resumable::stackful::worker::execute_stackful(wk, cont)
     }
 

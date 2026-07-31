@@ -47,7 +47,7 @@ unsafe impl<S: SchedulerSystem> Sync for Scheduler<S> {}
 
 pub(crate) fn worker_loop<S: SchedulerSystem>(wk: &UltWorker<S>) {
     S::worker_tls().set(wk as *const UltWorker<S> as *mut UltWorker<S>);
-    wk.set_cur_task(crate::resumable::common::desc::RunningTask(
+    wk.set_cur_task(crate::resumable::common::desc::RunningTaskToken(
         wk.root_desc() as *const _ as *mut _,
     ));
 

@@ -10,14 +10,14 @@ use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulLocalQueue};
-use crate::resumable::common::desc::SuspendedUlt;
+use crate::resumable::common::desc::SuspendedTaskToken;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::stackless::desc::AsyncTaskDesc;
 use crate::resumable::common::pool::DescPool;
 
 /// `execute` body for dual systems: today's original logic — check
 /// `poll_fn` first, and either poll inline or perform a real context switch.
-pub fn execute_dual<S>(wk: &UltWorker<S>, cont: SuspendedUlt<S::Desc>)
+pub fn execute_dual<S>(wk: &UltWorker<S>, cont: SuspendedTaskToken<S::Desc>)
 where
     S: StackfulSchedulerSystem,
     S::Desc: StackfulTaskDesc + AsyncTaskDesc,
@@ -38,7 +38,7 @@ where
 /// `pop_or_root` body for dual systems: today's original logic — an async
 /// task popped off the top has no saved context to switch into, so requeue
 /// it and fall back to the root (scheduler-loop) continuation instead.
-pub fn pop_or_root_dual<S>(wk: &UltWorker<S>) -> SuspendedUlt<S::Desc>
+pub fn pop_or_root_dual<S>(wk: &UltWorker<S>) -> SuspendedTaskToken<S::Desc>
 where
     S: StackfulSchedulerSystem,
     S::Desc: StackfulTaskDesc + AsyncTaskDesc,
