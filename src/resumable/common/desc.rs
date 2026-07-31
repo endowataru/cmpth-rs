@@ -29,8 +29,8 @@
 //! comment for why its `ctx`/`poll_fn` union needs the `commit_as_ctx`/
 //! `commit_as_poll_fn` hooks the other two never touch). All three mirror
 //! each other's field grouping for everything they share (join protocol /
-//! pool metadata / TLS / stack fields stay in the same relative order) so
-//! the "hot fields share a cache line" intent (see each struct's own
+//! TLS / stack fields stay in the same relative order) so the "hot fields
+//! share a cache line" intent (see each struct's own
 //! `#[repr(C)]` comment) survives the split instead of falling out of
 //! struct-field order by accident.
 //!
