@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 use crate::traits::{Resumable, StackfulResumable};
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::desc::SuspendedUlt;
+use crate::resumable::common::desc::SuspendedTaskToken;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulWorker};
@@ -40,12 +40,12 @@ where
 
     // --- helpers ------------------------------------------------------------
 
-    fn take_cont(&self) -> SuspendedUlt<<Self::StackfulSchedulerSystem as SchedulerSystem>::Desc> {
+    fn take_cont(&self) -> SuspendedTaskToken<<Self::StackfulSchedulerSystem as SchedulerSystem>::Desc> {
         // `swap` (not load+store) so that concurrent take/cancel pairs can
         // never both obtain the continuation.
         let c = self.cont().swap(ptr::null_mut(), Ordering::Acquire);
         assert!(!c.is_null(), "UltSuspendedThread: no parked continuation");
-        SuspendedUlt(c)
+        SuspendedTaskToken(c)
     }
 
     fn wk() -> &'static UltWorker<Self::StackfulSchedulerSystem> {
@@ -79,7 +79,7 @@ where
             if !f() {
                 let c = unsafe { (*slot).swap(ptr::null_mut(), Ordering::Acquire) };
                 debug_assert!(!c.is_null());
-                *prev = Some(SuspendedUlt(c));
+                *prev = Some(SuspendedTaskToken(c));
             }
         });
     }

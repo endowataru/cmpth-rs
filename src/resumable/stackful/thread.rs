@@ -15,7 +15,7 @@ use crate::traits::stackful::JoinHandleLike;
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::desc::{JoinState, SuspendedUlt, TaskDesc, TaskDescAlloc, WakerTaskDesc, JS_FINISHED};
+use crate::resumable::common::desc::{JoinState, SuspendedTaskToken, TaskDesc, TaskDescAlloc, WakerTaskDesc, JS_FINISHED};
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, Worker};
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulWorker};
@@ -96,7 +96,7 @@ where
 ///
 /// `scheduler` is a type-erased `*const Scheduler<S>` stored on the
 /// descriptor for external-thread wake support.
-pub(crate) fn fork_parent_first<S: StackfulSchedulerSystem>(body: ErasedBody, scheduler: *const ()) -> SuspendedUlt<S::Desc> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+pub(crate) fn fork_parent_first<S: StackfulSchedulerSystem>(body: ErasedBody, scheduler: *const ()) -> SuspendedTaskToken<S::Desc> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     use crate::resumable::common::stack::StackAlloc as _;
     let desc = S::Desc::alloc_with(S::StackAlloc::alloc_stack(S::STACK_SIZE).into(), false);
     unsafe { (*desc).commit_as_ctx() };
@@ -109,7 +109,7 @@ pub(crate) fn fork_parent_first<S: StackfulSchedulerSystem>(body: ErasedBody, sc
         S::Ctx::make_context((*desc).stack_top(), task_entry::<S>, arg as *mut ())
     };
     unsafe { (*desc).init_saved_context(ctx.0) };
-    SuspendedUlt(desc)
+    SuspendedTaskToken(desc)
 }
 
 unsafe extern "C" fn task_entry<S: StackfulSchedulerSystem>(transfer: Transfer, arg: *mut ()) -> ! where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
@@ -149,7 +149,7 @@ fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
             // Direct handoff: switch straight to the parked joiner.
             let sr = match val { Ok(v) => StackResult::Ok(v), Err(e) => StackResult::Err(e) };
             unsafe { result_ptr.write(sr) };
-            wk.exit_to_cont(SuspendedUlt(j_desc), move |_wk| unsafe {
+            wk.exit_to_cont(SuspendedTaskToken(j_desc), move |_wk| unsafe {
                 (*desc).commit_finished();
             })
         }
@@ -167,7 +167,7 @@ fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
                     // No joiner appeared: the JoinHandle collects the result.
                     JoinState::Running => {}
                     // A joiner registered while we were exiting.
-                    JoinState::SyncJoiner(j) => wk.push_local_top(SuspendedUlt(j)),
+                    JoinState::SyncJoiner(j) => wk.push_local_top(SuspendedTaskToken(j)),
                     JoinState::AsyncWaker(w) => unsafe { Box::from_raw(w) }.wake(),
                     JoinState::AsyncJoiner(j) => unsafe { crate::resumable::stackless::waker::try_wake_async::<S>(j) },
                     // The handle was dropped while we were exiting: the
@@ -188,7 +188,7 @@ fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
 fn exit<S: StackfulSchedulerSystem>(wk: &UltWorker<S>, desc: *mut S::Desc) -> ! where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     match unsafe { (*desc).read_join_state() } {
         JoinState::SyncJoiner(j_desc) => {
-            wk.exit_to_cont(SuspendedUlt(j_desc), move |_wk| unsafe {
+            wk.exit_to_cont(SuspendedTaskToken(j_desc), move |_wk| unsafe {
                 (*desc).commit_finished();
             })
         }
@@ -197,7 +197,7 @@ fn exit<S: StackfulSchedulerSystem>(wk: &UltWorker<S>, desc: *mut S::Desc) -> ! 
         _ => wk.exit_to_sched(move |wk| {
             match unsafe { (*desc).publish_finished() } {
                 JoinState::Running => {}
-                JoinState::SyncJoiner(j) => wk.push_local_top(SuspendedUlt(j)),
+                JoinState::SyncJoiner(j) => wk.push_local_top(SuspendedTaskToken(j)),
                 JoinState::AsyncWaker(w) => unsafe { Box::from_raw(w) }.wake(),
                 JoinState::AsyncJoiner(j) => unsafe { crate::resumable::stackless::waker::try_wake_async::<S>(j) },
                 JoinState::Detached => unsafe { wk.free_task(desc) },

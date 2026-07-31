@@ -45,7 +45,7 @@ impl Latch {
 
 /// Type-erased, two-word reference to a job living on someone's native
 /// stack frame. Never separately allocated — the analogue of
-/// `SuspendedUlt<D>`, but pointing at a stack value instead of a pooled
+/// `SuspendedTaskToken<D>`, but pointing at a stack value instead of a pooled
 /// descriptor.
 #[derive(Clone, Copy)]
 pub(super) struct JobRef {

@@ -8,7 +8,7 @@ use std::task::{RawWaker, Waker};
 
 use crate::resumable::common::worker::{LocalQueue, UltWorker};
 use crate::resumable::common::system::SchedulerSystem;
-use crate::resumable::common::desc::{SuspendedUlt, TaskDesc, WakerTaskDesc};
+use crate::resumable::common::desc::{SuspendedTaskToken, TaskDesc, WakerTaskDesc};
 use crate::resumable::stackless::desc::{AsyncTaskDesc, TaskPollFn, TaskPollResult};
 use crate::resumable::common::pool::DescPool;
 
@@ -88,7 +88,7 @@ pub(crate) fn run_async_poll<S>(
                 let parked = unsafe { (*desc).park_after_poll() };
                 wk.polling_async.set(prev_polling);
                 if !parked {
-                    wk.push_local_top(SuspendedUlt(desc));
+                    wk.push_local_top(SuspendedTaskToken(desc));
                 }
                 return;
             }
@@ -106,7 +106,7 @@ pub(crate) fn run_async_poll<S>(
 /// `execute` body for stackless-only systems: every popped continuation is
 /// a `spawn_async` task, so always poll — no `poll_fn` tag check, because
 /// there is nothing else it could be.
-pub fn execute_async<S>(wk: &UltWorker<S>, cont: SuspendedUlt<S::Desc>)
+pub fn execute_async<S>(wk: &UltWorker<S>, cont: SuspendedTaskToken<S::Desc>)
 where
     S: SchedulerSystem,
     S::Desc: AsyncTaskDesc,

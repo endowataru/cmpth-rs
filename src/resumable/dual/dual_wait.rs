@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Waker};
 
 use crate::traits::{Resumable, StackfulResumable, StacklessResumable};
-use crate::resumable::common::desc::{SuspendedUlt, TaskDesc};
+use crate::resumable::common::desc::{SuspendedTaskToken, TaskDesc};
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::stackless::desc::AsyncTaskDesc;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
@@ -79,7 +79,7 @@ impl<S: StackfulSchedulerSystem> SuspendedTask<S> where S::Desc: StackfulTaskDes
         } else {
             let wk = UltWorker::<S>::current()
                 .expect("cmpth: SuspendedTask wake called outside a worker");
-            wk.push_local_top(SuspendedUlt(v as *mut S::Desc));
+            wk.push_local_top(SuspendedTaskToken(v as *mut S::Desc));
         }
     }
 }
@@ -120,7 +120,7 @@ impl<S: StackfulSchedulerSystem> StackfulResumable<S> for SuspendedTask<S> where
             if !f() {
                 let v = unsafe { (*slot).swap(EMPTY, Ordering::Acquire) };
                 debug_assert_ne!(v, EMPTY);
-                *prev = Some(SuspendedUlt(v as *mut S::Desc));
+                *prev = Some(SuspendedTaskToken(v as *mut S::Desc));
             }
         });
     }
@@ -131,7 +131,7 @@ impl<S: StackfulSchedulerSystem> StackfulResumable<S> for SuspendedTask<S> where
         assert_on_real_ult(wk);
         let v = self.state.swap(EMPTY, Ordering::AcqRel);
         if v != EMPTY && v & ASYNC_TAG == 0 {
-            let c = SuspendedUlt(v as *mut S::Desc);
+            let c = SuspendedTaskToken(v as *mut S::Desc);
             wk.suspend_to_cont(c, |wk, prev| wk.push_local_top(prev));
         } else {
             // Not a real continuation — no context jump is possible here,
@@ -147,7 +147,7 @@ impl<S: StackfulSchedulerSystem> StackfulResumable<S> for SuspendedTask<S> where
         assert_on_real_ult(wk);
         let v = next.state.swap(EMPTY, Ordering::AcqRel);
         if v != EMPTY && v & ASYNC_TAG == 0 {
-            let c = SuspendedUlt(v as *mut S::Desc);
+            let c = SuspendedTaskToken(v as *mut S::Desc);
             let slot = &self.state as *const AtomicUsize;
             wk.suspend_to_cont(c, move |_wk, prev| {
                 unsafe { (*slot).store(prev.into_raw() as usize, Ordering::Release) };

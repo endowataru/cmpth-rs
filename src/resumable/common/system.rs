@@ -9,7 +9,7 @@ use crate::traits::common::TaskSystem;
 use crate::traits::stackful::ThreadSystem;
 use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::external_queue::ExternalQueue;
-use crate::resumable::common::desc::{SuspendedUlt, TaskDescAlloc};
+use crate::resumable::common::desc::{SuspendedTaskToken, TaskDescAlloc};
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::pool::{DescPool, DynamicPool};
 use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
@@ -28,7 +28,7 @@ pub trait SchedulerSystem: Sized + Send + Sync + 'static {
 
     /// Task descriptor type for this system. Every concrete system today
     /// sets this to `BasicTaskDesc`; the associated type exists so
-    /// `SuspendedUlt`/`WorkerDeque`/`DescPool`/the worker traits never
+    /// `SuspendedTaskToken`/`WorkerDeque`/`DescPool`/the worker traits never
     /// hardcode a concrete descriptor, in preparation for narrower
     /// stackful-only/stackless-only descriptor types later.
     type Desc: TaskDescAlloc;
@@ -95,7 +95,7 @@ pub trait SchedulerSystem: Sized + Send + Sync + 'static {
     /// This is ordinary trait-method overriding, not specialization: each
     /// concrete marker struct gets exactly one `impl SchedulerSystem for
     /// Self` block, so the compiler picks the right body statically.
-    fn execute(wk: &UltWorker<Self>, cont: SuspendedUlt<Self::Desc>);
+    fn execute(wk: &UltWorker<Self>, cont: SuspendedTaskToken<Self::Desc>);
 
     /// Free a finished task's descriptor once its `JoinHandle` is done with
     /// it (`take_result`/`Drop`, both in `thread.rs`).

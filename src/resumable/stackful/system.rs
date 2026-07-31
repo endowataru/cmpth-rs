@@ -23,7 +23,7 @@ use crate::traits::stackful::ThreadSystem;
 use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::system::SchedulerSystem;
-use crate::resumable::common::desc::SuspendedUlt;
+use crate::resumable::common::desc::SuspendedTaskToken;
 use crate::resumable::common::stack::StackAlloc;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::stackful::suspended::UltSuspendedThread;
@@ -67,7 +67,7 @@ where
     /// continuation. Dual configs override with
     /// [`crate::resumable::dual::worker::pop_or_root_dual`], which requeues an async
     /// task popped off the top instead of trying to switch into it.
-    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedUlt<Self::Desc> {
+    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedTaskToken<Self::Desc> {
         crate::resumable::stackful::worker::pop_or_root_stackful(wk)
     }
 }
@@ -237,7 +237,7 @@ impl<M: UltIdentity> SchedulerSystem for M {
     // Stackful-only: always a real context switch, no poll_fn tag check —
     // `execute_stackful`'s whole point is that this bound never needs
     // `AsyncTaskDesc` at all.
-    fn execute(wk: &UltWorker<Self>, cont: SuspendedUlt<M::Desc>) {
+    fn execute(wk: &UltWorker<Self>, cont: SuspendedTaskToken<M::Desc>) {
         crate::resumable::stackful::worker::execute_stackful(wk, cont)
     }
 

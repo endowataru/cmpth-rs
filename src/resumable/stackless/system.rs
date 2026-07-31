@@ -130,7 +130,7 @@ where
 /// associated types can't carry defaults on stable Rust.
 ///
 /// ```
-/// use cmpth::SuspendedUlt;
+/// use cmpth::SuspendedTaskToken;
 /// use cmpth::{ScopedStacklessTaskSystem, StacklessTaskSystem, ThreadSystem};
 ///
 /// pub struct MyAsyncMarker;
@@ -213,7 +213,7 @@ impl<M: UltAsyncIdentity> SchedulerSystem for UltAsyncSystem<M> {
 
     // Stackless-only: always poll, never switch — no poll_fn tag check,
     // because every task on this system is a poll_fn task.
-    fn execute(wk: &UltWorker<Self>, cont: crate::resumable::common::desc::SuspendedUlt<M::Desc>) {
+    fn execute(wk: &UltWorker<Self>, cont: crate::resumable::common::desc::SuspendedTaskToken<M::Desc>) {
         crate::resumable::stackless::worker::execute_async(wk, cont)
     }
 

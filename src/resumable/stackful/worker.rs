@@ -14,7 +14,7 @@ use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, Worker};
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::desc::{RunningTask, SuspendedUlt, TaskDesc};
+use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, TaskDesc};
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 
 // ---------------------------------------------------------------------------
@@ -37,27 +37,27 @@ where
     /// Save the current task's context, switch to `next`, run `f(wk, prev)`
     /// on that stack where `prev` is the just-saved continuation, and return
     /// when the current task is later resumed.
-    fn suspend_to_cont<F>(&self, next: SuspendedUlt<S::Desc>, f: F) -> &Self
+    fn suspend_to_cont<F>(&self, next: SuspendedTaskToken<S::Desc>, f: F) -> &Self
     where
-        F: FnOnce(&Self, SuspendedUlt<S::Desc>);
+        F: FnOnce(&Self, SuspendedTaskToken<S::Desc>);
 
     /// Like [`suspend_to_cont`](Self::suspend_to_cont), but `f` may cancel
-    /// the switch.  `f` receives `&mut Option<SuspendedUlt<S::Desc>>` holding
+    /// the switch.  `f` receives `&mut Option<SuspendedTaskToken<S::Desc>>` holding
     /// the current task's continuation; consuming it (`Option::take`) commits
     /// the switch, leaving it in place cancels it and resumes the caller.
-    fn cond_suspend_to_cont<F>(&self, next: &mut Option<SuspendedUlt<S::Desc>>, f: F) -> &Self
+    fn cond_suspend_to_cont<F>(&self, next: &mut Option<SuspendedTaskToken<S::Desc>>, f: F) -> &Self
     where
-        F: FnOnce(&Self, &mut Option<SuspendedUlt<S::Desc>>);
+        F: FnOnce(&Self, &mut Option<SuspendedTaskToken<S::Desc>>);
 
     /// Save the current context, switch to a **fresh** stack at `stack_top`,
     /// run `f(wk, prev)` there.  Used for child-first fork; `f` must never
     /// return.
     fn suspend_to_new<F>(&self, stack_top: *mut u8, next: *mut S::Desc, f: F) -> &Self
     where
-        F: FnOnce(&Self, SuspendedUlt<S::Desc>);
+        F: FnOnce(&Self, SuspendedTaskToken<S::Desc>);
 
     /// Abandon (do not save) the current context and switch to `next`.
-    fn exit_to_cont<F>(&self, next: SuspendedUlt<S::Desc>, f: F) -> !
+    fn exit_to_cont<F>(&self, next: SuspendedTaskToken<S::Desc>, f: F) -> !
     where
         F: FnOnce(&Self);
 }
@@ -76,10 +76,10 @@ where
     /// (scheduler-loop) continuation. Forwards to
     /// [`StackfulSchedulerSystem::pop_or_root`] — see that method for why the
     /// dispatch body lives on the system trait, not here.
-    fn pop_or_root(&self) -> SuspendedUlt<S::Desc>;
+    fn pop_or_root(&self) -> SuspendedTaskToken<S::Desc>;
 
     /// Store the scheduler-loop context as the root continuation.
-    fn set_root_cont(&self, c: SuspendedUlt<S::Desc>);
+    fn set_root_cont(&self, c: SuspendedTaskToken<S::Desc>);
 }
 
 // ---------------------------------------------------------------------------
@@ -96,7 +96,7 @@ where
     /// Suspend to the next continuation from the local deque / root.
     fn suspend_to_sched<F>(&self, f: F) -> &Self
     where
-        F: FnOnce(&Self, SuspendedUlt<S::Desc>),
+        F: FnOnce(&Self, SuspendedTaskToken<S::Desc>),
     {
         let next = self.pop_or_root();
         self.suspend_to_cont(next, f)
@@ -106,7 +106,7 @@ where
     /// continuation is returned to its source (deque top or root slot).
     fn cond_suspend_to_sched<F>(&self, f: F) -> &Self
     where
-        F: FnOnce(&Self, &mut Option<SuspendedUlt<S::Desc>>),
+        F: FnOnce(&Self, &mut Option<SuspendedTaskToken<S::Desc>>),
     {
         let mut next = Some(self.pop_or_root());
         let wk = self.cond_suspend_to_cont(&mut next, f);
@@ -151,7 +151,7 @@ where
 /// continuation (no `poll_fn` tag ever gets set, since `spawn_async` isn't
 /// reachable when `S::Desc` isn't `AsyncTaskDesc`), so this always performs
 /// a real context switch — no runtime check.
-pub fn execute_stackful<S>(wk: &UltWorker<S>, cont: SuspendedUlt<S::Desc>)
+pub fn execute_stackful<S>(wk: &UltWorker<S>, cont: SuspendedTaskToken<S::Desc>)
 where
     S: StackfulSchedulerSystem,
     S::Desc: StackfulTaskDesc,
@@ -162,7 +162,7 @@ where
 
 /// `pop_or_root` body for stackful-only systems: every popped item is a
 /// real, switchable continuation, so no requeue check is needed.
-pub fn pop_or_root_stackful<S>(wk: &UltWorker<S>) -> SuspendedUlt<S::Desc>
+pub fn pop_or_root_stackful<S>(wk: &UltWorker<S>) -> SuspendedTaskToken<S::Desc>
 where
     S: StackfulSchedulerSystem,
     S::Desc: StackfulTaskDesc,
@@ -189,11 +189,11 @@ impl<S: StackfulSchedulerSystem> StackfulLocalQueue<S> for UltWorker<S>
 where
     S::Desc: StackfulTaskDesc,
 {
-    fn pop_or_root(&self) -> SuspendedUlt<S::Desc> {
+    fn pop_or_root(&self) -> SuspendedTaskToken<S::Desc> {
         S::pop_or_root(self)
     }
 
-    fn set_root_cont(&self, cont: SuspendedUlt<S::Desc>) {
+    fn set_root_cont(&self, cont: SuspendedTaskToken<S::Desc>) {
         debug_assert!(self.root_cont.get().is_null());
         debug_assert!(cont.is_root());
         self.root_cont.set(cont.into_raw());
@@ -206,9 +206,9 @@ impl<S: StackfulSchedulerSystem> ContextSwitcher<S> for UltWorker<S>
 where
     S::Desc: StackfulTaskDesc,
 {
-    fn suspend_to_cont<F>(&self, next: SuspendedUlt<S::Desc>, f: F) -> &Self
+    fn suspend_to_cont<F>(&self, next: SuspendedTaskToken<S::Desc>, f: F) -> &Self
     where
-        F: FnOnce(&Self, SuspendedUlt<S::Desc>),
+        F: FnOnce(&Self, SuspendedTaskToken<S::Desc>),
     {
         let next_ctx = Context(unsafe { (*next.desc()).claim_saved_context() });
         debug_assert!(!next_ctx.is_null(), "double-resume in suspend_to_cont (is_root={})", next.is_root());
@@ -228,9 +228,9 @@ where
         unsafe { &*(tr.0 as *const UltWorker<S>) }
     }
 
-    fn cond_suspend_to_cont<F>(&self, next: &mut Option<SuspendedUlt<S::Desc>>, f: F) -> &Self
+    fn cond_suspend_to_cont<F>(&self, next: &mut Option<SuspendedTaskToken<S::Desc>>, f: F) -> &Self
     where
-        F: FnOnce(&Self, &mut Option<SuspendedUlt<S::Desc>>),
+        F: FnOnce(&Self, &mut Option<SuspendedTaskToken<S::Desc>>),
     {
         let next_ctx = Context(unsafe {
             (*next.as_ref().expect("cond_suspend without target").desc()).peek_saved_context()
@@ -238,7 +238,7 @@ where
         debug_assert!(!next_ctx.is_null());
         let mut payload = CondSuspendPayload::<S, F> {
             wk: self,
-            next: next as *mut Option<SuspendedUlt<S::Desc>>,
+            next: next as *mut Option<SuspendedTaskToken<S::Desc>>,
             f: ManuallyDrop::new(f),
         };
         let tr = unsafe {
@@ -254,7 +254,7 @@ where
 
     fn suspend_to_new<F>(&self, stack_top: *mut u8, next: *mut S::Desc, f: F) -> &Self
     where
-        F: FnOnce(&Self, SuspendedUlt<S::Desc>),
+        F: FnOnce(&Self, SuspendedTaskToken<S::Desc>),
     {
         let mut payload = SuspendPayload::<S, F> { wk: self, next, f: ManuallyDrop::new(f) };
         let tr = unsafe {
@@ -268,7 +268,7 @@ where
         unsafe { &*(tr.0 as *const UltWorker<S>) }
     }
 
-    fn exit_to_cont<F>(&self, next: SuspendedUlt<S::Desc>, f: F) -> !
+    fn exit_to_cont<F>(&self, next: SuspendedTaskToken<S::Desc>, f: F) -> !
     where
         F: FnOnce(&Self),
     {
@@ -315,20 +315,20 @@ unsafe extern "C" fn suspend_shim<S, F>(prev: Context, a1: *mut (), _a2: *mut ()
 where
     S: StackfulSchedulerSystem,
     S::Desc: StackfulTaskDesc,
-    F: FnOnce(&UltWorker<S>, SuspendedUlt<S::Desc>),
+    F: FnOnce(&UltWorker<S>, SuspendedTaskToken<S::Desc>),
 {
     let (wk, next, f) = unsafe {
         let payload = &mut *(a1 as *mut SuspendPayload<S, F>);
         (&*payload.wk, payload.next, ManuallyDrop::take(&mut payload.f))
     };
-    // Already-linear: `next` was consumed from a `SuspendedUlt` (or is a
+    // Already-linear: `next` was consumed from a `SuspendedTaskToken` (or is a
     // freshly allocated descriptor, `suspend_to_new`) at the call site
     // before the switch, so it's already exclusively ours here.
     let prev_task = wk.take_cur_task();
     let prev_desc = prev_task.desc();
     let old = unsafe { (*prev_desc).publish_saved_context(prev.0) };
     debug_assert!(old.is_null(), "suspend over live ctx in suspend_shim (is_root={})", unsafe { (*prev_desc).is_root() });
-    wk.set_cur_task(RunningTask(next));
+    wk.set_cur_task(RunningTaskToken(next));
     let wkp = wk as *const UltWorker<S> as *const ();
     unsafe { (*next).mark_resumed_on(wkp) };
     f(wk, prev_task.into_suspended());
@@ -340,7 +340,7 @@ where
     S::Desc: StackfulTaskDesc,
 {
     wk: *const UltWorker<S>,
-    next: *mut Option<SuspendedUlt<S::Desc>>,
+    next: *mut Option<SuspendedTaskToken<S::Desc>>,
     f: ManuallyDrop<F>,
 }
 
@@ -348,7 +348,7 @@ unsafe extern "C" fn cond_suspend_shim<S, F>(prev: Context, a1: *mut (), _a2: *m
 where
     S: StackfulSchedulerSystem,
     S::Desc: StackfulTaskDesc,
-    F: FnOnce(&UltWorker<S>, &mut Option<SuspendedUlt<S::Desc>>),
+    F: FnOnce(&UltWorker<S>, &mut Option<SuspendedTaskToken<S::Desc>>),
 {
     let (wk, next_slot, next_cont, f) = unsafe {
         let payload = &mut *(a1 as *mut CondSuspendPayload<S, F>);
@@ -365,9 +365,9 @@ where
     // of `f` below, and nothing else holds a second, independent handle to
     // the same descriptor at the same time -- unlike the old
     // `Cell<*mut S::Desc>` design, there is no window where `cur_task` and
-    // a live `SuspendedUlt`/local variable alias the same task while
+    // a live `SuspendedTaskToken`/local variable alias the same task while
     // owner-exclusive fields (`worker`/`slot`/`ctx`) are mutated through
-    // one of them. See `RunningTask`'s doc comment.
+    // one of them. See `RunningTaskToken`'s doc comment.
     let next_running = next_cont.into_running();
     let wkp = wk as *const UltWorker<S> as *const ();
     unsafe { (*next_running.desc()).mark_resumed_on(wkp) };
@@ -421,9 +421,9 @@ where
     // The exiting task's own descriptor isn't being saved anywhere -- `f`
     // is responsible for its cleanup/freeing via the join protocol -- so
     // just take it out of `cur_task` and drop the (zero-cost, no `Drop`
-    // impl) `RunningTask` wrapper without doing anything else with it.
+    // impl) `RunningTaskToken` wrapper without doing anything else with it.
     let _ = wk.take_cur_task();
-    wk.set_cur_task(RunningTask(next));
+    wk.set_cur_task(RunningTaskToken(next));
     let wkp = wk as *const UltWorker<S> as *const ();
     unsafe { (*next).mark_resumed_on(wkp) };
     f(wk);
