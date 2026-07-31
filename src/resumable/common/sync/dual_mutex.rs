@@ -1,6 +1,6 @@
 //! `DualMutex<S, T, N>` — a prototype MCS mutex generic over the wait-slot
-//! flavor `N` (`BasicSuspendedThread<S>` / `SuspendedFuture<S>` /
-//! `SuspendedTask<S>`), demonstrating the `docs/sync-async-unification.md`
+//! flavor `N` (`BasicStackfulOnlyResumable<S>` / `SuspendedFuture<S>` /
+//! `DualResumable<S>`), demonstrating the `docs/sync-async-unification.md`
 //! design end to end. Kept separate from the existing, battle-tested
 //! `McsMutex` rather than retrofitting it in place, to keep this exploratory
 //! branch's blast radius small — see the design doc's "suggested

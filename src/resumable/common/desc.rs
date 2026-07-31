@@ -11,7 +11,7 @@
 //! # `TaskDesc`/`StackfulTaskDesc`/`AsyncTaskDesc`
 //!
 //! The field set lives behind named accessor traits rather than a single
-//! hardcoded struct, mirroring [`crate::resumable::stackful::suspended::UltSuspendedThread`]
+//! hardcoded struct, mirroring [`crate::resumable::stackful::suspended::StackfulOnlyResumable`]
 //! (implementors supply accessors; scheduler code only ever calls the
 //! trait) — every direct `(*desc).field` touch across
 //! `worker.rs`/`thread.rs`/`waker.rs`/`pool.rs`/`tls.rs` goes through a
@@ -137,7 +137,7 @@ pub(crate) fn decode_join_state<D>(v: usize) -> JoinState<D> {
 ///
 /// Implementors are free to choose their own field layout, padding, and any
 /// extra members — callers only ever go through these named accessors, the
-/// same shape as [`crate::resumable::stackful::suspended::UltSuspendedThread`]'s `cont()`.
+/// same shape as [`crate::resumable::stackful::suspended::StackfulOnlyResumable`]'s `cont()`.
 pub trait TaskDesc: Send + Sync + Sized + 'static {
     /// The join-protocol state word (see the `JS_*` encoding above).
     ///

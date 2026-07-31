@@ -26,7 +26,7 @@ use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::desc::SuspendedTaskToken;
 use crate::resumable::common::stack::StackAlloc;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
-use crate::resumable::stackful::suspended::UltSuspendedThread;
+use crate::resumable::stackful::suspended::StackfulOnlyResumable;
 use crate::resumable::common::worker::UltWorker;
 
 // `StackfulTaskSystem` now lives in `crate::traits::stackful` — re-exported
@@ -56,7 +56,7 @@ where
     const STACK_SIZE: usize;
 
     /// Parked-continuation type for this system.
-    type SuspendedThread: UltSuspendedThread<StackfulSchedulerSystem = Self>;
+    type SuspendedThread: StackfulOnlyResumable<StackfulSchedulerSystem = Self>;
 
     /// Resolve what a suspending/exiting ULT switches into when its local
     /// deque is empty: the worker's own root (scheduler-loop) continuation.
@@ -254,7 +254,7 @@ where
     type StackAlloc = M::Alloc;
     const STACK_SIZE: usize = <M as UltIdentity>::STACK_SIZE;
 
-    type SuspendedThread = crate::resumable::stackful::suspended::BasicSuspendedThread<Self>;
+    type SuspendedThread = crate::resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>;
 }
 
 impl<M: UltIdentity + StackfulSchedulerSystem> ThreadSystem for M
@@ -282,9 +282,9 @@ where
         crate::resumable::stackful::thread::spawn::<Self, T, F>(f)
     }
 
-    type Mutex<T: Send>  = crate::resumable::common::sync::DualMutex<Self, T, crate::resumable::stackful::suspended::BasicSuspendedThread<Self>>;
-    type Barrier         = crate::resumable::common::sync::DualBarrier<Self, crate::resumable::stackful::suspended::BasicSuspendedThread<Self>>;
-    type SuspendedThread = crate::resumable::stackful::suspended::BasicSuspendedThread<Self>;
+    type Mutex<T: Send>  = crate::resumable::common::sync::DualMutex<Self, T, crate::resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>>;
+    type Barrier         = crate::resumable::common::sync::DualBarrier<Self, crate::resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>>;
+    type SuspendedThread = crate::resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>;
     type Delegator<C: crate::traits::stackful::DelegatorConsumer<Self>> =
         crate::resumable::stackful::sync::McsDelegator<Self, C>;
     type ThreadSpecific<T: 'static> = crate::resumable::stackful::tls::UltTls<Self, T>;

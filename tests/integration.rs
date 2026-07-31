@@ -136,7 +136,7 @@ fn task_panic_propagates() {
 #[test]
 fn suspended_thread_cancel() {
     run(2, || {
-        let sth = BasicSuspendedThread::<DefaultDualTaskSystem>::new();
+        let sth = BasicStackfulOnlyResumable::<DefaultDualTaskSystem>::new();
         sth.wait_with_cond(|| false);
         assert!(!sth.is_set());
     });
@@ -730,7 +730,7 @@ impl cmpth::StackfulSchedulerSystem for ManualSystem {
     type StackAlloc = HeapStack;
     const STACK_SIZE: usize = 64 * 1024;
 
-    type SuspendedThread = BasicSuspendedThread<Self>;
+    type SuspendedThread = BasicStackfulOnlyResumable<Self>;
 }
 
 impl ThreadSystem for ManualSystem {
@@ -757,7 +757,7 @@ impl ThreadSystem for ManualSystem {
 
     type Mutex<T: Send> = cmpth::McsMutex<Self, T>;
     type Barrier        = cmpth::resumable::stackful::sync::Barrier<Self>;
-    type SuspendedThread = BasicSuspendedThread<Self>;
+    type SuspendedThread = BasicStackfulOnlyResumable<Self>;
     type Delegator<C: cmpth::DelegatorConsumer<Self>> =
         cmpth::resumable::stackful::sync::McsDelegator<Self, C>;
     type ThreadSpecific<T: 'static> = cmpth::resumable::stackful::tls::UltTls<Self, T>;

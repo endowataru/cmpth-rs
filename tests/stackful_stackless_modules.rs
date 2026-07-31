@@ -15,12 +15,12 @@ fn stackful_module_unlocks_lock_and_wait() {
     use cmpth::traits::stackful::*;
 
     run(2, || {
-        let m: UltDualMutex<DefaultDualTaskSystem, u64, cmpth::BasicSuspendedThread<DefaultDualTaskSystem>> =
+        let m: UltDualMutex<DefaultDualTaskSystem, u64, cmpth::BasicStackfulOnlyResumable<DefaultDualTaskSystem>> =
             UltDualMutex::new(0);
         *m.lock() += 1;
         assert_eq!(*m.lock(), 1);
 
-        let b: Arc<UltDualBarrier<DefaultDualTaskSystem, cmpth::BasicSuspendedThread<DefaultDualTaskSystem>>> =
+        let b: Arc<UltDualBarrier<DefaultDualTaskSystem, cmpth::BasicStackfulOnlyResumable<DefaultDualTaskSystem>>> =
             Arc::new(UltDualBarrier::new(1));
         let r = b.wait();
         assert!(r.is_leader());
