@@ -206,11 +206,11 @@ impl<S: StackfulSchedulerSystem> ContextSwitcher<S> for UltWorker<S>
 where
     S::Desc: StackfulTaskDesc,
 {
-    fn suspend_to_cont<F>(&self, next: SuspendedTaskToken<S::Desc>, f: F) -> &Self
+    fn suspend_to_cont<F>(&self, mut next: SuspendedTaskToken<S::Desc>, f: F) -> &Self
     where
         F: FnOnce(&Self, SuspendedTaskToken<S::Desc>),
     {
-        let next_ctx = Context(unsafe { (*next.desc()).claim_saved_context() });
+        let next_ctx = Context(next.claim_saved_context());
         debug_assert!(!next_ctx.is_null(), "double-resume in suspend_to_cont (is_root={})", next.is_root());
         let mut payload = SuspendPayload::<S, F> {
             wk: self,
@@ -232,9 +232,9 @@ where
     where
         F: FnOnce(&Self, &mut Option<SuspendedTaskToken<S::Desc>>),
     {
-        let next_ctx = Context(unsafe {
-            (*next.as_ref().expect("cond_suspend without target").desc()).peek_saved_context()
-        });
+        let next_ctx = Context(
+            next.as_ref().expect("cond_suspend without target").peek_saved_context()
+        );
         debug_assert!(!next_ctx.is_null());
         let mut payload = CondSuspendPayload::<S, F> {
             wk: self,
@@ -268,11 +268,11 @@ where
         unsafe { &*(tr.0 as *const UltWorker<S>) }
     }
 
-    fn exit_to_cont<F>(&self, next: SuspendedTaskToken<S::Desc>, f: F) -> !
+    fn exit_to_cont<F>(&self, mut next: SuspendedTaskToken<S::Desc>, f: F) -> !
     where
         F: FnOnce(&Self),
     {
-        let next_ctx = Context(unsafe { (*next.desc()).claim_saved_context() });
+        let next_ctx = Context(next.claim_saved_context());
         debug_assert!(!next_ctx.is_null(), "double-resume in exit_to_cont (is_root={})", next.is_root());
         let mut payload = ExitPayload::<S, F> {
             wk: self,
@@ -324,13 +324,14 @@ where
     // Already-linear: `next` was consumed from a `SuspendedTaskToken` (or is a
     // freshly allocated descriptor, `suspend_to_new`) at the call site
     // before the switch, so it's already exclusively ours here.
-    let prev_task = wk.take_cur_task();
+    let mut prev_task = wk.take_cur_task();
     let prev_desc = prev_task.desc();
-    let old = unsafe { (*prev_desc).publish_saved_context(prev.0) };
+    let old = prev_task.publish_saved_context(prev.0);
     debug_assert!(old.is_null(), "suspend over live ctx in suspend_shim (is_root={})", unsafe { (*prev_desc).is_root() });
-    wk.set_cur_task(RunningTaskToken(next));
+    let mut next_running = RunningTaskToken(next);
     let wkp = wk as *const UltWorker<S> as *const ();
-    unsafe { (*next).mark_resumed_on(wkp) };
+    next_running.mark_resumed_on(wkp);
+    wk.set_cur_task(next_running);
     f(wk, prev_task.into_suspended());
     Transfer(wk as *const UltWorker<S> as *mut ())
 }
@@ -355,9 +356,9 @@ where
         let next_cont = (*payload.next).take().unwrap();
         (&*payload.wk, payload.next, next_cont, ManuallyDrop::take(&mut payload.f))
     };
-    let prev_task = wk.take_cur_task();
+    let mut prev_task = wk.take_cur_task();
     let prev_desc = prev_task.desc();
-    let old = unsafe { (*prev_desc).publish_saved_context(prev.0) };
+    let old = prev_task.publish_saved_context(prev.0);
     debug_assert!(old.is_null(), "suspend over live ctx in cond_suspend_shim (is_root={})", unsafe { (*prev_desc).is_root() });
 
     // Promote + commit immediately: `wk.cur_task()` correctly reflects
@@ -368,9 +369,9 @@ where
     // a live `SuspendedTaskToken`/local variable alias the same task while
     // owner-exclusive fields (`worker`/`slot`/`ctx`) are mutated through
     // one of them. See `RunningTaskToken`'s doc comment.
-    let next_running = next_cont.into_running();
+    let mut next_running = next_cont.into_running();
     let wkp = wk as *const UltWorker<S> as *const ();
-    unsafe { (*next_running.desc()).mark_resumed_on(wkp) };
+    next_running.mark_resumed_on(wkp);
     wk.set_cur_task(next_running);
 
     let mut prev_cont = Some(prev_task.into_suspended());
@@ -381,8 +382,7 @@ where
             // Committed: `next_running` is already `cur_task` -- just
             // finish publishing it (peek, not take; nothing else needs to
             // claim it right now).
-            let next_desc = wk.cur_task();
-            unsafe { (*next_desc).clear_saved_context() };
+            wk.cur_task_token_mut().clear_saved_context();
             CondTransfer { value: wk as *const UltWorker<S> as *mut (), flag: 1 }
         }
         Some(c) => {
@@ -390,9 +390,10 @@ where
             // `prev` as the running task, hand `next` back to the caller
             // as suspended again.
             debug_assert!(std::ptr::eq(c.desc(), prev_desc));
-            unsafe { (*prev_desc).clear_saved_context() };
+            let mut c_running = c.into_running();
+            c_running.clear_saved_context();
             let next_running = wk.take_cur_task();
-            wk.set_cur_task(c.into_running());
+            wk.set_cur_task(c_running);
             unsafe { *next_slot = Some(next_running.into_suspended()) };
             CondTransfer { value: wk as *const UltWorker<S> as *mut (), flag: 0 }
         }
@@ -423,9 +424,10 @@ where
     // just take it out of `cur_task` and drop the (zero-cost, no `Drop`
     // impl) `RunningTaskToken` wrapper without doing anything else with it.
     let _ = wk.take_cur_task();
-    wk.set_cur_task(RunningTaskToken(next));
+    let mut next_running = RunningTaskToken(next);
     let wkp = wk as *const UltWorker<S> as *const ();
-    unsafe { (*next).mark_resumed_on(wkp) };
+    next_running.mark_resumed_on(wkp);
+    wk.set_cur_task(next_running);
     f(wk);
     Transfer(wk as *const UltWorker<S> as *mut ())
 }

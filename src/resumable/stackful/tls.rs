@@ -10,7 +10,7 @@ use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::traits::common::TlsSlot;
-use crate::resumable::common::desc::TaskDesc;
+use crate::resumable::common::desc::HasBaseOwned;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
@@ -72,8 +72,7 @@ impl<S: StackfulSchedulerSystem, T: 'static> TlsSlot<T> for UltTls<S, T> where <
     fn get(&self) -> *mut T where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
         let wk = UltWorker::<S>::current()
             .expect("cmpth: ULT-local storage accessed outside a worker");
-        let desc = wk.cur_task();
-        let map = unsafe { &*(*desc).tls().get() };
+        let map = &wk.cur_task_token_mut().base().tls;
         map.as_ref()
             .and_then(|m| m.get(&self.key()).copied())
             .unwrap_or(std::ptr::null_mut())
@@ -83,8 +82,7 @@ impl<S: StackfulSchedulerSystem, T: 'static> TlsSlot<T> for UltTls<S, T> where <
     fn set(&self, p: *mut T) where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
         let wk = UltWorker::<S>::current()
             .expect("cmpth: ULT-local storage accessed outside a worker");
-        let desc = wk.cur_task();
-        let map = unsafe { &mut *(*desc).tls().get() };
+        let map = &mut wk.cur_task_token_mut().base_mut().tls;
         map.get_or_insert_with(HashMap::new).insert(self.key(), p.cast());
     }
 }

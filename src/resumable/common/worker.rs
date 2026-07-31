@@ -167,6 +167,32 @@ impl<S: SchedulerSystem> UltWorker<S> {
         opt.as_ref().map_or(ptr::null_mut(), RunningTaskToken::desc)
     }
 
+    /// Mutable peek at the currently-running task's token, for callers with
+    /// no explicit `RunningTaskToken` in scope (e.g. `UltTls::get`/`set`,
+    /// reached through the generic `TlsSlot` trait) that still need
+    /// `Owned`-field access. `D::Owned` is reached only through a token
+    /// (never a separate direct path — see `TaskDesc::owned_cell`'s doc
+    /// comment), so this is the one place besides an explicit token value
+    /// that can produce one.
+    ///
+    /// Sound for the same reason as [`cur_task`](Self::cur_task)'s peek:
+    /// only the OS thread currently running as this worker's current task
+    /// ever calls this, so there is no concurrent access to guard against —
+    /// checked by the `debug_assert` below rather than merely assumed. That
+    /// invariant is exactly what clippy's `mut_from_ref` can't see from the
+    /// `&self` signature alone (it would need proof "no second live
+    /// `&mut`/`&` from this same `&self` exists," which the single-caller
+    /// discipline above provides but the type system doesn't express).
+    #[allow(clippy::mut_from_ref)]
+    pub(crate) fn cur_task_token_mut(&self) -> &mut RunningTaskToken<S::Desc> {
+        debug_assert!(
+            Self::current().is_some_and(|cur| std::ptr::eq(cur, self)),
+            "cmpth: cur_task_token_mut called from a thread not currently running as this worker"
+        );
+        let opt: &mut Option<RunningTaskToken<S::Desc>> = unsafe { &mut *self.cur_task_cell.as_ptr() };
+        opt.as_mut().expect("cmpth: no current task on worker")
+    }
+
     /// Take exclusive ownership of the currently-running task out of this
     /// worker's slot, leaving it empty. Panics if nothing is running —
     /// every real call site only calls this while a task is known to be

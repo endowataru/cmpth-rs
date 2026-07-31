@@ -23,8 +23,8 @@ where
     S::Desc: StackfulTaskDesc + AsyncTaskDesc,
 {
     let desc = cont.desc();
-    if unsafe { (*desc).is_poll_fn_dispatch() } {
-        let poll_fn = unsafe { (*desc).poll_fn().get() }
+    if cont.is_poll_fn_dispatch() {
+        let poll_fn = cont.poll_fn()
             .expect("cmpth: descriptor committed to poll_fn dispatch but poll_fn unset");
         let _ = cont.into_raw(); // consumed; no context switch
         crate::resumable::stackless::worker::run_async_poll(wk, desc, poll_fn);
@@ -44,7 +44,7 @@ where
     S::Desc: StackfulTaskDesc + AsyncTaskDesc,
 {
     if let Some(c) = wk.deque.try_pop_top() {
-        if unsafe { (*c.desc()).is_poll_fn_dispatch() } {
+        if c.is_poll_fn_dispatch() {
             // Async tasks have no saved context; they can only be executed
             // by the scheduler loop via execute().  Push the async task back
             // to the LIFO end and return root so the scheduler loop handles it.
@@ -65,7 +65,10 @@ where
     S: StackfulSchedulerSystem,
     S::Desc: StackfulTaskDesc + AsyncTaskDesc,
 {
-    if unsafe { (*desc).is_poll_fn_dispatch() } {
+    // Peek-only: `desc` is finished (about to be freed), so no other token
+    // can exist for it — safe to construct one transiently just to read
+    // the dispatch tag.
+    if crate::resumable::common::desc::SuspendedTaskToken(desc).is_poll_fn_dispatch() {
         unsafe { wk.shared().async_task_pool.dealloc(wk.num(), desc) };
     } else {
         unsafe { wk.free_task(desc) };

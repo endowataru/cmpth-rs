@@ -8,7 +8,7 @@ use std::task::{RawWaker, Waker};
 
 use crate::resumable::common::worker::{LocalQueue, UltWorker};
 use crate::resumable::common::system::SchedulerSystem;
-use crate::resumable::common::desc::{SuspendedTaskToken, TaskDesc, WakerTaskDesc};
+use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, WakerTaskDesc};
 use crate::resumable::stackless::desc::{AsyncTaskDesc, TaskPollFn, TaskPollResult};
 use crate::resumable::common::pool::DescPool;
 
@@ -55,7 +55,7 @@ pub(crate) fn run_async_poll<S>(
         // `JoinHandle::poll`'s `self` address, see
         // `worker_from_async_arena_addr` — find `wk` via address masking
         // instead of a TLS lookup.
-        unsafe { (*desc).mark_resumed_on(wk as *const UltWorker<S> as *const ()) };
+        RunningTaskToken(desc).mark_resumed_on(wk as *const UltWorker<S> as *const ());
 
         let raw = RawWaker::new(desc as *const (), crate::resumable::stackless::waker::async_task_private_vtable::<S>());
         let waker = unsafe { Waker::from_raw(raw) };
@@ -93,7 +93,7 @@ pub(crate) fn run_async_poll<S>(
                 return;
             }
             TaskPollResult::ReadyAndContinue(next) => {
-                poll_fn = unsafe { (*next).poll_fn().get() }.expect(
+                poll_fn = RunningTaskToken(next).poll_fn().expect(
                     "cmpth: symmetric-transfer target has no poll_fn (not a spawn_async task)",
                 );
                 desc = next;
@@ -112,7 +112,7 @@ where
     S::Desc: AsyncTaskDesc,
 {
     let desc = cont.desc();
-    let poll_fn = unsafe { (*desc).poll_fn().get() }
+    let poll_fn = cont.poll_fn()
         .expect("cmpth: execute_async called on a continuation with no poll_fn (not a spawn_async task)");
     let _ = cont.into_raw(); // consumed; no context switch
     run_async_poll(wk, desc, poll_fn);

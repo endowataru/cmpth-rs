@@ -12,8 +12,8 @@ use std::task::{Context, Poll};
 
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
-use crate::resumable::common::desc::{JoinState, SuspendedTaskToken, TaskDesc, TaskDescAlloc, WakeOutcome, WakerTaskDesc};
-use crate::resumable::stackless::desc::{AsyncTaskDesc, TaskPollResult};
+use crate::resumable::common::desc::{HasBaseOwned, JoinState, SuspendedTaskToken, TaskDesc, TaskDescAlloc, WakeOutcome, WakerTaskDesc};
+use crate::resumable::stackless::desc::{AsyncTaskDesc, HasPollFn, TaskPollResult};
 use crate::resumable::common::pool::{DescPool, DynamicPool};
 use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
 
@@ -124,8 +124,8 @@ where
 {
     match wk.pop_local() {
         Some(popped) if std::ptr::eq(popped.desc(), desc) => {
-            if unsafe { (*desc).is_poll_fn_dispatch() } {
-                let poll_fn = unsafe { (*desc).poll_fn().get() }
+            if popped.is_poll_fn_dispatch() {
+                let poll_fn = popped.poll_fn()
                     .expect("cmpth: descriptor committed to poll_fn dispatch but poll_fn unset");
                 crate::resumable::stackless::worker::run_async_poll(wk, desc, poll_fn);
             } else {
@@ -241,13 +241,14 @@ where
         result_layout.size() + result_layout.align() + f_layout.size() + f_layout.align() + 16;
 
     let desc = wk.shared().async_task_pool.alloc(wk.num(), true, stack_size);
-    unsafe { (*desc).commit_as_poll_fn() };
-    unsafe { (*desc).scheduler().set(wk.shared.get() as *const ()) };
+    let mut token = SuspendedTaskToken(desc);
+    token.commit_as_poll_fn();
+    token.base_mut().scheduler = wk.shared.get() as *const ();
     // Arena-backed AsyncPool systems get a cell slot here; tag it with this
     // system's identity once (mirrors `spawn`'s own slot setup) so
     // `worker_from_async_arena_addr` can guard against a nested scheduler's
     // descriptor landing in the same arena.
-    if let Some(slot) = unsafe { (*desc).slot().get() } {
+    if let Some(slot) = token.base().slot {
         unsafe { (*slot).system_id.set(crate::resumable::common::lookup::system_id::<S>()) };
     }
 
@@ -259,10 +260,10 @@ where
     let f_ptr = f_addr as *mut F;
 
     unsafe { f_ptr.write(mk()) };
-    unsafe { (*desc).poll_fn().set(Some(poll_spawned_task::<S, T, F>)) };
+    token.set_poll_fn(Some(poll_spawned_task::<S, T, F>));
 
     // Push to the deque as a ready-to-poll task.
-    wk.push_local_top(SuspendedTaskToken(desc));
+    wk.push_local_top(token);
 
     JoinHandle { desc, result_ptr, result_drop: drop_stack_result::<T>, _marker: PhantomData }
 }
@@ -520,8 +521,9 @@ where
     // this allocation doesn't necessarily match.
     let payload = S::Desc::alloc(stack_size, false);
     let desc = crate::resumable::common::pool::Node::wrap_fresh(0, true, payload);
-    unsafe { (*desc).commit_as_poll_fn() };
-    unsafe { (*desc).scheduler().set(scheduler) };
+    let mut token = SuspendedTaskToken(desc);
+    token.commit_as_poll_fn();
+    token.base_mut().scheduler = scheduler;
 
     let stack_top = unsafe { (*desc).stack_top() } as usize;
     let result_addr = align_down(stack_top - result_layout.size(), result_layout.align());
@@ -529,7 +531,7 @@ where
     let f_ptr = f_addr as *mut F;
 
     unsafe { f_ptr.write(f) };
-    unsafe { (*desc).poll_fn().set(Some(poll_spawned_task::<S, (), F>)) };
+    token.set_poll_fn(Some(poll_spawned_task::<S, (), F>));
 
-    SuspendedTaskToken(desc)
+    token
 }

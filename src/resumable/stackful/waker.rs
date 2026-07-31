@@ -176,12 +176,14 @@ impl<S: StackfulSchedulerSystem> Drop for UltPoller<S> where <S as SchedulerSyst
 unsafe fn try_wake<S: StackfulSchedulerSystem>(desc: *const S::Desc) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     let desc = desc as *mut S::Desc;
     if let WakeOutcome::ClaimedParked = unsafe { (*desc).try_wake_state() } {
-        // ctx is a plain Cell now (see StackfulTaskDesc::ctx's doc comment)
-        // — this debug_assert-only read was already relying on exactly that
+        // ctx is a plain field now (see HasCtx's doc comment) — this
+        // debug_assert-only read was already relying on exactly that
         // invariant even when ctx was atomic: the Acquire CAS inside
         // try_wake_state already happened-after the ctx store (Release) in
         // cond_shim, so no ordering of ctx's own is needed here either way.
-        let _ctx = unsafe { (*desc).ctx().get() };
+        // `desc` is genuinely parked here (ClaimedParked), so constructing
+        // a transient token just to peek is sound.
+        let _ctx = crate::resumable::common::desc::SuspendedTaskToken(desc).peek_saved_context();
         debug_assert!(!_ctx.is_null());
         unsafe { push_continuation::<S>(desc) };
     }
