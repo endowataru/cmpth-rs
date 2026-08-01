@@ -14,7 +14,7 @@ use crate::resumable::common::desc::{SuspendedTaskToken, TaskDesc};
 /// thread.
 ///
 /// Generic over the descriptor type `D` (see [`SuspendedTaskToken`]); every
-/// concrete system today sets `D = BasicTaskDesc` via
+/// concrete system today sets `D = DualTaskDesc` via
 /// [`crate::SchedulerSystem::Desc`].
 pub trait WorkerDeque<D: TaskDesc>: Default + Send + Sync + 'static {
     fn push_top(&self, c: SuspendedTaskToken<D>);

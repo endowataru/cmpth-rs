@@ -172,7 +172,7 @@ impl<S: StackfulSchedulerSystem> Drop for UltPoller<S> where <S as SchedulerSyst
 /// before this; the push races with the task freeing itself).
 ///
 /// # Safety
-/// `desc` must point to a live `BasicTaskDesc`.
+/// `desc` must point to a live `DualTaskDesc`.
 unsafe fn try_wake<S: StackfulSchedulerSystem>(desc: *const S::Desc) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     let desc = desc as *mut S::Desc;
     if let WakeOutcome::ClaimedParked = unsafe { (*desc).try_wake_state() } {
