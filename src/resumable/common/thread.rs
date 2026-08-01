@@ -43,6 +43,19 @@ unsafe impl<S: SchedulerSystem, T: Send> Send for JoinHandle<S, T> {}
 // JoinHandle holds only raw pointers; it is safe to move at any time.
 impl<S: SchedulerSystem, T> Unpin for JoinHandle<S, T> {}
 
+impl<S: SchedulerSystem, T> JoinHandle<S, T> {
+    /// Safe access to the descriptor's own `&self` methods. `self.desc` can
+    /// be null (see [`Drop`] below — the "already consumed by
+    /// `Future::poll`" state) so this must only be called where that's
+    /// already been ruled out, either structurally (`.join()`/`take_result`
+    /// paths, which never observe a poll-nulled handle) or by an explicit
+    /// `is_null()` check at the call site, same as every existing caller
+    /// already assumed before this accessor existed.
+    pub(crate) fn desc_ref(&self) -> &S::Desc {
+        unsafe { &*self.desc }
+    }
+}
+
 impl<S: SchedulerSystem, T: Send + 'static> JoinHandle<S, T> {
     pub(crate) fn take_result(self, wk: &UltWorker<S>) -> Result<T, Box<dyn Any + Send>> {
         let desc = self.desc;
@@ -87,7 +100,7 @@ impl<S: SchedulerSystem, T> Drop for JoinHandle<S, T> {
         // RUNNING or an async waker (a parked sync joiner is impossible: join
         // consumes the handle) -> detach, the exit path cleans up. Already
         // finished -> this handle owns the result and the descriptor.
-        if unsafe { (*desc).try_mark_detached() } {
+        if self.desc_ref().try_mark_detached() {
             unsafe { result_drop(result_ptr) };
             match UltWorker::<S>::current() {
                 Some(wk) => S::free_finished_desc(wk, desc),

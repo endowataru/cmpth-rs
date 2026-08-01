@@ -42,16 +42,17 @@ where
 {
     let wk = UltWorker::<S>::current().expect("cmpth: spawn called outside a worker");
     let desc = wk.alloc_task(true, S::STACK_SIZE);
-    {
+    let stack_top = {
         let mut token = SuspendedTaskToken(desc);
         token.commit_as_ctx();
         token.base_mut().scheduler = wk.shared.get() as *const ();
         if let Some(slot) = token.base().slot {
             unsafe { (*slot).system_id.set(crate::resumable::common::lookup::system_id::<S>()) };
         }
+        let stack_top = token.as_desc().stack_top() as usize;
         let _ = token.into_raw();
-    }
-    let stack_top = unsafe { (*desc).stack_top() } as usize;
+        stack_top
+    };
 
     // Reserve space at the top of the child's stack (high addresses) for the
     // closure and the result slot.  The execution stack gets the rest below.
@@ -89,7 +90,7 @@ where
         let wk = unsafe { &*(crate::resumable::common::desc::peek_worker(desc) as *const UltWorker<S>) };
         debug_assert!(std::ptr::eq(wk, UltWorker::<S>::current().expect("cmpth: worker vanished")));
         debug_assert!(std::ptr::eq(wk.cur_task(), desc));
-        exit_with_result(wk, desc, result_ptr, val)
+        exit_with_result(wk, wk.cur_task_ref(), result_ptr, val)
     });
 
     JoinHandle { desc, result_ptr, result_drop: drop_stack_result::<T>, _marker: PhantomData }
@@ -118,7 +119,7 @@ pub(crate) fn fork_parent_first<S: StackfulSchedulerSystem>(body: ErasedBody, sc
     }
     let arg = Box::into_raw(Box::new(body));
     let ctx = unsafe {
-        S::Ctx::make_context((*desc).stack_top(), task_entry::<S>, arg as *mut ())
+        S::Ctx::make_context(token.as_desc().stack_top(), task_entry::<S>, arg as *mut ())
     };
     token.init_saved_context(ctx.0);
     token
@@ -134,7 +135,7 @@ unsafe extern "C" fn task_entry<S: StackfulSchedulerSystem>(transfer: Transfer, 
     debug_assert!(std::ptr::eq(wk, UltWorker::<S>::current().expect("cmpth: worker vanished")));
     debug_assert!(std::ptr::eq(wk.cur_task(), desc));
     wk.cur_task_token_mut().base_mut().result = Some(result);
-    exit(wk, desc)
+    exit(wk, wk.cur_task_ref())
 }
 
 // ---------------------------------------------------------------------------
@@ -152,30 +153,31 @@ unsafe extern "C" fn task_entry<S: StackfulSchedulerSystem>(transfer: Transfer, 
 /// switch and settles whichever party it finds in the old value.
 fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
     wk: &UltWorker<S>,
-    desc: *mut S::Desc,
+    desc: &S::Desc,
     result_ptr: *mut StackResult<T>,
     val: Result<T, Box<dyn Any + Send>>,
 ) -> ! where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
-    match unsafe { (*desc).read_join_state() } {
+    let desc_ptr = desc as *const S::Desc as *mut S::Desc;
+    match desc.read_join_state() {
         JoinState::SyncJoiner(j_desc) => {
             // Direct handoff: switch straight to the parked joiner.
             let sr = match val { Ok(v) => StackResult::Ok(v), Err(e) => StackResult::Err(e) };
             unsafe { result_ptr.write(sr) };
-            wk.exit_to_cont(SuspendedTaskToken(j_desc), move |_wk| unsafe {
-                (*desc).commit_finished();
+            wk.exit_to_cont(SuspendedTaskToken(j_desc), move |_wk| {
+                desc.commit_finished();
             })
         }
         JoinState::Detached => {
             // No handle: drop val on the task's own stack before the context
             // switch so destructors run correctly.
             drop(val);
-            wk.exit_to_sched(move |wk| unsafe { wk.free_task(desc) })
+            wk.exit_to_sched(move |wk| unsafe { wk.free_task(desc_ptr) })
         }
         _ => {
             let sr = match val { Ok(v) => StackResult::Ok(v), Err(e) => StackResult::Err(e) };
             unsafe { result_ptr.write(sr) };
             wk.exit_to_sched(move |wk| {
-                match unsafe { (*desc).publish_finished() } {
+                match desc.publish_finished() {
                     // No joiner appeared: the JoinHandle collects the result.
                     JoinState::Running => {}
                     // A joiner registered while we were exiting.
@@ -186,7 +188,7 @@ fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
                     // result already sits on our (still-allocated) stack.
                     JoinState::Detached => unsafe {
                         result_ptr.drop_in_place();
-                        wk.free_task(desc);
+                        wk.free_task(desc_ptr);
                     },
                     JoinState::Finished => unreachable!("cmpth: double task exit"),
                 }
@@ -197,22 +199,23 @@ fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
 
 /// Exit for parent-first tasks (`fork_parent_first`): the result, if kept,
 /// is already in `desc.result`.  Same state machine as `exit_with_result`.
-fn exit<S: StackfulSchedulerSystem>(wk: &UltWorker<S>, desc: *mut S::Desc) -> ! where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
-    match unsafe { (*desc).read_join_state() } {
+fn exit<S: StackfulSchedulerSystem>(wk: &UltWorker<S>, desc: &S::Desc) -> ! where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+    let desc_ptr = desc as *const S::Desc as *mut S::Desc;
+    match desc.read_join_state() {
         JoinState::SyncJoiner(j_desc) => {
-            wk.exit_to_cont(SuspendedTaskToken(j_desc), move |_wk| unsafe {
-                (*desc).commit_finished();
+            wk.exit_to_cont(SuspendedTaskToken(j_desc), move |_wk| {
+                desc.commit_finished();
             })
         }
         // Root tasks start in this state; desc.result drops with the desc.
-        JoinState::Detached => wk.exit_to_sched(move |wk| unsafe { wk.free_task(desc) }),
+        JoinState::Detached => wk.exit_to_sched(move |wk| unsafe { wk.free_task(desc_ptr) }),
         _ => wk.exit_to_sched(move |wk| {
-            match unsafe { (*desc).publish_finished() } {
+            match desc.publish_finished() {
                 JoinState::Running => {}
                 JoinState::SyncJoiner(j) => wk.push_local_top(SuspendedTaskToken(j)),
                 JoinState::AsyncWaker(w) => unsafe { Box::from_raw(w) }.wake(),
                 JoinState::AsyncJoiner(j) => unsafe { crate::resumable::stackless::waker::try_wake_async::<S>(j) },
-                JoinState::Detached => unsafe { wk.free_task(desc) },
+                JoinState::Detached => unsafe { wk.free_task(desc_ptr) },
                 JoinState::Finished => unreachable!("cmpth: double task exit"),
             }
         }),
@@ -235,13 +238,12 @@ where
 {
     pub fn join(self) -> Result<T, Box<dyn Any + Send>> {
         let wk = UltWorker::<S>::current().expect("cmpth: join called outside a worker");
-        let desc = self.desc;
 
         // Fast path: the child already exited.  Child-first spawn guarantees
         // this whenever the parent continuation was not stolen, so the whole
         // fork-join hot path lands here.  FINISHED is published with Release
         // after the result write; the Acquire read makes the result visible.
-        if unsafe { (*desc).is_finished() } {
+        if self.desc_ref().is_finished() {
             return self.take_result(wk);
         }
 
@@ -249,15 +251,16 @@ where
         // cond_suspend cancels the suspension when the child finished in the
         // meantime (the CAS loses to the exit path's swap).
         // The returned worker is the one we resumed on — no TLS re-read.
+        let desc = self.desc_ref();
         let wk = wk.cond_suspend_to_sched(move |_wk, prev| {
             let joiner = prev.as_ref().expect("cond_suspend contract").desc();
-            if unsafe { (*desc).try_register_sync_joiner(joiner) } {
+            if unsafe { desc.try_register_sync_joiner(joiner) } {
                 let _ = prev.take().expect("cond_suspend contract").into_raw();
             }
             // else: leave `prev` in place -> cancel, resume at once
         });
 
-        debug_assert!(unsafe { (*desc).join_state().load(Ordering::Relaxed) } == JS_FINISHED);
+        debug_assert!(desc.join_state().load(Ordering::Relaxed) == JS_FINISHED);
         self.take_result(wk)
     }
 }

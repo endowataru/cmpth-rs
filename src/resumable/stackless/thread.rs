@@ -73,12 +73,12 @@ where
             Some(wk) => {
                 let joiner = wk.polling_async.get();
                 if !joiner.is_null() {
-                    unsafe { (*desc).try_register_async_joiner(joiner) }
+                    unsafe { this.desc_ref().try_register_async_joiner(joiner) }
                 } else {
-                    unsafe { (*desc).try_register_waker(cx.waker().clone()) }
+                    this.desc_ref().try_register_waker(cx.waker().clone())
                 }
             }
-            None => unsafe { (*desc).try_register_waker(cx.waker().clone()) },
+            None => this.desc_ref().try_register_waker(cx.waker().clone()),
         };
         if registered {
             return Poll::Pending;
@@ -252,7 +252,7 @@ where
         unsafe { (*slot).system_id.set(crate::resumable::common::lookup::system_id::<S>()) };
     }
 
-    let stack_top = unsafe { (*desc).stack_top() } as usize;
+    let stack_top = token.as_desc().stack_top() as usize;
     let result_addr = align_down(stack_top - result_layout.size(), result_layout.align());
     let f_addr = align_down(result_addr.wrapping_sub(f_layout.size()), f_layout.align().max(1));
 
@@ -312,7 +312,13 @@ where
     F: Future<Output = T> + Send + 'static,
     S::Desc: AsyncTaskDesc,
 {
-    let stack_top = unsafe { (*desc).stack_top() } as usize;
+    // One relay point for the whole function: `desc` is a live descriptor
+    // for as long as `poll_spawned_task` is running (guaranteed by
+    // `run_async_poll`'s caller contract), so everything below reaches it
+    // through this single `&S::Desc` instead of repeated raw derefs.
+    let desc_ref: &S::Desc = unsafe { &*desc };
+
+    let stack_top = desc_ref.stack_top() as usize;
     let result_layout = Layout::new::<StackResult<T>>();
     let f_layout = Layout::new::<F>();
     let result_addr = align_down(stack_top - result_layout.size(), result_layout.align());
@@ -339,13 +345,13 @@ where
 
     // Task done.  Invalidate the waker before signalling the joiner so that
     // any concurrent wake() becomes a no-op (IDLE state).
-    unsafe { (*desc).mark_idle() };
+    desc_ref.mark_idle();
 
     unsafe { result_ptr.write(sr) };
 
     // Publish FINISHED and settle whoever the old state names.  Runs on the
     // scheduler stack (no context-switch-target decision needed).
-    match unsafe { (*desc).publish_finished() } {
+    match desc_ref.publish_finished() {
         JoinState::SyncJoiner(j_desc) => {
             // Push the waiting ULT back to the deque.  This is always called
             // from within a worker (execute → run_async_poll → poll_fn).
@@ -358,7 +364,8 @@ where
             // Claim j's next poll directly if nobody else can be driving it
             // (it was genuinely PARKED, not concurrently POLLING/NOTIFIED
             // elsewhere) — see TaskPollResult::ReadyAndContinue.
-            match unsafe { (*j).try_wake_state() } {
+            let j_ref: &S::Desc = unsafe { &*j };
+            match j_ref.try_wake_state() {
                 WakeOutcome::ClaimedParked => return TaskPollResult::ReadyAndContinue(j),
                 WakeOutcome::SetNotified | WakeOutcome::NoOp => {}
             }
@@ -525,7 +532,7 @@ where
     token.commit_as_poll_fn();
     token.base_mut().scheduler = scheduler;
 
-    let stack_top = unsafe { (*desc).stack_top() } as usize;
+    let stack_top = token.as_desc().stack_top() as usize;
     let result_addr = align_down(stack_top - result_layout.size(), result_layout.align());
     let f_addr = align_down(result_addr.wrapping_sub(f_layout.size()), f_layout.align().max(1));
     let f_ptr = f_addr as *mut F;

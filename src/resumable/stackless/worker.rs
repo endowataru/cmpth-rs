@@ -45,8 +45,12 @@ pub(crate) fn run_async_poll<S>(
     let prev_polling = wk.polling_async.get();
 
     loop {
+        // One relay point per iteration (`desc` is reassigned on symmetric
+        // transfer below, so this can't be hoisted above the loop).
+        let desc_ref: &S::Desc = unsafe { &*desc };
+
         // Mark as POLLING so the waker's state machine works correctly.
-        unsafe { (*desc).mark_polling() };
+        desc_ref.mark_polling();
 
         // Same bookkeeping the stackful switch shims do on every real
         // context switch: publish `wk` on the descriptor itself (and, for
@@ -85,7 +89,7 @@ pub(crate) fn run_async_poll<S>(
                 // worker, so the marker must stop claiming we're driving
                 // it before that happens, not a couple of statements
                 // later.
-                let parked = unsafe { (*desc).park_after_poll() };
+                let parked = desc_ref.park_after_poll();
                 wk.polling_async.set(prev_polling);
                 if !parked {
                     wk.push_local_top(SuspendedTaskToken(desc));

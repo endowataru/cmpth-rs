@@ -167,6 +167,19 @@ impl<S: SchedulerSystem> UltWorker<S> {
         opt.as_ref().map_or(ptr::null_mut(), RunningTaskToken::desc)
     }
 
+    /// Safe counterpart to [`cur_task`](Self::cur_task) for callers that
+    /// know (structurally, not just by luck) that a task is actually
+    /// running right now — i.e. every caller except the internal
+    /// switch-shim window between `take_cur_task`/`set_cur_task`, where the
+    /// cell is legitimately empty. Panics rather than risking a null deref
+    /// if that assumption is ever wrong, same as
+    /// [`cur_task_token_mut`](Self::cur_task_token_mut)'s existing
+    /// `.expect()`.
+    pub(crate) fn cur_task_ref(&self) -> &S::Desc {
+        let opt: &Option<RunningTaskToken<S::Desc>> = unsafe { &*self.cur_task_cell.as_ptr() };
+        opt.as_ref().expect("cmpth: no current task on worker").as_desc()
+    }
+
     /// Mutable peek at the currently-running task's token, for callers with
     /// no explicit `RunningTaskToken` in scope (e.g. `UltTls::get`/`set`,
     /// reached through the generic `TlsSlot` trait) that still need
