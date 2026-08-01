@@ -30,11 +30,25 @@ pub(crate) unsafe fn push_continuation<S: SchedulerSystem>(desc: *mut S::Desc) w
     }
 }
 
+/// Bridge from `RawWaker`'s type-erased `*const ()` data pointer to a safe
+/// `&D`. This is the one relay point the waker vtable boundary genuinely
+/// needs to stay `unsafe` at — `RawWaker`'s contract, not anything about
+/// `D`, is what makes `ptr`'s validity unprovable to the type system.
+/// Every vtable function should call this exactly once, at the top, and use
+/// only safe `&self` methods on the result afterward.
+///
+/// # Safety
+/// `ptr` must be a live `*const D` disguised as `*const ()` (i.e. exactly
+/// the data pointer a `RawWaker` for this `D` was constructed with).
+pub(crate) unsafe fn desc_from_erased<D>(ptr: *const ()) -> &'static D {
+    unsafe { &*(ptr as *const D) }
+}
+
 pub(crate) unsafe fn drop_shared<S: SchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: WakerTaskDesc {
-    let desc = ptr as *const S::Desc;
+    let desc: &S::Desc = unsafe { desc_from_erased(ptr) };
     // If this was the last SHARED reference, the task is either still
     // running (block_on not done) or has already finished (block_on
     // returned with IDLE state).  Either way, no cleanup is needed:
     // DualTaskDesc lifetime is managed by the scheduler, not by waker refs.
-    unsafe { (*desc).decr_shared_ref() };
+    desc.decr_shared_ref();
 }

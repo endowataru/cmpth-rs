@@ -675,6 +675,17 @@ impl<D: TaskDesc> SuspendedTaskToken<D> {
         unsafe { (*self.0).is_root() }
     }
 
+    /// Safe access to the descriptor's own `&self` methods (join-protocol,
+    /// waker state machine) — the token's existence is itself the proof
+    /// `self.0` is live, so this is the one place that proof gets cashed in
+    /// for `D` rather than `D::Owned`. Never conflicts with `DerefMut`'s
+    /// exclusivity claim above: `TaskDesc`/`WakerTaskDesc`'s own methods
+    /// only ever touch `join_state`/`waker_refs`, which live outside
+    /// `Owned` for exactly this reason.
+    pub(crate) fn as_desc(&self) -> &D {
+        unsafe { &*self.0 }
+    }
+
     pub(crate) fn into_raw(self) -> *mut D {
         self.0
     }
@@ -721,6 +732,11 @@ impl<D: TaskDesc> DerefMut for RunningTaskToken<D> {
 impl<D: TaskDesc> RunningTaskToken<D> {
     pub(crate) fn desc(&self) -> *mut D {
         self.0
+    }
+
+    /// See [`SuspendedTaskToken::as_desc`] — identical reasoning.
+    pub(crate) fn as_desc(&self) -> &D {
+        unsafe { &*self.0 }
     }
 
     pub(crate) fn into_raw(self) -> *mut D {

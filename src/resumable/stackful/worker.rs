@@ -325,9 +325,8 @@ where
     // freshly allocated descriptor, `suspend_to_new`) at the call site
     // before the switch, so it's already exclusively ours here.
     let mut prev_task = wk.take_cur_task();
-    let prev_desc = prev_task.desc();
     let old = prev_task.publish_saved_context(prev.0);
-    debug_assert!(old.is_null(), "suspend over live ctx in suspend_shim (is_root={})", unsafe { (*prev_desc).is_root() });
+    debug_assert!(old.is_null(), "suspend over live ctx in suspend_shim (is_root={})", prev_task.as_desc().is_root());
     let mut next_running = RunningTaskToken(next);
     let wkp = wk as *const UltWorker<S> as *const ();
     next_running.mark_resumed_on(wkp);
@@ -359,7 +358,7 @@ where
     let mut prev_task = wk.take_cur_task();
     let prev_desc = prev_task.desc();
     let old = prev_task.publish_saved_context(prev.0);
-    debug_assert!(old.is_null(), "suspend over live ctx in cond_suspend_shim (is_root={})", unsafe { (*prev_desc).is_root() });
+    debug_assert!(old.is_null(), "suspend over live ctx in cond_suspend_shim (is_root={})", prev_task.as_desc().is_root());
 
     // Promote + commit immediately: `wk.cur_task()` correctly reflects
     // physical reality (this *is* what's running) for the entire duration
