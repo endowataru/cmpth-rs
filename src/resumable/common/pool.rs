@@ -46,7 +46,7 @@ use crate::resumable::common::stack::{HeapStack, StackAlloc};
 ///
 /// Generic over the descriptor type `D` (see
 /// [`crate::SchedulerSystem::Desc`]); every concrete system today sets
-/// `D = BasicTaskDesc`.
+/// `D = DualTaskDesc`.
 ///
 /// `alloc`'s `size` lets one pool serve requests of varying size (needed for
 /// `spawn_async`, where the required storage depends on the concrete

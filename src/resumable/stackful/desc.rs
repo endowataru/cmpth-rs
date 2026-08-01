@@ -1,11 +1,16 @@
-//! Stackful-only descriptor operations: a real, switchable saved context.
+//! Stackful-only descriptor operations: a real, switchable saved context,
+//! and [`StackfulOnlyTaskDesc`] — the concrete descriptor for `UltIdentity`
+//! (stackful-only) systems.
 
-use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, TaskDesc};
+use std::cell::UnsafeCell;
+use std::sync::atomic::AtomicUsize;
+
+use crate::resumable::common::desc::{BaseOwned, HasBaseOwned, RunningTaskToken, SuspendedTaskToken, TaskDesc, TaskDescAlloc, WakerTaskDesc, JS_DETACHED, JS_RUNNING};
 
 /// Implemented by a [`TaskDesc::Owned`] type that can hold a saved-context
-/// pointer — either directly ([`StackfulOnlyTaskDesc`](crate::resumable::common::desc::StackfulOnlyTaskDesc)'s
+/// pointer — either directly ([`StackfulOnlyTaskDesc`]'s
 /// `Owned`) or as one variant of a `ctx`/`poll_fn` union
-/// ([`BasicTaskDesc`](crate::resumable::common::desc::BasicTaskDesc)'s
+/// ([`DualTaskDesc`](crate::resumable::dual::desc::DualTaskDesc)'s
 /// `Owned`, via `TaskDispatch`).
 ///
 /// Deliberately plain fields, not `Cell`: `ctx` carries no ordering of its
@@ -52,7 +57,7 @@ pub trait HasCtx {
     ///
     /// No-op default: only meaningful for an `Owned` type that also
     /// implements [`HasPollFn`](crate::resumable::stackless::desc::HasPollFn)
-    /// (i.e. [`BasicTaskDesc`](crate::resumable::common::desc::BasicTaskDesc)'s),
+    /// (i.e. [`DualTaskDesc`](crate::resumable::dual::desc::DualTaskDesc)'s),
     /// which overrides this to commit its `ctx`/`poll_fn` union to the
     /// `Ctx` variant — the shared pool/`alloc_with` machinery that
     /// constructs it also serves `spawn_async`'s non-oversized-future path
@@ -111,5 +116,116 @@ impl<D: TaskDesc<Owned: HasCtx>> RunningTaskToken<D> {
     /// happened via the context switch itself.
     pub(crate) fn clear_saved_context(&mut self) {
         self.set_ctx(std::ptr::null_mut());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// StackfulOnlyTaskDesc — UltIdentity systems (real ULTs, no spawn_async)
+// ---------------------------------------------------------------------------
+
+/// Owner-exclusive fields for [`StackfulOnlyTaskDesc`]: [`BaseOwned`] plus
+/// the real saved-context pointer (no `poll_fn` slot — this flavor never
+/// has one).
+pub struct StackfulOnlyOwned {
+    base: BaseOwned,
+    ctx: *mut u8,
+}
+
+impl HasBaseOwned for StackfulOnlyOwned {
+    fn base(&self) -> &BaseOwned { &self.base }
+    fn base_mut(&mut self) -> &mut BaseOwned { &mut self.base }
+}
+
+impl HasCtx for StackfulOnlyOwned {
+    fn ctx(&self) -> *mut u8 { self.ctx }
+    fn set_ctx(&mut self, ptr: *mut u8) { self.ctx = ptr; }
+}
+
+/// Concrete descriptor for `UltIdentity`-based (stackful-only) systems: a
+/// real ULT with no `spawn_async` capability, so no `poll_fn` slot exists
+/// at all (contrast [`DualTaskDesc`](crate::resumable::dual::desc::DualTaskDesc),
+/// which needs both on the same struct).
+pub struct StackfulOnlyTaskDesc {
+    owned: UnsafeCell<StackfulOnlyOwned>,
+    join_state: AtomicUsize,
+    is_root: bool,
+    waker_refs: AtomicUsize,
+    stack: crate::resumable::common::stack::StackMem,
+}
+
+unsafe impl Send for StackfulOnlyTaskDesc {}
+unsafe impl Sync for StackfulOnlyTaskDesc {}
+
+impl TaskDesc for StackfulOnlyTaskDesc {
+    fn join_state(&self) -> &AtomicUsize { &self.join_state }
+    fn is_root(&self) -> bool { self.is_root }
+    fn stack_top(&self) -> *mut u8 { self.stack.top() }
+    type Owned = StackfulOnlyOwned;
+    fn owned_cell(&self) -> &UnsafeCell<StackfulOnlyOwned> { &self.owned }
+}
+
+impl WakerTaskDesc for StackfulOnlyTaskDesc {
+    fn waker_refs(&self) -> &AtomicUsize { &self.waker_refs }
+}
+
+impl TaskDescAlloc for StackfulOnlyTaskDesc {
+    fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> Self {
+        StackfulOnlyTaskDesc::alloc_with(stack, has_handle)
+    }
+
+    fn alloc(stack_size: usize, has_handle: bool) -> Self {
+        StackfulOnlyTaskDesc::alloc(stack_size, has_handle)
+    }
+
+    fn new_root() -> Self {
+        StackfulOnlyTaskDesc::new_root()
+    }
+
+    fn reinit(&mut self, has_handle: bool) {
+        StackfulOnlyTaskDesc::reinit(self, has_handle)
+    }
+}
+
+impl StackfulOnlyTaskDesc {
+    /// Construct a descriptor value with a heap stack.
+    pub(crate) fn alloc(stack_size: usize, has_handle: bool) -> StackfulOnlyTaskDesc {
+        use crate::resumable::common::stack::{HeapStack, StackAlloc as _};
+        Self::alloc_with(HeapStack::alloc_stack(stack_size).into(), has_handle)
+    }
+
+    /// Construct a descriptor value with a policy-allocated stack. For arena
+    /// stacks, captures the cell slot pointer for use by the switch shims.
+    pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> StackfulOnlyTaskDesc {
+        let mut base = BaseOwned::new();
+        base.slot = stack.cell_slot();
+        StackfulOnlyTaskDesc {
+            owned: UnsafeCell::new(StackfulOnlyOwned { base, ctx: std::ptr::null_mut() }),
+            is_root: false,
+            join_state: AtomicUsize::new(if has_handle { JS_RUNNING } else { JS_DETACHED }),
+            waker_refs: AtomicUsize::new(0),
+            stack,
+        }
+    }
+
+    /// Pseudo-descriptor for a worker's scheduler-loop context.
+    pub(crate) fn new_root() -> StackfulOnlyTaskDesc {
+        StackfulOnlyTaskDesc {
+            owned: UnsafeCell::new(StackfulOnlyOwned { base: BaseOwned::new(), ctx: std::ptr::null_mut() }),
+            is_root: true,
+            join_state: AtomicUsize::new(JS_DETACHED),
+            waker_refs: AtomicUsize::new(0),
+            stack: crate::resumable::common::stack::StackMem::None,
+        }
+    }
+
+    /// Reset a pooled descriptor for reuse (the stack allocation is kept).
+    pub(crate) fn reinit(&mut self, has_handle: bool) {
+        debug_assert!(!self.is_root);
+        let owned = self.owned.get_mut();
+        owned.ctx = std::ptr::null_mut();
+        owned.base.result = None;
+        owned.base.tls = None;
+        *self.join_state.get_mut() = if has_handle { JS_RUNNING } else { JS_DETACHED };
+        *self.waker_refs.get_mut() = 0;
     }
 }

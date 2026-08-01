@@ -76,7 +76,7 @@ pub(crate) const ARENA_RESERVE: usize = 1 << 34; // 16 GiB of address space
 /// Concrete implementations: `HeapStackMem` (plain heap) and
 /// [`ArenaStackMem`] (arena cell).  Both are produced by their corresponding
 /// [`StackAlloc`] implementation and converted into [`StackMem`] for storage
-/// inside [`BasicTaskDesc`](crate::resumable::common::desc::BasicTaskDesc).
+/// inside [`DualTaskDesc`](crate::resumable::dual::desc::DualTaskDesc).
 pub trait UltStackMemory: Send + 'static {
     /// Pointer one byte past the top of the usable stack region.
     fn stack_top(&self) -> *mut u8;
@@ -152,7 +152,7 @@ fn push_free_cell(cell: usize) {
 // StackMem — internal type-erased stack storage inside UltDesc
 // ---------------------------------------------------------------------------
 
-/// An allocated task stack stored inside [`BasicTaskDesc`](crate::resumable::common::desc::BasicTaskDesc).
+/// An allocated task stack stored inside [`DualTaskDesc`](crate::resumable::dual::desc::DualTaskDesc).
 ///
 /// Produced by converting a typed [`UltStackMemory`] value (via `From`); freed
 /// when the owning descriptor is dropped.  Root pseudo-descriptors use the
@@ -252,7 +252,7 @@ pub trait StackAlloc: Send + Sync + 'static {
 
 /// Plain heap-allocated stacks (16-byte aligned). Despite the name, not
 /// stackful-specific in practice: real ULT stacks default to it (via
-/// `S::StackAlloc`), but `BasicTaskDesc::alloc`'s `spawn_async`
+/// `S::StackAlloc`), but `DualTaskDesc::alloc`'s `spawn_async`
 /// oversized-request fallback also uses it directly (that "stack" only
 /// stores a `Future` — no code runs on it, so it never needs the arena).
 pub struct HeapStack;

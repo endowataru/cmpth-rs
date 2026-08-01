@@ -35,6 +35,6 @@ pub(crate) unsafe fn drop_shared<S: SchedulerSystem>(ptr: *const ()) where <S as
     // If this was the last SHARED reference, the task is either still
     // running (block_on not done) or has already finished (block_on
     // returned with IDLE state).  Either way, no cleanup is needed:
-    // BasicTaskDesc lifetime is managed by the scheduler, not by waker refs.
+    // DualTaskDesc lifetime is managed by the scheduler, not by waker refs.
     unsafe { (*desc).decr_shared_ref() };
 }

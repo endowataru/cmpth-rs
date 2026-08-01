@@ -185,10 +185,10 @@ pub trait UltIdentity: Sized + Send + Sync + 'static {
     type Ctx: ContextPolicy;
 
     /// Task descriptor type. Most implementors want
-    /// [`StackfulOnlyTaskDesc`](crate::resumable::common::desc::StackfulOnlyTaskDesc)
+    /// [`StackfulOnlyTaskDesc`](crate::resumable::stackful::desc::StackfulOnlyTaskDesc)
     /// (no unused `poll_fn` slot); a system that also needs `spawn_async`/
     /// dual capability on the same tasks wants
-    /// [`BasicTaskDesc`](crate::resumable::common::desc::BasicTaskDesc)
+    /// [`DualTaskDesc`](crate::resumable::dual::desc::DualTaskDesc)
     /// instead.
     type Desc: crate::resumable::common::desc::TaskDescAlloc + StackfulTaskDesc + crate::resumable::common::desc::WakerTaskDesc;
 
@@ -221,7 +221,7 @@ impl<M: UltIdentity> SchedulerSystem for M {
     // Never actually allocated through: nothing calls spawn_async on a
     // stackful-only UltIdentity system (StacklessTaskSystem's blanket
     // impl still applies whenever M::Desc: AsyncTaskDesc, e.g. for
-    // BasicTaskDesc, but the capability just goes unused here). Mirrors
+    // DualTaskDesc, but the capability just goes unused here). Mirrors
     // UltAsyncIdentity's unused `Pool` in the other direction.
     type AsyncPool = crate::resumable::common::pool::SimplePool<M::Desc>;
     const ASYNC_POOL_SIZE: usize = 0;

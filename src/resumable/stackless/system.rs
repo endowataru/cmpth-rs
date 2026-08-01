@@ -159,10 +159,10 @@ pub trait UltAsyncIdentity: Sized + Send + Sync + 'static {
     type Base: ThreadSystem;
 
     /// Task descriptor type. Most implementors want
-    /// [`StacklessOnlyTaskDesc`](crate::resumable::common::desc::StacklessOnlyTaskDesc)
+    /// [`StacklessOnlyTaskDesc`](crate::resumable::stackless::desc::StacklessOnlyTaskDesc)
     /// (no unused `ctx` slot); a system that also needs stackful `spawn`/
     /// dual capability on the same tasks wants
-    /// [`BasicTaskDesc`](crate::resumable::common::desc::BasicTaskDesc)
+    /// [`DualTaskDesc`](crate::resumable::dual::desc::DualTaskDesc)
     /// instead.
     type Desc: crate::resumable::common::desc::TaskDescAlloc + AsyncTaskDesc;
 

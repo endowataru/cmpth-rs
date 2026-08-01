@@ -292,7 +292,7 @@ impl<S: SchedulerSystem, T> Future for SpawnAction<S, T> {
     }
 }
 
-/// Type-erased poll function stored in `BasicTaskDesc::poll_fn` for async tasks.
+/// Type-erased poll function stored in `DualTaskDesc::poll_fn` for async tasks.
 ///
 /// Polls `F` once and reports what the caller's poll loop
 /// ([`crate::resumable::stackless::worker::run_async_poll`]) should do next — see

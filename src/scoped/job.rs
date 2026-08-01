@@ -5,7 +5,7 @@
 //! Shared by [`sync_engine`](super::sync_engine): the whole point is that a
 //! `parallel_call` branch is a plain value on the caller's own stack
 //! frame, never separately allocated — unlike a `spawn`/`spawn_async` task,
-//! which is a pooled or arena-backed [`crate::BasicTaskDesc`] with a general
+//! which is a pooled or arena-backed [`crate::DualTaskDesc`] with a general
 //! join-protocol supporting sync joiners, async wakers, and async joiners
 //! all at once. `join`'s two branches are always waited on by exactly one,
 //! statically-known party (the call itself), never handed out as a reusable
