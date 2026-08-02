@@ -251,11 +251,11 @@ pub trait HasPollFn<D> {
 /// Future — the type-erased poll entry point. Builds on [`WakerTaskDesc`]
 /// (a `spawn_async` task's own poll loop, `run_async_poll`, uses
 /// `mark_polling`/`park_after_poll` on itself just like `block_on` does).
-pub trait AsyncTaskDesc: WakerTaskDesc + TaskDesc<Owned: HasPollFn<Self>> {}
+pub trait AsyncTaskDesc: WakerTaskDesc + TaskDescCore<Owned: HasPollFn<Self>> {}
 
-impl<D: WakerTaskDesc + TaskDesc<Owned: HasPollFn<D>>> AsyncTaskDesc for D {}
+impl<D: WakerTaskDesc + TaskDescCore<Owned: HasPollFn<D>>> AsyncTaskDesc for D {}
 
-impl<D: TaskDesc<Owned: HasPollFn<D>>> SuspendedTaskToken<D> {
+impl<D: TaskDescCore<Owned: HasPollFn<D>>> SuspendedTaskToken<D> {
     /// The type-erased poll entry point, non-null once `spawn_now`/
     /// `fork_async_parent_first` finish setting up a `spawn_async` task.
     ///
@@ -282,7 +282,7 @@ impl<D: TaskDesc<Owned: HasPollFn<D>>> SuspendedTaskToken<D> {
     }
 }
 
-impl<D: TaskDesc<Owned: HasPollFn<D>>> RunningTaskToken<D> {
+impl<D: TaskDescCore<Owned: HasPollFn<D>>> RunningTaskToken<D> {
     pub(crate) fn poll_fn(&self) -> Option<TaskPollFn<D>> {
         (**self).poll_fn()
     }
