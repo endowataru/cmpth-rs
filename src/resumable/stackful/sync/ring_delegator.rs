@@ -114,25 +114,46 @@ impl<S: StackfulSchedulerSystem + ThreadSystem, C: DelegatorConsumer<S>, const N
     }
 
     fn try_unlock(&self, _head: *mut DelegatorNode<S, C>) -> bool where <S as SchedulerSystem>::Desc: StackfulTaskDesc, <S as ThreadSystem>::SuspendedThread: StackfulOnlyResumable {
+        // `head` is an *occupied* position (the slot `start_lock` handed
+        // out), and `tail` is one-past-the-last-allocated slot — so "empty,
+        // nobody joined after me" is `tail == head + 1`, not `tail == head`
+        // (that can never be true here: whoever currently holds `head`
+        // already counted themselves into `tail`). Mirrors McsQueue's own
+        // `try_unlock`: CAS `tail` from "just me" back to "nothing new since
+        // head", not a same-value CAS — and, same as there, a plain
+        // load-then-compare here would race a concurrent `start_lock`
+        // between the read and this function's caller committing to
+        // "unlocked" (two threads could both conclude they're now in
+        // charge). The CAS makes the transition atomic: it only succeeds if
+        // `tail` is still exactly `head + 1` at the moment of the swap.
         let head = self.head.load(Ordering::Relaxed);
-        let tail = self.tail.load(Ordering::Acquire);
-        if head == tail {
-            return true; // empty, effectively unlocked
-        }
-        false
+        self.tail.compare_exchange(
+            head.wrapping_add(1),
+            head,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ).is_ok()
     }
 
     fn try_follow_head(
         &self,
         head: *mut DelegatorNode<S, C>,
     ) -> Option<*mut DelegatorNode<S, C>> where <S as SchedulerSystem>::Desc: StackfulTaskDesc, <S as ThreadSystem>::SuspendedThread: StackfulOnlyResumable {
+        // The successor's own slot is what `set_next` marks ready (it always
+        // operates on `cur`, never `prev` — see `set_next` above), not the
+        // current head's slot: the head's own `ready` flag was consumed (or,
+        // for the very first/lock-winning holder, never set at all) long
+        // before it became head. Checking the wrong slot here used to mean
+        // `try_follow_head` reported "no successor yet" even when one was
+        // genuinely ready, silently falling through to the slower
+        // consumer_sth-notify path instead of the direct hand-off.
         let head_idx = self.head.load(Ordering::Relaxed);
-        let slot = &self.nodes[Self::mask(head_idx)];
+        let next_idx = head_idx.wrapping_add(1);
+        let slot = &self.nodes[Self::mask(next_idx)];
         if slot.ready.load(Ordering::Acquire) {
             slot.ready.store(false, Ordering::Relaxed);
             // Reset node to default for reuse.
             unsafe { *head = DelegatorNode::default() };
-            let next_idx = head_idx.wrapping_add(1);
             self.head.store(next_idx, Ordering::Release);
             return Some(self.slot_node(next_idx));
         }
