@@ -238,7 +238,7 @@ unsafe fn resumable_drop<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as
 ///
 /// `wait`'s commit/cancel shape mirrors
 /// [`StackfulResumable::wait_with_cond`](crate::traits::stackful::StackfulResumable::wait_with_cond)
-/// (as implemented by [`StackfulOnlyResumable`](crate::resumable::stackful::suspended::StackfulOnlyResumable))
+/// (as implemented by [`StackfulOnlyResumableCore`](crate::resumable::stackful::suspended::StackfulOnlyResumableCore))
 /// exactly — the same "wake raced in during poll" race that mutex/condvar
 /// already resolve via `cond_suspend_to_sched`'s commit/cancel closure, no
 /// separate PRIVATE/SHARED distinction needed since there's no ref count

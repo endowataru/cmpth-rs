@@ -26,7 +26,7 @@ use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::desc::SuspendedTaskToken;
 use crate::resumable::common::stack::StackAlloc;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
-use crate::resumable::stackful::suspended::StackfulOnlyResumable;
+use crate::resumable::stackful::suspended::StackfulOnlyResumableCore;
 use crate::resumable::common::worker::UltWorker;
 
 // `StackfulTaskSystem` now lives in `crate::traits::stackful` — re-exported
@@ -56,7 +56,7 @@ where
     const STACK_SIZE: usize;
 
     /// Parked-continuation type for this system.
-    type SuspendedThread: StackfulOnlyResumable<StackfulSchedulerSystem = Self>;
+    type SuspendedThread: StackfulOnlyResumableCore<StackfulSchedulerSystem = Self>;
 
     /// Resolve what a suspending/exiting ULT switches into when its local
     /// deque is empty: the worker's own root (scheduler-loop) continuation.
