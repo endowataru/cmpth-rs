@@ -174,13 +174,14 @@ pub trait HasBaseOwned {
     fn base_mut(&mut self) -> &mut BaseOwned;
 }
 
-/// Core per-task descriptor operations: every task, regardless of flavor,
-/// needs these (join protocol, owner-exclusive field storage).
-///
-/// Implementors are free to choose their own field layout, padding, and any
-/// extra members — callers only ever go through these named accessors, the
-/// same shape as [`crate::resumable::stackful::suspended::StackfulOnlyResumable`]'s `cont()`.
-pub trait TaskDesc: Send + Sync + Sized + 'static {
+/// Raw per-task descriptor storage: this crate's own concrete field layout
+/// (a single `AtomicUsize` join-state word, per the `JS_*` encoding above,
+/// plus owner-exclusive field storage). Implementing this trait opts a
+/// descriptor into the join-protocol algorithm below for free (via the
+/// blanket [`TaskDesc`] impl); a descriptor that wants a completely
+/// different internal representation implements [`TaskDesc`] directly
+/// instead — the same two-tier relationship as [`MutexCore`](crate::resumable::stackful::sync::MutexCore)/[`StackfulMutex`](crate::traits::StackfulMutex).
+pub trait TaskDescCore: Send + Sync + Sized + 'static {
     /// The join-protocol state word (see the `JS_*` encoding above).
     ///
     /// The exiting task publishes `FINISHED` with `Release` *after* writing
@@ -203,41 +204,49 @@ pub trait TaskDesc: Send + Sync + Sized + 'static {
     /// never called directly outside this module.
     type Owned: HasBaseOwned;
     fn owned_cell(&self) -> &UnsafeCell<Self::Owned>;
+}
 
-    // --- join-protocol operations, built on join_state() ------------------
+/// Core per-task descriptor operations: every task, regardless of flavor,
+/// needs these (join protocol, owner-exclusive field storage). Bodyless —
+/// implement directly for a custom descriptor representation, or implement
+/// [`TaskDescCore`] instead to get this crate's own word-based algorithm for
+/// free via the blanket impl below.
+pub trait TaskDesc: Send + Sync + Sized + 'static {
+    /// This descriptor's owner-exclusive fields (see [`BaseOwned`]/
+    /// [`HasBaseOwned`]).  Reached only through a live
+    /// [`RunningTaskToken`]/[`SuspendedTaskToken`]'s `Deref`/`DerefMut` —
+    /// never called directly outside this module.
+    type Owned: HasBaseOwned;
+    fn owned_cell(&self) -> &UnsafeCell<Self::Owned>;
+
+    /// True for the pseudo-descriptor representing a worker's scheduler-loop
+    /// context (the "root continuation"). Fixed at construction.
+    fn is_root(&self) -> bool;
+
+    /// Top of this task's stack allocation (`StackMem::None` for root
+    /// pseudo-descriptors, in which case this must never be called).
+    fn stack_top(&self) -> *mut u8;
 
     /// Read and decode the current join state (`Acquire`).
-    #[inline]
-    fn read_join_state(&self) -> JoinState<Self> {
-        decode_join_state(self.join_state().load(Ordering::Acquire))
-    }
+    fn read_join_state(&self) -> JoinState<Self>;
 
     /// Fast check for the hot join path: is the task already finished?
     /// (`Acquire` — pairs with the `Release`/`AcqRel` publish in
     /// [`publish_finished`](Self::publish_finished)/
     /// [`commit_finished`](Self::commit_finished), making the written result
     /// visible.)
-    #[inline]
-    fn is_finished(&self) -> bool {
-        self.join_state().load(Ordering::Acquire) == JS_FINISHED
-    }
+    fn is_finished(&self) -> bool;
 
     /// Direct-handoff exit: the exiting task already switched straight into
     /// the parked sync joiner's continuation: this just publishes `FINISHED`
     /// (`Release`) so the joiner (now running) observes its result is ready.
-    #[inline]
-    fn commit_finished(&self) {
-        self.join_state().store(JS_FINISHED, Ordering::Release);
-    }
+    fn commit_finished(&self);
 
     /// General-case exit: publish `FINISHED` (`AcqRel` swap) and return
     /// whichever party the old state names, so the caller can settle it
     /// (wake a late-registered joiner/waker, or notice the handle was
     /// dropped).
-    #[inline]
-    fn publish_finished(&self) -> JoinState<Self> {
-        decode_join_state(self.join_state().swap(JS_FINISHED, Ordering::AcqRel))
-    }
+    fn publish_finished(&self) -> JoinState<Self>;
 
     /// `JoinHandle::join`'s slow path: try to register `joiner` (a parked
     /// sync joiner's descriptor) as this task's waiter. Returns `false` if
@@ -249,6 +258,77 @@ pub trait TaskDesc: Send + Sync + Sized + 'static {
     /// # Safety
     /// `joiner` must be a stable pointer to a currently-parked task
     /// descriptor for as long as it might be woken through this slot.
+    unsafe fn try_register_sync_joiner(&self, joiner: *mut Self) -> bool;
+
+    /// `JoinHandle::poll`'s fast-path registration: install `joiner` (the
+    /// currently-polling task's own descriptor) directly, with no
+    /// allocation. Returns `false` if the task turned out to already be
+    /// finished (caller should proceed to take the result instead) —
+    /// otherwise commits the tagged pointer and drops whichever *boxed*
+    /// waker it superseded, if any (an old `AsyncJoiner` needs no cleanup:
+    /// it never allocated).
+    ///
+    /// # Safety
+    /// `joiner` must be a stable pointer to the currently-polling task's own
+    /// descriptor for as long as it might be woken through this slot — the
+    /// caller (`JoinHandle::poll`) only calls this when `joiner` came from
+    /// `UltWorker::polling_async`, which is only ever set to the descriptor
+    /// `run_async_poll` is synchronously driving right now (see that
+    /// function's doc comment for why the ambient waker is then guaranteed
+    /// to be `joiner`'s own).
+    ///
+    /// TODO(family B): moves to `WakerTaskDesc` once that split lands —
+    /// stays here for now so this commit is independently buildable.
+    unsafe fn try_register_async_joiner(&self, joiner: *mut Self) -> bool;
+
+    /// `JoinHandle::poll`'s waker registration: try to install `waker` as
+    /// this task's async waiter. Returns `false` if the task turned out to
+    /// already be finished (caller should proceed to take the result
+    /// instead) — otherwise commits the boxed, tagged waker and drops
+    /// whichever waker it superseded, if any.
+    ///
+    /// TODO(family B): moves to `WakerTaskDesc` once that split lands —
+    /// stays here for now so this commit is independently buildable.
+    fn try_register_waker(&self, waker: Waker) -> bool;
+
+    /// `JoinHandle::drop`'s detach attempt: try to mark this task detached
+    /// (no handle left to collect the result). Returns `true` if the task
+    /// was already finished (caller now owns the result and the
+    /// descriptor) — otherwise commits `DETACHED` and drops any registered
+    /// async waker (nobody left to wake).
+    fn try_mark_detached(&self) -> bool;
+}
+
+/// Blanket [`TaskDesc`] for any descriptor using this crate's own
+/// word-based join-state encoding: the actual join-protocol algorithm lives
+/// here (not as trait defaults on [`TaskDescCore`]) so that trait stays a
+/// pure accessor contract.
+impl<D: TaskDescCore> TaskDesc for D {
+    type Owned = <D as TaskDescCore>::Owned;
+    fn owned_cell(&self) -> &UnsafeCell<Self::Owned> { TaskDescCore::owned_cell(self) }
+    fn is_root(&self) -> bool { TaskDescCore::is_root(self) }
+    fn stack_top(&self) -> *mut u8 { TaskDescCore::stack_top(self) }
+
+    #[inline]
+    fn read_join_state(&self) -> JoinState<Self> {
+        decode_join_state(self.join_state().load(Ordering::Acquire))
+    }
+
+    #[inline]
+    fn is_finished(&self) -> bool {
+        self.join_state().load(Ordering::Acquire) == JS_FINISHED
+    }
+
+    #[inline]
+    fn commit_finished(&self) {
+        self.join_state().store(JS_FINISHED, Ordering::Release);
+    }
+
+    #[inline]
+    fn publish_finished(&self) -> JoinState<Self> {
+        decode_join_state(self.join_state().swap(JS_FINISHED, Ordering::AcqRel))
+    }
+
     unsafe fn try_register_sync_joiner(&self, joiner: *mut Self) -> bool {
         let mut cur = self.join_state().load(Ordering::Relaxed);
         loop {
@@ -272,22 +352,6 @@ pub trait TaskDesc: Send + Sync + Sized + 'static {
         }
     }
 
-    /// `JoinHandle::poll`'s fast-path registration: install `joiner` (the
-    /// currently-polling task's own descriptor) directly, with no
-    /// allocation. Returns `false` if the task turned out to already be
-    /// finished (caller should proceed to take the result instead) —
-    /// otherwise commits the tagged pointer and drops whichever *boxed*
-    /// waker it superseded, if any (an old `AsyncJoiner` needs no cleanup:
-    /// it never allocated).
-    ///
-    /// # Safety
-    /// `joiner` must be a stable pointer to the currently-polling task's own
-    /// descriptor for as long as it might be woken through this slot — the
-    /// caller (`JoinHandle::poll`) only calls this when `joiner` came from
-    /// `UltWorker::polling_async`, which is only ever set to the descriptor
-    /// `run_async_poll` is synchronously driving right now (see that
-    /// function's doc comment for why the ambient waker is then guaranteed
-    /// to be `joiner`'s own).
     #[inline]
     unsafe fn try_register_async_joiner(&self, joiner: *mut Self) -> bool {
         debug_assert_eq!(
@@ -315,11 +379,6 @@ pub trait TaskDesc: Send + Sync + Sized + 'static {
         }
     }
 
-    /// `JoinHandle::poll`'s waker registration: try to install `waker` as
-    /// this task's async waiter. Returns `false` if the task turned out to
-    /// already be finished (caller should proceed to take the result
-    /// instead) — otherwise commits the boxed, tagged waker and drops
-    /// whichever waker it superseded, if any.
     fn try_register_waker(&self, waker: Waker) -> bool {
         let mut cur = self.join_state().load(Ordering::Acquire);
         if cur == JS_FINISHED {
@@ -350,11 +409,6 @@ pub trait TaskDesc: Send + Sync + Sized + 'static {
         }
     }
 
-    /// `JoinHandle::drop`'s detach attempt: try to mark this task detached
-    /// (no handle left to collect the result). Returns `true` if the task
-    /// was already finished (caller now owns the result and the
-    /// descriptor) — otherwise commits `DETACHED` and drops any registered
-    /// async waker (nobody left to wake).
     fn try_mark_detached(&self) -> bool {
         let mut cur = self.join_state().load(Ordering::Acquire);
         loop {

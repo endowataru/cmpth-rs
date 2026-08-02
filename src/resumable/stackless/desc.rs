@@ -6,7 +6,7 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Context;
 
-use crate::resumable::common::desc::{BaseOwned, HasBaseOwned, RunningTaskToken, SuspendedTaskToken, TaskDesc, TaskDescAlloc, JS_DETACHED, JS_RUNNING};
+use crate::resumable::common::desc::{BaseOwned, HasBaseOwned, RunningTaskToken, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskDescAlloc, JS_DETACHED, JS_RUNNING};
 use crate::resumable::common::waker::{self, WakeOutcome, EVER_SHARED, STATE_MASK};
 
 /// Descriptor operations needed by a task driven via a real
@@ -219,7 +219,7 @@ pub struct StacklessOnlyTaskDesc {
 unsafe impl Send for StacklessOnlyTaskDesc {}
 unsafe impl Sync for StacklessOnlyTaskDesc {}
 
-impl TaskDesc for StacklessOnlyTaskDesc {
+impl TaskDescCore for StacklessOnlyTaskDesc {
     fn join_state(&self) -> &AtomicUsize { &self.join_state }
     fn is_root(&self) -> bool { self.is_root }
     fn stack_top(&self) -> *mut u8 { self.stack.top() }

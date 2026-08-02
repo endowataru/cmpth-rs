@@ -7,7 +7,7 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::AtomicUsize;
 
-use crate::resumable::common::desc::{BaseOwned, HasBaseOwned, TaskDesc, TaskDescAlloc, JS_DETACHED, JS_RUNNING};
+use crate::resumable::common::desc::{BaseOwned, HasBaseOwned, TaskDescCore, TaskDescAlloc, JS_DETACHED, JS_RUNNING};
 use crate::resumable::stackless::desc::{TaskPollFn, WakerTaskDesc};
 
 /// A dual task is never both a real ULT and a `spawn_async` future — this
@@ -114,7 +114,7 @@ pub struct DualTaskDesc {
 unsafe impl Send for DualTaskDesc {}
 unsafe impl Sync for DualTaskDesc {}
 
-impl TaskDesc for DualTaskDesc {
+impl TaskDescCore for DualTaskDesc {
     fn join_state(&self) -> &AtomicUsize { &self.join_state }
     fn is_root(&self) -> bool { self.is_root }
     fn stack_top(&self) -> *mut u8 { self.stack.top() }
