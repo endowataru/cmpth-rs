@@ -260,37 +260,6 @@ pub trait TaskDesc: Send + Sync + Sized + 'static {
     /// descriptor for as long as it might be woken through this slot.
     unsafe fn try_register_sync_joiner(&self, joiner: *mut Self) -> bool;
 
-    /// `JoinHandle::poll`'s fast-path registration: install `joiner` (the
-    /// currently-polling task's own descriptor) directly, with no
-    /// allocation. Returns `false` if the task turned out to already be
-    /// finished (caller should proceed to take the result instead) —
-    /// otherwise commits the tagged pointer and drops whichever *boxed*
-    /// waker it superseded, if any (an old `AsyncJoiner` needs no cleanup:
-    /// it never allocated).
-    ///
-    /// # Safety
-    /// `joiner` must be a stable pointer to the currently-polling task's own
-    /// descriptor for as long as it might be woken through this slot — the
-    /// caller (`JoinHandle::poll`) only calls this when `joiner` came from
-    /// `UltWorker::polling_async`, which is only ever set to the descriptor
-    /// `run_async_poll` is synchronously driving right now (see that
-    /// function's doc comment for why the ambient waker is then guaranteed
-    /// to be `joiner`'s own).
-    ///
-    /// TODO(family B): moves to `WakerTaskDesc` once that split lands —
-    /// stays here for now so this commit is independently buildable.
-    unsafe fn try_register_async_joiner(&self, joiner: *mut Self) -> bool;
-
-    /// `JoinHandle::poll`'s waker registration: try to install `waker` as
-    /// this task's async waiter. Returns `false` if the task turned out to
-    /// already be finished (caller should proceed to take the result
-    /// instead) — otherwise commits the boxed, tagged waker and drops
-    /// whichever waker it superseded, if any.
-    ///
-    /// TODO(family B): moves to `WakerTaskDesc` once that split lands —
-    /// stays here for now so this commit is independently buildable.
-    fn try_register_waker(&self, waker: Waker) -> bool;
-
     /// `JoinHandle::drop`'s detach attempt: try to mark this task detached
     /// (no handle left to collect the result). Returns `true` if the task
     /// was already finished (caller now owns the result and the
@@ -345,63 +314,6 @@ impl<D: TaskDescCore> TaskDesc for D {
                     if let JoinState::AsyncWaker(w) = decode_join_state::<Self>(cur) {
                         drop(unsafe { Box::from_raw(w) });
                     }
-                    return true;
-                }
-                Err(c) => cur = c,
-            }
-        }
-    }
-
-    #[inline]
-    unsafe fn try_register_async_joiner(&self, joiner: *mut Self) -> bool {
-        debug_assert_eq!(
-            joiner as usize & (JS_ASYNC_TAG | JS_ASYNC_JOINER_TAG),
-            0,
-            "cmpth: descriptor pointer not aligned enough to tag"
-        );
-        let mut cur = self.join_state().load(Ordering::Acquire);
-        let new = (joiner as usize) | JS_ASYNC_JOINER_TAG;
-        loop {
-            if cur == JS_FINISHED {
-                return false;
-            }
-            match self.join_state().compare_exchange_weak(
-                cur, new, Ordering::Release, Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    if let JoinState::AsyncWaker(w) = decode_join_state::<Self>(cur) {
-                        drop(unsafe { Box::from_raw(w) });
-                    }
-                    return true;
-                }
-                Err(c) => cur = c,
-            }
-        }
-    }
-
-    fn try_register_waker(&self, waker: Waker) -> bool {
-        let mut cur = self.join_state().load(Ordering::Acquire);
-        if cur == JS_FINISHED {
-            return false;
-        }
-        let new = Box::into_raw(Box::new(waker)) as usize | JS_ASYNC_TAG;
-        loop {
-            if cur == JS_FINISHED {
-                drop(unsafe { Box::from_raw((new & !JS_ASYNC_TAG) as *mut Waker) });
-                return false;
-            }
-            match self.join_state().compare_exchange_weak(
-                cur, new, Ordering::Release, Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    if let JoinState::AsyncWaker(w) = decode_join_state::<Self>(cur) {
-                        drop(unsafe { Box::from_raw(w) });
-                    }
-                    // Left disabled: this is a generic TaskDesc default
-                    // method with no `S` in scope, so there's no worker to
-                    // reach a per-worker WorkerLog through. Also confirmed
-                    // uninvolved in the Part 7 crash (zero wake events for
-                    // that capture's sid).
                     return true;
                 }
                 Err(c) => cur = c,
