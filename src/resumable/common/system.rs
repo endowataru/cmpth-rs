@@ -110,6 +110,27 @@ pub trait SchedulerSystem: Sized + Send + Sync + 'static {
     ///
     /// [`execute`]: Self::execute
     fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut Self::Desc);
+
+    /// Wake an `AsyncJoiner` found in `join_state` by `exit`/`exit_with_result`
+    /// (`resumable::stackful::thread`) — the completing task hands off
+    /// directly to the polling task's own descriptor, without a boxed
+    /// `Waker`, whenever the joiner is itself driven by this same system's
+    /// `run_async_poll`.
+    ///
+    /// Default: unreachable. `JoinState::AsyncJoiner` can only ever be
+    /// written by `TaskDesc::try_register_async_joiner`, and that is only
+    /// ever called from `JoinHandle::poll`, which itself requires
+    /// `Self::Desc: AsyncTaskDesc` — so a system whose `Desc` has no async
+    /// capability (stackful-only) can never actually observe this state;
+    /// the default keeps `exit`/`exit_with_result` generic over such
+    /// systems without forcing `Self::Desc: WakerTaskDesc` on them just to
+    /// type-check a branch they can never reach. Dual (and any future
+    /// stackful+async combination) overrides this to call
+    /// `stackless::waker::try_wake_async::<Self>(desc)`.
+    fn wake_async_joiner(desc: *mut Self::Desc) {
+        let _ = desc;
+        unreachable!("cmpth: AsyncJoiner join state on a system with no async capability")
+    }
 }
 
 // ---------------------------------------------------------------------------

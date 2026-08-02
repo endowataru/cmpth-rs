@@ -3,10 +3,82 @@
 //! `UltAsyncIdentity` (stackless-only) systems.
 
 use std::cell::UnsafeCell;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Context;
 
-use crate::resumable::common::desc::{BaseOwned, HasBaseOwned, RunningTaskToken, SuspendedTaskToken, TaskDesc, TaskDescAlloc, WakerTaskDesc, JS_DETACHED, JS_RUNNING};
+use crate::resumable::common::desc::{BaseOwned, HasBaseOwned, RunningTaskToken, SuspendedTaskToken, TaskDesc, TaskDescAlloc, JS_DETACHED, JS_RUNNING};
+use crate::resumable::common::waker::{self, WakeOutcome, EVER_SHARED, STATE_MASK};
+
+/// Descriptor operations needed by a task driven via a real
+/// [`std::task::Waker`] whose wake state must live on the descriptor
+/// itself — currently only `spawn_async` (see [`AsyncTaskDesc`]'s doc
+/// comment for why: no stack to anchor the state anywhere else).
+///
+/// `block_on` (stackful) used to share this trait too, but only ever
+/// needed the state machine, not a descriptor field — it now drives the
+/// same core CAS logic (factored out to
+/// [`common::waker`](crate::resumable::common::waker) so both share it)
+/// against a block_on-call-scoped box instead; see
+/// [`ResumablePoller`](crate::resumable::stackful::waker::ResumablePoller).
+pub trait WakerTaskDesc: TaskDesc {
+    /// Encodes `EVER_SHARED` and POLLING/PARKED/NOTIFIED/IDLE state — see
+    /// [`common::waker`](crate::resumable::common::waker)'s module doc
+    /// comment for the encoding. Zero (IDLE) when no poll session is
+    /// active on this task.
+    fn waker_refs(&self) -> &AtomicUsize;
+
+    // --- named waker_refs state-machine operations, delegating to the
+    // shared core in `common::waker` -----------------------------------
+
+    #[inline]
+    fn mark_polling(&self) {
+        waker::mark_polling(self.waker_refs())
+    }
+
+    #[inline]
+    fn mark_idle(&self) {
+        waker::mark_idle(self.waker_refs())
+    }
+
+    fn decide_park(&self) -> bool {
+        waker::decide_park(self.waker_refs())
+    }
+
+    #[inline]
+    fn park_after_poll(&self) -> bool {
+        waker::park_after_poll(self.waker_refs())
+    }
+
+    /// Core wake CAS loop, shared by the stackful (`try_wake`) and async
+    /// (`try_wake_async`) wake paths in `waker.rs`.
+    fn try_wake_state(&self) -> WakeOutcome {
+        waker::try_wake_state(self.waker_refs())
+    }
+
+    /// True once this waker has been cloned at least once. Sticky — never
+    /// clears back to false.
+    fn is_ever_shared(&self) -> bool {
+        self.waker_refs().load(Ordering::Relaxed) & EVER_SHARED != 0
+    }
+
+    /// First-clone transition: set `EVER_SHARED`, preserving whatever state
+    /// bits are currently set. CAS loop: a concurrent `wake()` may change
+    /// the state bits underneath. No ref count to seed — nothing here ever
+    /// frees based on one (see `common::waker::drop_shared`'s doc comment).
+    fn transition_to_shared(&self) {
+        loop {
+            let old = self.waker_refs().load(Ordering::Relaxed);
+            let new = EVER_SHARED | (old & STATE_MASK);
+            if self
+                .waker_refs()
+                .compare_exchange(old, new, Ordering::Release, Ordering::Relaxed)
+                .is_ok()
+            {
+                return;
+            }
+        }
+    }
+}
 
 /// Result of driving one `spawn_async` task's poll to completion or a
 /// suspend point (named `TaskPollResult`, not `PollResult`, to keep it out

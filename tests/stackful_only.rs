@@ -70,3 +70,93 @@ fn yield_now_roundtrips() {
         }
     });
 }
+
+// ---------------------------------------------------------------------------
+// block_on — exercises ResumablePoller's actual park/wake path, not just the
+// always-ready case (see `traits::stackful::ThreadSystem::block_on`'s
+// doctest, which only ever polls `async { 6 * 7 }` once and never parks).
+// ---------------------------------------------------------------------------
+
+/// Future that yields exactly once before becoming ready, notifying itself
+/// *during* the same `poll()` call that returns `Pending` — exercises
+/// `ResumablePollerSlot`'s "wake raced in before park committed" cancel
+/// path (`decide_park`'s NOTIFIED branch), the same race
+/// `block_on_yield_once` (tests/integration.rs) checks for `DefaultDualTaskSystem`.
+struct YieldOnce(bool);
+
+impl std::future::Future for YieldOnce {
+    type Output = u32;
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<u32> {
+        if self.0 {
+            std::task::Poll::Ready(42)
+        } else {
+            self.0 = true;
+            cx.waker().wake_by_ref(); // notify immediately; executor must handle the race
+            std::task::Poll::Pending
+        }
+    }
+}
+
+#[test]
+fn block_on_yield_once() {
+    DefaultStackfulOnlyTaskSystem::run(2, || {
+        let v = DefaultStackfulOnlyTaskSystem::block_on(YieldOnce(false));
+        assert_eq!(v, 42);
+    });
+}
+
+/// Future that is genuinely parked, then woken from a *different* ULT via a
+/// cloned waker — exercises `ResumablePollerSlot`'s real PARKED ->
+/// `ClaimedParked` -> `push_continuation` path (the `Arc`-backed clone must
+/// stay valid across the hand-off to the waking ULT). Mirrors
+/// `block_on_cross_ult_wake` (tests/integration.rs) for
+/// `DefaultStackfulOnlyTaskSystem`.
+#[test]
+fn block_on_cross_ult_wake() {
+    use std::sync::atomic::{AtomicBool, Ordering as Ord};
+    use std::sync::Mutex;
+    use std::task::Waker;
+
+    struct WaitForWake {
+        slot: Arc<Mutex<Option<Waker>>>,
+        done: Arc<AtomicBool>,
+    }
+    impl std::future::Future for WaitForWake {
+        type Output = ();
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<()> {
+            if self.done.load(Ord::Acquire) {
+                return std::task::Poll::Ready(());
+            }
+            *self.slot.lock().unwrap() = Some(cx.waker().clone());
+            std::task::Poll::Pending
+        }
+    }
+
+    DefaultStackfulOnlyTaskSystem::run(2, || {
+        let slot: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
+        let done: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
+
+        let slot2 = Arc::clone(&slot);
+        let done2 = Arc::clone(&done);
+        let waker_h = DefaultStackfulOnlyTaskSystem::spawn(move || {
+            loop {
+                let w = slot2.lock().unwrap().take();
+                if let Some(w) = w {
+                    done2.store(true, Ord::Release); // must happen before wake()
+                    w.wake();
+                    break;
+                }
+                DefaultStackfulOnlyTaskSystem::yield_now();
+            }
+        });
+
+        DefaultStackfulOnlyTaskSystem::block_on(WaitForWake { slot, done });
+        JoinHandleLike::join(waker_h);
+    });
+}

@@ -35,21 +35,25 @@
 //!
 //! # Layering
 //!
-//! `TaskDesc`/`TaskDescAlloc`/`WakerTaskDesc`/`WakeOutcome`/`JoinState`/
-//! `BaseOwned`/`HasBaseOwned`/`SuspendedTaskToken`/`RunningTaskToken` live
-//! here because they're genuinely shared: the join-protocol
-//! (`join_state`/`JS_*`) applies to every task regardless of flavor, and
-//! `WakerTaskDesc` (`waker_refs`/`JS_*`-adjacent state machine) is needed by
-//! *both* `block_on` (stackful, via
-//! [`stackful::waker::UltPoller`](crate::resumable::stackful::waker::UltPoller))
-//! and `spawn_async` (stackless, via
-//! `stackless::worker::run_async_poll`).
+//! `TaskDesc`/`TaskDescAlloc`/`JoinState`/`BaseOwned`/`HasBaseOwned`/
+//! `SuspendedTaskToken`/`RunningTaskToken` live here because they're
+//! genuinely shared: the join-protocol (`join_state`/`JS_*`) applies to
+//! every task regardless of flavor, and the tokens are generic over `D:
+//! TaskDesc` without knowing which flavor `D` is.
+//!
 //! [`StackfulTaskDesc`](crate::resumable::stackful::desc::StackfulTaskDesc)/[`HasCtx`](crate::resumable::stackful::desc::HasCtx)
 //! (real saved-context handling) and
-//! [`AsyncTaskDesc`](crate::resumable::stackless::desc::AsyncTaskDesc)/[`HasPollFn`](crate::resumable::stackless::desc::HasPollFn)
-//! (`poll_fn`) are the two genuinely flavor-specific extension traits, split
-//! out to `stackful::desc`/`stackless::desc` — alongside the concrete
-//! descriptor type that needs each one.
+//! [`WakerTaskDesc`](crate::resumable::stackless::desc::WakerTaskDesc)/[`AsyncTaskDesc`](crate::resumable::stackless::desc::AsyncTaskDesc)/[`HasPollFn`](crate::resumable::stackless::desc::HasPollFn)
+//! are flavor-specific extension traits, split out to `stackful::desc`/
+//! `stackless::desc` alongside the concrete descriptor type(s) that need
+//! them. `WakerTaskDesc` moved to `stackless::desc` specifically because
+//! `spawn_async` has no stack to resume — its wake state has nowhere to
+//! live but the descriptor itself. `block_on` (stackful) needed the same
+//! shape of state machine but not the descriptor: it uses
+//! [`stackful::waker::ResumablePoller`](crate::resumable::stackful::waker::ResumablePoller),
+//! a block_on-call-scoped box, driven by the same core CAS logic (factored
+//! out to [`common::waker`](crate::resumable::common::waker) so both share
+//! it) instead of a per-task field.
 
 use std::any::Any;
 use std::cell::UnsafeCell;
@@ -59,25 +63,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Waker;
 
 pub type TaskResult = Result<Box<dyn Any + Send>, Box<dyn Any + Send>>;
-
-// ---------------------------------------------------------------------------
-// waker_refs encoding
-//
-// bit 63:   EVER_SHARED — set on first clone of a waker; sticky forever.
-// bits 2-62: ref count for SHARED wakers (0 in PRIVATE mode).
-// bits 0-1:  state for PRIVATE mode, or preserved state for SHARED:
-//   IDLE     = 0  — block_on not active
-//   POLLING  = 1  — currently inside poll()
-//   PARKED   = 2  — suspended, waiting for wake()
-//   NOTIFIED = 3  — wake() called while polling; re-poll on next iteration
-// ---------------------------------------------------------------------------
-pub(crate) const IDLE:        usize = 0;
-pub(crate) const POLLING:     usize = 1;
-pub(crate) const PARKED:      usize = 2;
-pub(crate) const NOTIFIED:    usize = 3;
-pub(crate) const EVER_SHARED: usize = 1 << 63;
-pub(crate) const STATE_MASK:  usize = 3;
-pub(crate) const REF_ONE:     usize = 4; // one unit of ref count (bits 2+)
 
 // ---------------------------------------------------------------------------
 // join_state encoding
@@ -421,200 +406,6 @@ pub trait TaskDescAlloc: TaskDesc + Sized {
 
     /// Reset a pooled descriptor for reuse (the stack allocation is kept).
     fn reinit(&mut self, has_handle: bool);
-}
-
-/// Descriptor operations needed by any task that can be driven via a real
-/// [`std::task::Waker`] — both `block_on` (polling an arbitrary `Future`
-/// from a real ULT) and `spawn_async` tasks need this `waker_refs` state
-/// machine; `spawn_async` additionally needs
-/// [`AsyncTaskDesc`](crate::resumable::stackless::desc::AsyncTaskDesc) on
-/// top for its `poll_fn` task representation. Kept separate from
-/// `AsyncTaskDesc` so that `ThreadSystem::block_on` (and anything generic
-/// over `S: ThreadSystem`, like `DelegatorConsumer`) doesn't drag in
-/// `poll_fn`/spawn_async-specific machinery it never touches — a system that
-/// supports `block_on` but not `spawn_async` is expressible this way.
-pub trait WakerTaskDesc: TaskDesc {
-    /// Encodes PRIVATE/SHARED mode, ref count, and POLLING/PARKED/NOTIFIED/
-    /// IDLE state.  See the `waker_refs` constants at the top of this file.
-    /// Zero (IDLE) when no `block_on` call is active on this task.
-    fn waker_refs(&self) -> &AtomicUsize;
-
-    // --- named waker_refs state-machine operations -------------------------
-
-    /// Reset to POLLING unconditionally.  Called whenever a poll is about
-    /// to begin (`UltPoller::new`, `run_async_poll`'s pre-poll mark).
-    #[inline]
-    fn mark_polling(&self) {
-        self.waker_refs().store(POLLING, Ordering::Release);
-    }
-
-    /// Reset to IDLE unconditionally.  Called when a poll session ends
-    /// (`UltPoller::drop`, `poll_spawned_task` invalidating the waker before
-    /// publishing the result so a racing `wake()` becomes a no-op).
-    #[inline]
-    fn mark_idle(&self) {
-        self.waker_refs().store(IDLE, Ordering::Release);
-    }
-
-    /// `UltPoller::wait`'s cond_suspend commit decision, run from inside
-    /// the suspend shim after the context is already saved: read the
-    /// current state and either commit to PARKED (`true`) or, if a wake
-    /// already raced in during `poll()` (state == NOTIFIED), cancel by
-    /// resetting to POLLING (`false`) so the caller re-polls immediately
-    /// instead of parking.
-    ///
-    /// CAS loop, matching `park_after_poll`. A plain load-then-store here
-    /// raced with `try_wake_state`'s CAS: if a concurrent `wake()` claimed
-    /// POLLING -> NOTIFIED between this method's load and store, the store
-    /// (computed from the stale POLLING read) clobbered NOTIFIED back to
-    /// PARKED. `try_wake_state` had already returned `SetNotified` (task
-    /// "still running, will notice on its own") and so never pushed a
-    /// continuation -- the task committed to PARKED with nobody left to
-    /// wake it, a permanent lost-wakeup livelock.
-    fn decide_park(&self) -> bool {
-        loop {
-            let refs = self.waker_refs().load(Ordering::Acquire);
-            let state = refs & STATE_MASK;
-            if state == NOTIFIED {
-                let new = (refs & !STATE_MASK) | POLLING;
-                if self
-                    .waker_refs()
-                    .compare_exchange(refs, new, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-                {
-                    return false;
-                }
-            } else {
-                let new = (refs & !STATE_MASK) | PARKED;
-                if self
-                    .waker_refs()
-                    .compare_exchange(refs, new, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-                {
-                    return true;
-                }
-            }
-        }
-    }
-
-    /// `run_async_poll`'s post-poll transition after a `Pending` result:
-    /// try to park (POLLING -> PARKED, returns `true`). If a wake raced in
-    /// during the poll (state == NOTIFIED), claims a re-poll instead
-    /// (NOTIFIED -> POLLING, returns `false` so the caller re-queues the
-    /// task immediately rather than parking it).
-    ///
-    /// CAS loop — unlike `decide_park`, concurrent wakers can race this
-    /// transition (matches the original call site exactly).
-    #[inline]
-    fn park_after_poll(&self) -> bool {
-        loop {
-            let refs = self.waker_refs().load(Ordering::Acquire);
-            let state = refs & STATE_MASK;
-            if state == NOTIFIED {
-                let new = (refs & !STATE_MASK) | POLLING;
-                if self
-                    .waker_refs()
-                    .compare_exchange(refs, new, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-                {
-                    return false;
-                }
-            } else {
-                let new = (refs & !STATE_MASK) | PARKED;
-                if self
-                    .waker_refs()
-                    .compare_exchange(refs, new, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-                {
-                    return true;
-                }
-            }
-        }
-    }
-
-    /// Core wake CAS loop, shared by the stackful (`try_wake`) and async
-    /// (`try_wake_async`) wake paths in `waker.rs`.
-    fn try_wake_state(&self) -> WakeOutcome {
-        loop {
-            let refs = self.waker_refs().load(Ordering::Acquire);
-            let state = refs & STATE_MASK;
-            match state {
-                s if s == POLLING => {
-                    // Task is running; request a re-poll by setting NOTIFIED.
-                    let new = (refs & !STATE_MASK) | NOTIFIED;
-                    match self.waker_refs().compare_exchange(
-                        refs, new, Ordering::AcqRel, Ordering::Acquire,
-                    ) {
-                        Ok(_) => return WakeOutcome::SetNotified,
-                        Err(_) => continue,
-                    }
-                }
-                s if s == PARKED => {
-                    // Task is suspended; claim it -- caller must deliver
-                    // the continuation.
-                    let new = (refs & !STATE_MASK) | POLLING;
-                    match self.waker_refs().compare_exchange(
-                        refs, new, Ordering::AcqRel, Ordering::Acquire,
-                    ) {
-                        Ok(_) => return WakeOutcome::ClaimedParked,
-                        Err(_) => continue,
-                    }
-                }
-                s if s == NOTIFIED => return WakeOutcome::NoOp, // already notified
-                s if s == IDLE => return WakeOutcome::NoOp,     // stale wake
-                _ => unreachable!("unexpected waker_refs: {:#x}", refs),
-            }
-        }
-    }
-
-    /// True once this waker has been cloned at least once: bits 2-62 hold
-    /// a real ref count from that point on (state bits 0-1 keep their
-    /// meaning either way). Sticky -- never clears back to false.
-    fn is_ever_shared(&self) -> bool {
-        self.waker_refs().load(Ordering::Relaxed) & EVER_SHARED != 0
-    }
-
-    /// First-clone transition: set `EVER_SHARED` and initialize the ref
-    /// count to 2 (the original waker + this new clone), preserving
-    /// whatever state bits are currently set. CAS loop: a concurrent
-    /// `wake()` may change the state bits underneath.
-    fn transition_to_shared(&self) {
-        loop {
-            let old = self.waker_refs().load(Ordering::Relaxed);
-            let new = EVER_SHARED | (2 * REF_ONE) | (old & STATE_MASK);
-            if self
-                .waker_refs()
-                .compare_exchange(old, new, Ordering::Release, Ordering::Relaxed)
-                .is_ok()
-            {
-                return;
-            }
-        }
-    }
-
-    /// Increment the SHARED ref count (an existing SHARED waker being
-    /// cloned again).
-    fn incr_shared_ref(&self) {
-        self.waker_refs().fetch_add(REF_ONE, Ordering::Relaxed);
-    }
-
-    /// Decrement the SHARED ref count (a SHARED waker being dropped).
-    fn decr_shared_ref(&self) {
-        self.waker_refs().fetch_sub(REF_ONE, Ordering::Release);
-    }
-}
-
-/// Outcome of [`WakerTaskDesc::try_wake_state`].
-pub enum WakeOutcome {
-    /// Was POLLING; now NOTIFIED. The task will notice on its next
-    /// `waker_refs` check and re-poll; there is no continuation to push.
-    SetNotified,
-    /// Was PARKED; now POLLING. The caller owns delivering the
-    /// continuation (push to a worker deque or the external queue).
-    ClaimedParked,
-    /// Was already NOTIFIED, or IDLE (a stale wake after the poll session
-    /// ended). Nothing to do.
-    NoOp,
 }
 
 /// Peek at `desc`'s owner-exclusive `worker` field without going through a

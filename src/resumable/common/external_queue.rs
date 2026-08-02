@@ -112,7 +112,7 @@ impl<D: crate::resumable::common::desc::TaskDesc> Default for PollerUltQueue<D> 
 
 impl<S: StackfulSchedulerSystem + ThreadSystem> ExternalQueue<S> for PollerUltQueue<S::Desc>
 where
-    S::Desc: crate::resumable::stackful::desc::StackfulTaskDesc + crate::resumable::common::desc::WakerTaskDesc,
+    S::Desc: crate::resumable::stackful::desc::StackfulTaskDesc,
 {
     fn push(&self, cont: SuspendedTaskToken<S::Desc>) {
         self.inner.lock().unwrap().push(cont);

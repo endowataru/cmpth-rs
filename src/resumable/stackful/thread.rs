@@ -15,7 +15,7 @@ use crate::traits::stackful::JoinHandleLike;
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::desc::{HasBaseOwned, JoinState, SuspendedTaskToken, TaskDesc, TaskDescAlloc, WakerTaskDesc, JS_FINISHED};
+use crate::resumable::common::desc::{HasBaseOwned, JoinState, SuspendedTaskToken, TaskDesc, TaskDescAlloc, JS_FINISHED};
 use crate::resumable::stackful::desc::{HasCtx, StackfulTaskDesc};
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, Worker};
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulWorker};
@@ -38,7 +38,7 @@ where
     S: StackfulSchedulerSystem,
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
-    <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc,
+    <S as SchedulerSystem>::Desc: StackfulTaskDesc,
 {
     let wk = UltWorker::<S>::current().expect("cmpth: spawn called outside a worker");
     let desc = wk.alloc_task(true, S::STACK_SIZE);
@@ -101,7 +101,7 @@ where
 ///
 /// `scheduler` is a type-erased `*const Scheduler<S>` stored on the
 /// descriptor for external-thread wake support.
-pub(crate) fn fork_parent_first<S: StackfulSchedulerSystem>(body: ErasedBody, scheduler: *const ()) -> SuspendedTaskToken<S::Desc> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+pub(crate) fn fork_parent_first<S: StackfulSchedulerSystem>(body: ErasedBody, scheduler: *const ()) -> SuspendedTaskToken<S::Desc> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
     use crate::resumable::common::stack::StackAlloc as _;
     // Allocated directly (not through S::Pool), like `fork_async_parent_first`'s
     // one-off root async descriptor: this runs once per `run`/`PollerUltQueue::on_start`
@@ -125,7 +125,7 @@ pub(crate) fn fork_parent_first<S: StackfulSchedulerSystem>(body: ErasedBody, sc
     token
 }
 
-unsafe extern "C" fn task_entry<S: StackfulSchedulerSystem>(transfer: Transfer, arg: *mut ()) -> ! where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+unsafe extern "C" fn task_entry<S: StackfulSchedulerSystem>(transfer: Transfer, arg: *mut ()) -> ! where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
     let wk = unsafe { &*(transfer.0 as *const UltWorker<S>) };
     let desc = wk.cur_task();
     let body = *unsafe { Box::from_raw(arg as *mut ErasedBody) };
@@ -156,7 +156,7 @@ fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
     desc: &S::Desc,
     result_ptr: *mut StackResult<T>,
     val: Result<T, Box<dyn Any + Send>>,
-) -> ! where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+) -> ! where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
     let desc_ptr = desc as *const S::Desc as *mut S::Desc;
     match desc.read_join_state() {
         JoinState::SyncJoiner(j_desc) => {
@@ -183,7 +183,7 @@ fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
                     // A joiner registered while we were exiting.
                     JoinState::SyncJoiner(j) => wk.push_local_top(SuspendedTaskToken(j)),
                     JoinState::AsyncWaker(w) => unsafe { Box::from_raw(w) }.wake(),
-                    JoinState::AsyncJoiner(j) => unsafe { crate::resumable::stackless::waker::try_wake_async::<S>(j) },
+                    JoinState::AsyncJoiner(j) => S::wake_async_joiner(j),
                     // The handle was dropped while we were exiting: the
                     // result already sits on our (still-allocated) stack.
                     JoinState::Detached => unsafe {
@@ -199,7 +199,7 @@ fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
 
 /// Exit for parent-first tasks (`fork_parent_first`): the result, if kept,
 /// is already in `desc.result`.  Same state machine as `exit_with_result`.
-fn exit<S: StackfulSchedulerSystem>(wk: &UltWorker<S>, desc: &S::Desc) -> ! where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+fn exit<S: StackfulSchedulerSystem>(wk: &UltWorker<S>, desc: &S::Desc) -> ! where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
     let desc_ptr = desc as *const S::Desc as *mut S::Desc;
     match desc.read_join_state() {
         JoinState::SyncJoiner(j_desc) => {
@@ -214,7 +214,7 @@ fn exit<S: StackfulSchedulerSystem>(wk: &UltWorker<S>, desc: &S::Desc) -> ! wher
                 JoinState::Running => {}
                 JoinState::SyncJoiner(j) => wk.push_local_top(SuspendedTaskToken(j)),
                 JoinState::AsyncWaker(w) => unsafe { Box::from_raw(w) }.wake(),
-                JoinState::AsyncJoiner(j) => unsafe { crate::resumable::stackless::waker::try_wake_async::<S>(j) },
+                JoinState::AsyncJoiner(j) => S::wake_async_joiner(j),
                 JoinState::Detached => unsafe { wk.free_task(desc_ptr) },
                 JoinState::Finished => unreachable!("cmpth: double task exit"),
             }

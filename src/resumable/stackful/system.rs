@@ -84,7 +84,7 @@ where
 /// predates and mirrors.
 impl<S: ThreadSystem + StackfulSchedulerSystem> crate::traits::scoped::ScopedStackfulTaskSystem for S
 where
-    S::Desc: StackfulTaskDesc + crate::resumable::common::desc::WakerTaskDesc,
+    S::Desc: StackfulTaskDesc,
 {
     fn run<F, R>(num_workers: usize, f: F) -> R
     where
@@ -190,7 +190,7 @@ pub trait UltIdentity: Sized + Send + Sync + 'static {
     /// dual capability on the same tasks wants
     /// [`DualTaskDesc`](crate::resumable::dual::desc::DualTaskDesc)
     /// instead.
-    type Desc: crate::resumable::common::desc::TaskDescAlloc + StackfulTaskDesc + crate::resumable::common::desc::WakerTaskDesc;
+    type Desc: crate::resumable::common::desc::TaskDescAlloc + StackfulTaskDesc;
 
     /// Work-stealing deque implementation.
     type Deque: WorkerDeque<Self::Desc>;
@@ -259,9 +259,9 @@ where
 
 impl<M: UltIdentity + StackfulSchedulerSystem> ThreadSystem for M
 where
-    <M as SchedulerSystem>::Desc: StackfulTaskDesc + crate::resumable::common::desc::WakerTaskDesc,
+    <M as SchedulerSystem>::Desc: StackfulTaskDesc,
 {
-    type Poller = crate::resumable::stackful::waker::UltPoller<Self>;
+    type Poller = crate::resumable::stackful::waker::ResumablePoller<Self>;
 
     fn yield_now() {
         use crate::resumable::common::worker::Worker;
