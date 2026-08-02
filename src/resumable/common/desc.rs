@@ -11,7 +11,7 @@
 //! # `TaskDesc`/`Owned`/`TaskDescAlloc`
 //!
 //! The field set lives behind named accessor traits/associated types rather
-//! than a single hardcoded struct, mirroring [`crate::resumable::stackful::suspended::StackfulOnlyResumable`]
+//! than a single hardcoded struct, mirroring [`crate::resumable::stackful::suspended::StackfulOnlyResumableCore`]
 //! (implementors supply accessors; scheduler code only ever calls the
 //! trait) — a concrete descriptor type is a contract to implement, not a
 //! fixed struct to match byte-for-byte. Owner-exclusive fields

@@ -47,7 +47,7 @@ pub use resumable::common::pool::{DescPool, ReturnPool, SimplePool};
 pub use resumable::common::stack::{HeapStack, StackAlloc};
 pub use resumable::stackless::async_wait::SuspendedFuture;
 pub use resumable::dual::dual_wait::DualResumable;
-pub use resumable::stackful::suspended::{BasicStackfulOnlyResumable, StackfulOnlyResumable};
+pub use resumable::stackful::suspended::{BasicStackfulOnlyResumable, StackfulOnlyResumableCore};
 pub use resumable::stackful::sync::{Barrier as UltBarrier, McsDelegator, McsMutex, McsMutexGuard, McsCondvar, BarrierCore, MutexCore};
 pub use resumable::common::sync::{DualBarrier as UltDualBarrier, DualMutex as UltDualMutex, DualMutexGuard as UltDualMutexGuard};
 pub use resumable::stackful::sync::{delegator, Producer as DelegatorProducer};
