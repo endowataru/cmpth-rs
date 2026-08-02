@@ -4,15 +4,29 @@
 
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::task::Context;
+use std::task::{Context, Waker};
 
-use crate::resumable::common::desc::{BaseOwned, HasBaseOwned, RunningTaskToken, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskDescAlloc, JS_DETACHED, JS_RUNNING};
+use crate::resumable::common::desc::{BaseOwned, HasBaseOwned, JoinState, RunningTaskToken, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskDescAlloc, decode_join_state, JS_ASYNC_JOINER_TAG, JS_ASYNC_TAG, JS_DETACHED, JS_FINISHED, JS_RUNNING};
 use crate::resumable::common::waker::{self, WakeOutcome, EVER_SHARED, STATE_MASK};
+
+/// Raw waker-state storage: this crate's own `AtomicUsize`-encoded
+/// POLLING/PARKED/NOTIFIED/IDLE state machine (see
+/// [`common::waker`](crate::resumable::common::waker)'s module doc comment
+/// for the encoding). Implementing this (together with [`TaskDescCore`])
+/// opts a descriptor into the [`WakerTaskDesc`] operations below for free
+/// via the blanket impl — the same two-tier relationship as
+/// [`TaskDescCore`]/[`TaskDesc`].
+pub trait WakerTaskDescCore: TaskDescCore {
+    /// Zero (IDLE) when no poll session is active on this task.
+    fn waker_refs(&self) -> &AtomicUsize;
+}
 
 /// Descriptor operations needed by a task driven via a real
 /// [`std::task::Waker`] whose wake state must live on the descriptor
 /// itself — currently only `spawn_async` (see [`AsyncTaskDesc`]'s doc
-/// comment for why: no stack to anchor the state anywhere else).
+/// comment for why: no stack to anchor the state anywhere else). Bodyless —
+/// implement directly for a custom representation, or implement
+/// [`WakerTaskDescCore`] instead to get this crate's own algorithm for free.
 ///
 /// `block_on` (stackful) used to share this trait too, but only ever
 /// needed the state machine, not a descriptor field — it now drives the
@@ -21,15 +35,63 @@ use crate::resumable::common::waker::{self, WakeOutcome, EVER_SHARED, STATE_MASK
 /// against a block_on-call-scoped box instead; see
 /// [`ResumablePoller`](crate::resumable::stackful::waker::ResumablePoller).
 pub trait WakerTaskDesc: TaskDesc {
-    /// Encodes `EVER_SHARED` and POLLING/PARKED/NOTIFIED/IDLE state — see
-    /// [`common::waker`](crate::resumable::common::waker)'s module doc
-    /// comment for the encoding. Zero (IDLE) when no poll session is
-    /// active on this task.
-    fn waker_refs(&self) -> &AtomicUsize;
-
     // --- named waker_refs state-machine operations, delegating to the
     // shared core in `common::waker` -----------------------------------
 
+    fn mark_polling(&self);
+    fn mark_idle(&self);
+    fn decide_park(&self) -> bool;
+    fn park_after_poll(&self) -> bool;
+
+    /// Core wake CAS loop, shared by the stackful (`try_wake`) and async
+    /// (`try_wake_async`) wake paths in `waker.rs`.
+    fn try_wake_state(&self) -> WakeOutcome;
+
+    /// True once this waker has been cloned at least once. Sticky — never
+    /// clears back to false.
+    fn is_ever_shared(&self) -> bool;
+
+    /// First-clone transition: set `EVER_SHARED`, preserving whatever state
+    /// bits are currently set. CAS loop: a concurrent `wake()` may change
+    /// the state bits underneath. No ref count to seed — nothing here ever
+    /// frees based on one (see `common::waker::drop_shared`'s doc comment).
+    fn transition_to_shared(&self);
+
+    // --- async join-registration, sharing join_state() with sync joiners.
+    // Lives here (not on the base TaskDesc) so a descriptor with no async
+    // capability at all (StackfulOnlyTaskDesc) never gets these — they are
+    // only ever called from `JoinHandle::poll` (`stackless/thread.rs`),
+    // which itself requires `S::Desc: AsyncTaskDesc: WakerTaskDesc`. -------
+
+    /// `JoinHandle::poll`'s fast-path registration: install `joiner` (the
+    /// currently-polling task's own descriptor) directly, with no
+    /// allocation. Returns `false` if the task turned out to already be
+    /// finished (caller should proceed to take the result instead) —
+    /// otherwise commits the tagged pointer and drops whichever *boxed*
+    /// waker it superseded, if any (an old `AsyncJoiner` needs no cleanup:
+    /// it never allocated).
+    ///
+    /// # Safety
+    /// `joiner` must be a stable pointer to the currently-polling task's own
+    /// descriptor for as long as it might be woken through this slot — the
+    /// caller (`JoinHandle::poll`) only calls this when `joiner` came from
+    /// `UltWorker::polling_async`, which is only ever set to the descriptor
+    /// `run_async_poll` is synchronously driving right now (see that
+    /// function's doc comment for why the ambient waker is then guaranteed
+    /// to be `joiner`'s own).
+    unsafe fn try_register_async_joiner(&self, joiner: *mut Self) -> bool;
+
+    /// `JoinHandle::poll`'s waker registration: try to install `waker` as
+    /// this task's async waiter. Returns `false` if the task turned out to
+    /// already be finished (caller should proceed to take the result
+    /// instead) — otherwise commits the boxed, tagged waker and drops
+    /// whichever waker it superseded, if any.
+    fn try_register_waker(&self, waker: Waker) -> bool;
+}
+
+/// Blanket [`WakerTaskDesc`] for any descriptor using this crate's own
+/// word-based encodings for both join-state and waker-refs.
+impl<D: TaskDescCore + WakerTaskDescCore> WakerTaskDesc for D {
     #[inline]
     fn mark_polling(&self) {
         waker::mark_polling(self.waker_refs())
@@ -49,22 +111,14 @@ pub trait WakerTaskDesc: TaskDesc {
         waker::park_after_poll(self.waker_refs())
     }
 
-    /// Core wake CAS loop, shared by the stackful (`try_wake`) and async
-    /// (`try_wake_async`) wake paths in `waker.rs`.
     fn try_wake_state(&self) -> WakeOutcome {
         waker::try_wake_state(self.waker_refs())
     }
 
-    /// True once this waker has been cloned at least once. Sticky — never
-    /// clears back to false.
     fn is_ever_shared(&self) -> bool {
         self.waker_refs().load(Ordering::Relaxed) & EVER_SHARED != 0
     }
 
-    /// First-clone transition: set `EVER_SHARED`, preserving whatever state
-    /// bits are currently set. CAS loop: a concurrent `wake()` may change
-    /// the state bits underneath. No ref count to seed — nothing here ever
-    /// frees based on one (see `common::waker::drop_shared`'s doc comment).
     fn transition_to_shared(&self) {
         loop {
             let old = self.waker_refs().load(Ordering::Relaxed);
@@ -78,6 +132,58 @@ pub trait WakerTaskDesc: TaskDesc {
             }
         }
     }
+
+    #[inline]
+    unsafe fn try_register_async_joiner(&self, joiner: *mut Self) -> bool {
+        debug_assert_eq!(
+            joiner as usize & (JS_ASYNC_TAG | JS_ASYNC_JOINER_TAG),
+            0,
+            "cmpth: descriptor pointer not aligned enough to tag"
+        );
+        let mut cur = TaskDescCore::join_state(self).load(Ordering::Acquire);
+        let new = (joiner as usize) | JS_ASYNC_JOINER_TAG;
+        loop {
+            if cur == JS_FINISHED {
+                return false;
+            }
+            match TaskDescCore::join_state(self).compare_exchange_weak(
+                cur, new, Ordering::Release, Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    if let JoinState::AsyncWaker(w) = decode_join_state::<Self>(cur) {
+                        drop(unsafe { Box::from_raw(w) });
+                    }
+                    return true;
+                }
+                Err(c) => cur = c,
+            }
+        }
+    }
+
+    fn try_register_waker(&self, waker: Waker) -> bool {
+        let mut cur = TaskDescCore::join_state(self).load(Ordering::Acquire);
+        if cur == JS_FINISHED {
+            return false;
+        }
+        let new = Box::into_raw(Box::new(waker)) as usize | JS_ASYNC_TAG;
+        loop {
+            if cur == JS_FINISHED {
+                drop(unsafe { Box::from_raw((new & !JS_ASYNC_TAG) as *mut Waker) });
+                return false;
+            }
+            match TaskDescCore::join_state(self).compare_exchange_weak(
+                cur, new, Ordering::Release, Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    if let JoinState::AsyncWaker(w) = decode_join_state::<Self>(cur) {
+                        drop(unsafe { Box::from_raw(w) });
+                    }
+                    return true;
+                }
+                Err(c) => cur = c,
+            }
+        }
+    }
 }
 
 /// Result of driving one `spawn_async` task's poll to completion or a
@@ -87,7 +193,7 @@ pub enum TaskPollResult<D> {
     /// The future finished; nothing left to do for this task.
     Ready,
     /// The future finished, and its completion claimed exclusive ownership
-    /// of a waiting [`JoinState::AsyncJoiner`](crate::resumable::common::desc::JoinState::AsyncJoiner)
+    /// of a waiting [`JoinState::AsyncJoiner`]
     /// — the caller's poll loop should continue directly into that
     /// descriptor next (symmetric transfer), instead of pushing it to a
     /// deque and waiting for some worker to pop it back out. Safe because
@@ -227,7 +333,7 @@ impl TaskDescCore for StacklessOnlyTaskDesc {
     fn owned_cell(&self) -> &UnsafeCell<StacklessOnlyOwned> { &self.owned }
 }
 
-impl WakerTaskDesc for StacklessOnlyTaskDesc {
+impl WakerTaskDescCore for StacklessOnlyTaskDesc {
     fn waker_refs(&self) -> &AtomicUsize { &self.waker_refs }
 }
 

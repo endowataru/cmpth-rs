@@ -8,7 +8,7 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::AtomicUsize;
 
 use crate::resumable::common::desc::{BaseOwned, HasBaseOwned, TaskDescCore, TaskDescAlloc, JS_DETACHED, JS_RUNNING};
-use crate::resumable::stackless::desc::{TaskPollFn, WakerTaskDesc};
+use crate::resumable::stackless::desc::{TaskPollFn, WakerTaskDescCore};
 
 /// A dual task is never both a real ULT and a `spawn_async` future — this
 /// enum makes that exclusivity a type-level fact instead of an implicit
@@ -122,7 +122,7 @@ impl TaskDescCore for DualTaskDesc {
     fn owned_cell(&self) -> &UnsafeCell<DualOwned> { &self.owned }
 }
 
-impl WakerTaskDesc for DualTaskDesc {
+impl WakerTaskDescCore for DualTaskDesc {
     fn waker_refs(&self) -> &AtomicUsize { &self.waker_refs }
 }
 
