@@ -8,14 +8,13 @@
 use std::any::Any;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::Ordering;
 
 use crate::context::{ContextPolicy, Transfer};
 use crate::traits::stackful::JoinHandleLike;
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::desc::{HasBaseOwned, JoinState, SuspendedTaskToken, TaskDesc, TaskDescAlloc, JS_FINISHED};
+use crate::resumable::common::desc::{HasBaseOwned, JoinState, SuspendedTaskToken, TaskDesc, TaskDescAlloc};
 use crate::resumable::stackful::desc::{HasCtx, StackfulTaskDesc};
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, Worker};
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulWorker};
@@ -260,7 +259,7 @@ where
             // else: leave `prev` in place -> cancel, resume at once
         });
 
-        debug_assert!(desc.join_state().load(Ordering::Relaxed) == JS_FINISHED);
+        debug_assert!(desc.is_finished());
         self.take_result(wk)
     }
 }
