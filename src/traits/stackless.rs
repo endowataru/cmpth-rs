@@ -9,12 +9,69 @@
 
 use std::future::Future;
 use std::ops::DerefMut;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
 
 pub use crate::traits::common::{Resumable, TaskSystem};
 pub use crate::traits::scoped::ScopedStacklessTaskSystem;
 
-use crate::traits::common::BarrierWaitResult;
+use crate::traits::common::{BarrierWaitResult, TaskDesc, WakeOutcome};
+
+// ---------------------------------------------------------------------------
+// WakerTaskDesc
+// ---------------------------------------------------------------------------
+
+/// Descriptor operations needed by a task driven via a real
+/// [`std::task::Waker`] whose wake state must live on the descriptor itself
+/// — currently only `spawn_async` (no stack to anchor the state anywhere
+/// else; a real ULT's `block_on` uses the same state machine but keeps it
+/// in a call-scoped `Poller` instead, since it has a stack to anchor on).
+///
+/// Bodyless — pure behavior, same spirit as [`TaskDesc`]. Implement
+/// directly for a custom representation, or implement
+/// [`WakerTaskDescCore`](crate::resumable::stackless::desc::WakerTaskDescCore)
+/// (together with [`TaskDescCore`](crate::resumable::common::desc::TaskDescCore))
+/// instead to get this crate's own word-based algorithm for free via a
+/// blanket impl.
+///
+/// The async join-registration methods (`try_register_async_joiner`/
+/// `try_register_waker`) live here rather than on the base `TaskDesc`
+/// specifically so a descriptor with no async capability at all never gets
+/// them — they're only ever called from `JoinHandle::poll`, which itself
+/// requires `S::Desc: AsyncTaskDesc: WakerTaskDesc`.
+pub trait WakerTaskDesc: TaskDesc {
+    fn mark_polling(&self);
+    fn mark_idle(&self);
+    fn decide_park(&self) -> bool;
+    fn park_after_poll(&self) -> bool;
+
+    /// Core wake outcome, shared by the stackful and async wake paths.
+    fn try_wake_state(&self) -> WakeOutcome;
+
+    /// True once this waker has been cloned at least once. Sticky — never
+    /// clears back to false.
+    fn is_ever_shared(&self) -> bool;
+
+    /// First-clone transition: mark this waker as shared, preserving
+    /// whatever poll state is currently set.
+    fn transition_to_shared(&self);
+
+    /// `JoinHandle::poll`'s fast-path registration: install `joiner` (the
+    /// currently-polling task's own descriptor) directly, with no
+    /// allocation. Returns `false` if the task turned out to already be
+    /// finished (caller should proceed to take the result instead) —
+    /// otherwise commits the registration.
+    ///
+    /// # Safety
+    /// `joiner` must be a stable pointer to the currently-polling task's own
+    /// descriptor for as long as it might be woken through this slot.
+    unsafe fn try_register_async_joiner(&self, joiner: *mut Self) -> bool;
+
+    /// `JoinHandle::poll`'s waker registration: try to install `waker` as
+    /// this task's async waiter. Returns `false` if the task turned out to
+    /// already be finished (caller should proceed to take the result
+    /// instead) — otherwise commits the registration.
+    fn try_register_waker(&self, waker: Waker) -> bool;
+}
 
 /// [`StackfulMutex`](crate::traits::stackful::StackfulMutex)/`StacklessMutex` —
 /// same-named stackful/stackless mutex traits.

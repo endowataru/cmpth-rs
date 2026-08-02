@@ -19,4 +19,4 @@ pub use stackful::{
     Delegator, DelegatorConsumer, JoinHandleLike, Poller, StackfulBarrier, StackfulMutex,
     StackfulResumable, StackfulTaskSystem, ThreadSystem,
 };
-pub use stackless::{StacklessBarrier, StacklessMutex, StacklessResumable, StacklessTaskSystem};
+pub use stackless::{StacklessBarrier, StacklessMutex, StacklessResumable, StacklessTaskSystem, WakerTaskDesc};

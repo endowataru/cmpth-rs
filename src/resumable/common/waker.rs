@@ -22,6 +22,8 @@ use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
 use crate::resumable::common::desc::{HasBaseOwned, SuspendedTaskToken};
 use crate::resumable::common::external_queue::ExternalQueue;
 
+pub use crate::traits::common::WakeOutcome;
+
 // ---------------------------------------------------------------------------
 // waker state encoding
 //
@@ -39,20 +41,6 @@ pub(crate) const PARKED:      usize = 2;
 pub(crate) const NOTIFIED:    usize = 3;
 pub(crate) const EVER_SHARED: usize = 1 << 63;
 pub(crate) const STATE_MASK:  usize = 3;
-
-/// Outcome of `try_wake_state` (this module) /
-/// [`WakerTaskDesc::try_wake_state`](crate::resumable::stackless::desc::WakerTaskDesc::try_wake_state).
-pub enum WakeOutcome {
-    /// Was POLLING; now NOTIFIED. The task will notice on its next state
-    /// check and re-poll; there is no continuation to push.
-    SetNotified,
-    /// Was PARKED; now POLLING. The caller owns delivering the
-    /// continuation (push to a worker deque or the external queue).
-    ClaimedParked,
-    /// Was already NOTIFIED, or IDLE (a stale wake after the poll session
-    /// ended). Nothing to do.
-    NoOp,
-}
 
 /// Reset to POLLING unconditionally. Called whenever a poll is about to
 /// begin (`UltPoller::new`/`ResumablePoller::new`, `run_async_poll`'s
