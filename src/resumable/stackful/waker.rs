@@ -33,16 +33,19 @@
 //! scheduler.  Calling `wake()` from an OS thread that is not a ULT worker
 //! will panic.
 
+use std::cell::Cell;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::task::{Context, RawWaker, RawWakerVTable, Waker};
 
 use crate::traits::Poller;
 use crate::traits::stackful::{noop_waker, ThreadSystem};
-use crate::resumable::common::desc::{WakeOutcome, WakerTaskDesc};
+use crate::resumable::stackless::desc::WakerTaskDesc;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::system::SchedulerSystem;
-use crate::resumable::common::waker::{desc_from_erased, drop_shared, push_continuation};
+use crate::resumable::common::waker::{self, WakeOutcome, desc_from_erased, drop_shared, push_continuation};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::common::worker::{UltWorker, Worker};
 use crate::resumable::stackful::worker::StackfulWorker;
@@ -67,7 +70,7 @@ impl<S: StackfulSchedulerSystem> SharedVtable<S> where <S as SchedulerSystem>::D
         clone_shared::<S>,
         wake_shared::<S>,
         wake_by_ref_shared::<S>,
-        drop_shared::<S>,
+        drop_shared,
     );
 }
 
@@ -159,6 +162,156 @@ impl<S: StackfulSchedulerSystem> Drop for UltPoller<S> where <S as SchedulerSyst
 }
 
 // ---------------------------------------------------------------------------
+// ResumablePoller — Poller implementation for stackful-only systems
+// ---------------------------------------------------------------------------
+
+/// Owner-exclusive-once-PARKED state for [`ResumablePoller`]: the same
+/// POLLING/PARKED/NOTIFIED core [`WakerTaskDesc`] uses, driven against a
+/// block_on-call-scoped allocation instead of a task descriptor field —
+/// see `common/desc.rs`'s module doc comment for why `block_on` doesn't
+/// need the descriptor-embedded version. `cont` rides on `state`'s CAS the
+/// same way `ctx` rides on the switch shims' context-slot CAS (see
+/// [`HasCtx`](crate::resumable::stackful::desc::HasCtx)'s doc comment):
+/// written before the PARKED-committing CAS, read only by whichever
+/// `wake()` call wins the matching PARKED->POLLING CAS, so a plain `Cell`
+/// needs no atomicity of its own.
+struct ResumablePollerSlot<S: StackfulSchedulerSystem> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    state: AtomicUsize,
+    cont: Cell<*mut S::Desc>,
+    _marker: PhantomData<S>,
+}
+
+// Sound for the same reason task descriptors themselves are `Send + Sync`
+// despite raw-pointer/Cell fields: `cont`'s exclusive access is proven by
+// `state`'s own CAS, not by the type system, so `Cell` here is safe to
+// share across the threads that concurrently call `wake()`/`wake_by_ref()`.
+unsafe impl<S: StackfulSchedulerSystem> Send for ResumablePollerSlot<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {}
+unsafe impl<S: StackfulSchedulerSystem> Sync for ResumablePollerSlot<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {}
+
+struct ResumableVtable<S>(PhantomData<S>);
+impl<S: StackfulSchedulerSystem> ResumableVtable<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    const VTABLE: RawWakerVTable = RawWakerVTable::new(
+        resumable_clone::<S>,
+        resumable_wake::<S>,
+        resumable_wake_by_ref::<S>,
+        resumable_drop::<S>,
+    );
+}
+
+/// `Arc`-backed: unlike a task descriptor (whose lifetime is governed by
+/// the join protocol, independent of how many `Waker` clones exist), this
+/// slot's *only* owner is whichever `Waker`/`ResumablePoller` values are
+/// currently alive — so, unlike `WakerTaskDesc`'s dead ref count (nothing
+/// there was ever freed based on it), this ref count is load-bearing: it's
+/// what lets a `Waker` clone that outlives the `block_on` call (a
+/// documented misuse, but one that must stay memory-safe, not become UB)
+/// still point at valid memory. `Arc::into_raw`/`from_raw` do the counting;
+/// no hand-rolled atomics needed here.
+unsafe fn resumable_clone<S: StackfulSchedulerSystem>(ptr: *const ()) -> RawWaker where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    unsafe { Arc::increment_strong_count(ptr as *const ResumablePollerSlot<S>) };
+    RawWaker::new(ptr, &ResumableVtable::<S>::VTABLE)
+}
+
+unsafe fn resumable_wake<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    unsafe { resumable_wake_by_ref::<S>(ptr) };
+    unsafe { resumable_drop::<S>(ptr) };
+}
+
+unsafe fn resumable_wake_by_ref<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    let slot: &ResumablePollerSlot<S> = unsafe { desc_from_erased(ptr) };
+    if let WakeOutcome::ClaimedParked = waker::try_wake_state(&slot.state) {
+        let desc = slot.cont.get();
+        unsafe { push_continuation::<S>(desc) };
+    }
+}
+
+unsafe fn resumable_drop<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    drop(unsafe { Arc::from_raw(ptr as *const ResumablePollerSlot<S>) });
+}
+
+/// [`Poller`] implementation for stackful-only (`S::Desc: StackfulTaskDesc`
+/// only — no [`WakerTaskDesc`]) systems' `block_on`. Structurally identical
+/// in spirit to [`UltPoller`], differing only in where the park/wake state
+/// lives: a boxed (here, `Arc`ed) slot local to this `block_on` call
+/// instead of a field on every task descriptor, regardless of whether that
+/// descriptor's task ever calls `block_on`.
+///
+/// `wait`'s commit/cancel shape mirrors
+/// [`StackfulResumable::wait_with_cond`](crate::traits::stackful::StackfulResumable::wait_with_cond)
+/// (as implemented by [`StackfulOnlyResumable`](crate::resumable::stackful::suspended::StackfulOnlyResumable))
+/// exactly — the same "wake raced in during poll" race that mutex/condvar
+/// already resolve via `cond_suspend_to_sched`'s commit/cancel closure, no
+/// separate PRIVATE/SHARED distinction needed since there's no ref count
+/// to gate a fast path on (cloning is always just `Arc::increment_strong_count`).
+///
+/// `!Send`: bound to the same ULT, matching `UltPoller`.
+pub struct ResumablePoller<S: StackfulSchedulerSystem> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    slot: Option<Arc<ResumablePollerSlot<S>>>,
+    waker: Waker,
+    _marker: PhantomData<S>,
+}
+
+impl<S: StackfulSchedulerSystem> Poller for ResumablePoller<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    fn new() -> Self {
+        match UltWorker::<S>::current() {
+            Some(_wk) => {
+                let slot = Arc::new(ResumablePollerSlot::<S> {
+                    state: AtomicUsize::new(waker::POLLING),
+                    cont: Cell::new(std::ptr::null_mut()),
+                    _marker: PhantomData,
+                });
+                let ptr = Arc::into_raw(Arc::clone(&slot)) as *const ();
+                let raw = RawWaker::new(ptr, &ResumableVtable::<S>::VTABLE);
+                let waker = unsafe { Waker::from_raw(raw) };
+                ResumablePoller { slot: Some(slot), waker, _marker: PhantomData }
+            }
+            None => ResumablePoller { slot: None, waker: noop_waker(), _marker: PhantomData },
+        }
+    }
+
+    fn context<'a>(&'a self) -> Context<'a> {
+        Context::from_waker(&self.waker)
+    }
+
+    fn wait(&self) {
+        match &self.slot {
+            Some(slot) => {
+                UltWorker::<S>::current()
+                    .expect("ResumablePoller::wait called from outside scheduler")
+                    .cond_suspend_to_sched(|_wk, prev| {
+                        // Release: publishes both the context saved just
+                        // before this callback (via `prev`'s own switch-shim
+                        // ordering) and `cont` itself — see
+                        // `ResumablePollerSlot`'s doc comment.
+                        slot.cont.set(prev.as_ref().expect("cond_suspend contract").desc());
+                        // wake() fired during poll(): decide_park cancels
+                        // (resets to POLLING) and returns false; otherwise
+                        // it commits to PARKED and we consume prev.
+                        if waker::decide_park(&slot.state) {
+                            let _ = prev.take().expect("cond_suspend contract").into_raw();
+                        }
+                        // else: leave `prev` in place -> cancel, resume at once
+                    });
+            }
+            None => S::Base::yield_now(),
+        }
+    }
+}
+
+impl<S: StackfulSchedulerSystem> Drop for ResumablePoller<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    fn drop(&mut self) {
+        if let Some(slot) = &self.slot {
+            // Reset before self.waker drops, so racing wakers see IDLE
+            // instead of reading a stale `cont`.
+            waker::mark_idle(&slot.state);
+        }
+        // self.waker drops here (calls resumable_drop, releasing its own
+        // Arc strong ref — the slot itself only actually frees once every
+        // outstanding clone has done the same).
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Core wake logic (shared between PRIVATE and SHARED paths)
 // ---------------------------------------------------------------------------
 
@@ -224,7 +377,7 @@ unsafe fn drop_private<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as S
     let desc: &S::Desc = unsafe { desc_from_erased(ptr) };
     if desc.is_ever_shared() {
         // The original waker is being dropped; treat like a SHARED drop.
-        unsafe { drop_shared::<S>(ptr) };
+        drop_shared(ptr);
     }
     // Pure PRIVATE: the waker is owned by block_on's stack frame; no action.
 }
@@ -234,14 +387,13 @@ unsafe fn drop_private<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as S
 // ---------------------------------------------------------------------------
 
 unsafe fn clone_shared<S: StackfulSchedulerSystem>(ptr: *const ()) -> RawWaker where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
-    let desc: &S::Desc = unsafe { desc_from_erased(ptr) };
-    desc.incr_shared_ref();
+    // No ref count to bump — see `common::waker::drop_shared`'s doc comment.
     RawWaker::new(ptr, shared_vtable::<S>())
 }
 
 unsafe fn wake_shared<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     unsafe { wake_by_ref_shared::<S>(ptr) };
-    unsafe { drop_shared::<S>(ptr) };
+    drop_shared(ptr);
 }
 
 unsafe fn wake_by_ref_shared<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {

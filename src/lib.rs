@@ -108,6 +108,10 @@ impl resumable::common::system::SchedulerSystem for DefaultDualTaskSystem {
     fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut resumable::dual::desc::DualTaskDesc) {
         resumable::dual::worker::free_finished_desc_dual(wk, desc)
     }
+
+    fn wake_async_joiner(desc: *mut resumable::dual::desc::DualTaskDesc) {
+        unsafe { resumable::stackless::waker::try_wake_async::<Self>(desc) };
+    }
 }
 
 impl resumable::stackful::system::StackfulSchedulerSystem for DefaultDualTaskSystem {
@@ -175,6 +179,10 @@ impl resumable::common::system::SchedulerSystem for DefaultNestedDualTaskSystem 
 
     fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut resumable::dual::desc::DualTaskDesc) {
         resumable::dual::worker::free_finished_desc_dual(wk, desc)
+    }
+
+    fn wake_async_joiner(desc: *mut resumable::dual::desc::DualTaskDesc) {
+        unsafe { resumable::stackless::waker::try_wake_async::<Self>(desc) };
     }
 }
 

@@ -21,7 +21,7 @@ use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
 pub fn run<S, F>(num_workers: usize, root: F)
 where
     S: StackfulSchedulerSystem,
-    S::Desc: crate::resumable::stackful::desc::StackfulTaskDesc + crate::resumable::common::desc::WakerTaskDesc,
+    S::Desc: crate::resumable::stackful::desc::StackfulTaskDesc,
     F: FnOnce() + Send + 'static,
 {
     assert!(num_workers >= 1, "need at least one worker");
@@ -86,7 +86,7 @@ where
 pub fn run_with_result<S, F, R>(num_workers: usize, root: F) -> R
 where
     S: StackfulSchedulerSystem,
-    S::Desc: crate::resumable::stackful::desc::StackfulTaskDesc + crate::resumable::common::desc::WakerTaskDesc,
+    S::Desc: crate::resumable::stackful::desc::StackfulTaskDesc,
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
 {

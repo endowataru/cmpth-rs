@@ -7,8 +7,8 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::AtomicUsize;
 
-use crate::resumable::common::desc::{BaseOwned, HasBaseOwned, TaskDesc, TaskDescAlloc, WakerTaskDesc, JS_DETACHED, JS_RUNNING};
-use crate::resumable::stackless::desc::TaskPollFn;
+use crate::resumable::common::desc::{BaseOwned, HasBaseOwned, TaskDesc, TaskDescAlloc, JS_DETACHED, JS_RUNNING};
+use crate::resumable::stackless::desc::{TaskPollFn, WakerTaskDesc};
 
 /// A dual task is never both a real ULT and a `spawn_async` future — this
 /// enum makes that exclusivity a type-level fact instead of an implicit

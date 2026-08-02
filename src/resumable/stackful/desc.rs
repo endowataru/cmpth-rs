@@ -5,7 +5,7 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::AtomicUsize;
 
-use crate::resumable::common::desc::{BaseOwned, HasBaseOwned, RunningTaskToken, SuspendedTaskToken, TaskDesc, TaskDescAlloc, WakerTaskDesc, JS_DETACHED, JS_RUNNING};
+use crate::resumable::common::desc::{BaseOwned, HasBaseOwned, RunningTaskToken, SuspendedTaskToken, TaskDesc, TaskDescAlloc, JS_DETACHED, JS_RUNNING};
 
 /// Implemented by a [`TaskDesc::Owned`] type that can hold a saved-context
 /// pointer — either directly ([`StackfulOnlyTaskDesc`]'s
@@ -149,7 +149,6 @@ pub struct StackfulOnlyTaskDesc {
     owned: UnsafeCell<StackfulOnlyOwned>,
     join_state: AtomicUsize,
     is_root: bool,
-    waker_refs: AtomicUsize,
     stack: crate::resumable::common::stack::StackMem,
 }
 
@@ -162,10 +161,6 @@ impl TaskDesc for StackfulOnlyTaskDesc {
     fn stack_top(&self) -> *mut u8 { self.stack.top() }
     type Owned = StackfulOnlyOwned;
     fn owned_cell(&self) -> &UnsafeCell<StackfulOnlyOwned> { &self.owned }
-}
-
-impl WakerTaskDesc for StackfulOnlyTaskDesc {
-    fn waker_refs(&self) -> &AtomicUsize { &self.waker_refs }
 }
 
 impl TaskDescAlloc for StackfulOnlyTaskDesc {
@@ -202,7 +197,6 @@ impl StackfulOnlyTaskDesc {
             owned: UnsafeCell::new(StackfulOnlyOwned { base, ctx: std::ptr::null_mut() }),
             is_root: false,
             join_state: AtomicUsize::new(if has_handle { JS_RUNNING } else { JS_DETACHED }),
-            waker_refs: AtomicUsize::new(0),
             stack,
         }
     }
@@ -213,7 +207,6 @@ impl StackfulOnlyTaskDesc {
             owned: UnsafeCell::new(StackfulOnlyOwned { base: BaseOwned::new(), ctx: std::ptr::null_mut() }),
             is_root: true,
             join_state: AtomicUsize::new(JS_DETACHED),
-            waker_refs: AtomicUsize::new(0),
             stack: crate::resumable::common::stack::StackMem::None,
         }
     }
@@ -226,6 +219,5 @@ impl StackfulOnlyTaskDesc {
         owned.base.result = None;
         owned.base.tls = None;
         *self.join_state.get_mut() = if has_handle { JS_RUNNING } else { JS_DETACHED };
-        *self.waker_refs.get_mut() = 0;
     }
 }

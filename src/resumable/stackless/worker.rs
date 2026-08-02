@@ -8,7 +8,8 @@ use std::task::{RawWaker, Waker};
 
 use crate::resumable::common::worker::{LocalQueue, UltWorker};
 use crate::resumable::common::system::SchedulerSystem;
-use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, WakerTaskDesc};
+use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken};
+use crate::resumable::stackless::desc::WakerTaskDesc;
 use crate::resumable::stackless::desc::{AsyncTaskDesc, TaskPollFn, TaskPollResult};
 use crate::resumable::common::pool::DescPool;
 

@@ -10,7 +10,8 @@
 use std::marker::PhantomData;
 use std::task::{RawWaker, RawWakerVTable};
 
-use crate::resumable::common::desc::{WakeOutcome, WakerTaskDesc};
+use crate::resumable::common::waker::WakeOutcome;
+use crate::resumable::stackless::desc::WakerTaskDesc;
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::waker::{desc_from_erased, drop_shared, push_continuation};
 
@@ -49,7 +50,7 @@ impl<S: SchedulerSystem> AsyncSharedVtable<S> where <S as SchedulerSystem>::Desc
         clone_async_shared::<S>,
         wake_async_shared::<S>,
         wake_by_ref_async_shared::<S>,
-        drop_shared::<S>,
+        drop_shared,
     );
 }
 
@@ -64,8 +65,7 @@ unsafe fn clone_async_private<S: SchedulerSystem>(ptr: *const ()) -> RawWaker wh
 }
 
 unsafe fn clone_async_shared<S: SchedulerSystem>(ptr: *const ()) -> RawWaker where <S as SchedulerSystem>::Desc: WakerTaskDesc {
-    let desc: &S::Desc = unsafe { desc_from_erased(ptr) };
-    desc.incr_shared_ref();
+    // No ref count to bump — see `common::waker::drop_shared`'s doc comment.
     RawWaker::new(ptr, &AsyncSharedVtable::<S>::VTABLE)
 }
 
@@ -86,14 +86,14 @@ unsafe fn wake_by_ref_async_private<S: SchedulerSystem>(ptr: *const ()) where <S
 unsafe fn drop_async_private<S: SchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: WakerTaskDesc {
     let desc: &S::Desc = unsafe { desc_from_erased(ptr) };
     if desc.is_ever_shared() {
-        unsafe { drop_shared::<S>(ptr) };
+        drop_shared(ptr);
     }
     // Pure PRIVATE: waker is owned by run_async_poll's stack frame; no action.
 }
 
 unsafe fn wake_async_shared<S: SchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: WakerTaskDesc {
     unsafe { wake_by_ref_async_shared::<S>(ptr) };
-    unsafe { drop_shared::<S>(ptr) };
+    drop_shared(ptr);
 }
 
 unsafe fn wake_by_ref_async_shared<S: SchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: WakerTaskDesc {
