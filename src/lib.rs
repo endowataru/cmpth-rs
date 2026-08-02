@@ -31,7 +31,7 @@ pub mod resumable;
 pub mod scoped;
 
 pub use context::{CondTransfer, Context, ContextPolicy, NativeContext, Transfer};
-pub use traits::{BarrierWaitResult, DelegatorConsumer, Delegator, DualBarrier, DualMutex, JoinHandleLike, JoinState, Poller, Resumable, ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, StackfulResumable, TaskDesc, TaskSystem, TlsAnchor, TlsSlot, ThreadSystem, WakeOutcome};
+pub use traits::{BarrierWaitResult, DelegatorConsumer, Delegator, DualBarrier, DualMutex, JoinHandleLike, JoinState, Poller, Resumable, ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, StackfulResumable, TaskDesc, TaskSystem, TlsAnchor, TlsSlot, ThreadSystem, WakeOutcome, WakerTaskDesc};
 pub use scoped::ScopedTaskSystem;
 pub use os::{available_parallelism, OsBarrier, OsCondvar, OsMutex, OsPoller, OsSystem, OsTls};
 pub use resumable::stackful::waker::UltPoller;
