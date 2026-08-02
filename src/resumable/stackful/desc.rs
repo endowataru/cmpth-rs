@@ -5,9 +5,9 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::AtomicUsize;
 
-use crate::resumable::common::desc::{BaseOwned, HasBaseOwned, RunningTaskToken, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskDescAlloc, JS_DETACHED, JS_RUNNING};
+use crate::resumable::common::desc::{BaseOwned, HasBaseOwned, RunningTaskToken, SuspendedTaskToken, TaskDescCore, TaskDescAlloc, JS_DETACHED, JS_RUNNING};
 
-/// Implemented by a [`TaskDesc::Owned`] type that can hold a saved-context
+/// Implemented by a [`TaskDescCore::Owned`] type that can hold a saved-context
 /// pointer — either directly ([`StackfulOnlyTaskDesc`]'s
 /// `Owned`) or as one variant of a `ctx`/`poll_fn` union
 /// ([`DualTaskDesc`](crate::resumable::dual::desc::DualTaskDesc)'s
@@ -70,11 +70,11 @@ pub trait HasCtx {
 /// execution stack (stackful ULTs). A pure-stackless descriptor type would
 /// not implement this — there is no saved context to hand off, since
 /// `run_async_poll` never does a context switch.
-pub trait StackfulTaskDesc: TaskDesc<Owned: HasCtx> {}
+pub trait StackfulTaskDesc: TaskDescCore<Owned: HasCtx> {}
 
-impl<D: TaskDesc<Owned: HasCtx>> StackfulTaskDesc for D {}
+impl<D: TaskDescCore<Owned: HasCtx>> StackfulTaskDesc for D {}
 
-impl<D: TaskDesc<Owned: HasCtx>> SuspendedTaskToken<D> {
+impl<D: TaskDescCore<Owned: HasCtx>> SuspendedTaskToken<D> {
     /// Claim this task's saved context before switching into it (swap to
     /// null). The caller is expected to `debug_assert` the returned pointer
     /// is non-null (a null result means a double-resume — the exact
@@ -99,7 +99,7 @@ impl<D: TaskDesc<Owned: HasCtx>> SuspendedTaskToken<D> {
     }
 }
 
-impl<D: TaskDesc<Owned: HasCtx>> RunningTaskToken<D> {
+impl<D: TaskDescCore<Owned: HasCtx>> RunningTaskToken<D> {
     /// Publish a just-saved context, making this (about-to-be-suspended)
     /// task resumable. Returns the previous value so the caller can
     /// `debug_assert` it was null (overwriting a live context is a bug).

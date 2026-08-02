@@ -12,7 +12,7 @@ use std::task::{Context, Poll};
 
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
-use crate::resumable::common::desc::{HasBaseOwned, JoinState, SuspendedTaskToken, TaskDesc, TaskDescAlloc};
+use crate::resumable::common::desc::{HasBaseOwned, JoinState, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskDescAlloc};
 use crate::resumable::common::waker::WakeOutcome;
 use crate::resumable::stackless::desc::WakerTaskDesc;
 use crate::resumable::stackless::desc::{AsyncTaskDesc, HasPollFn, TaskPollResult};

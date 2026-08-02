@@ -13,7 +13,7 @@ pub mod scoped;
 pub mod stackful;
 pub mod stackless;
 
-pub use common::{BarrierWaitResult, DualBarrier, DualMutex, Resumable, TaskSystem, TlsAnchor, TlsSlot};
+pub use common::{BarrierWaitResult, DualBarrier, DualMutex, JoinState, Resumable, TaskDesc, TaskSystem, TlsAnchor, TlsSlot, WakeOutcome};
 pub use scoped::{ScopedStackfulTaskSystem, ScopedStacklessTaskSystem};
 pub use stackful::{
     Delegator, DelegatorConsumer, JoinHandleLike, Poller, StackfulBarrier, StackfulMutex,

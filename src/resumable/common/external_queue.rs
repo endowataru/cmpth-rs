@@ -56,12 +56,12 @@ pub trait ExternalQueue<S: SchedulerSystem>: Default + Send + Sync + 'static {
 /// `push()` is mutex-guarded and O(1).  `try_pop()` skips the lock entirely
 /// when the queue is observed empty via an atomic flag (`Acquire` load),
 /// keeping the steal-fail path fast in the common empty case.
-pub struct StealPathQueue<D: crate::resumable::common::desc::TaskDesc> {
+pub struct StealPathQueue<D: crate::resumable::common::desc::TaskDescCore> {
     non_empty: AtomicBool,
     inner: Mutex<Vec<SuspendedTaskToken<D>>>,
 }
 
-impl<D: crate::resumable::common::desc::TaskDesc> Default for StealPathQueue<D> {
+impl<D: crate::resumable::common::desc::TaskDescCore> Default for StealPathQueue<D> {
     fn default() -> Self {
         StealPathQueue {
             non_empty: AtomicBool::new(false),
@@ -99,12 +99,12 @@ impl<S: SchedulerSystem> ExternalQueue<S> for StealPathQueue<S::Desc> {
 /// `on_start()` spawns a poller ULT that loops: drain the queue → yield →
 /// repeat.  Each wake-up re-checks and forwards any pending continuations to
 /// the worker's local deque.
-pub struct PollerUltQueue<D: crate::resumable::common::desc::TaskDesc> {
+pub struct PollerUltQueue<D: crate::resumable::common::desc::TaskDescCore> {
     inner: Arc<Mutex<Vec<SuspendedTaskToken<D>>>>,
     _marker: PhantomData<D>,
 }
 
-impl<D: crate::resumable::common::desc::TaskDesc> Default for PollerUltQueue<D> {
+impl<D: crate::resumable::common::desc::TaskDescCore> Default for PollerUltQueue<D> {
     fn default() -> Self {
         PollerUltQueue { inner: Arc::new(Mutex::new(Vec::new())), _marker: PhantomData }
     }

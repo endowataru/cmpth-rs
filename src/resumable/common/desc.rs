@@ -62,6 +62,8 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Waker;
 
+pub use crate::traits::common::{JoinState, TaskDesc};
+
 pub type TaskResult = Result<Box<dyn Any + Send>, Box<dyn Any + Send>>;
 
 // ---------------------------------------------------------------------------
@@ -89,19 +91,6 @@ pub(crate) const JS_FINISHED: usize = 1;
 pub(crate) const JS_DETACHED: usize = 2;
 pub(crate) const JS_ASYNC_TAG: usize = 1;
 pub(crate) const JS_ASYNC_JOINER_TAG: usize = 2;
-
-/// Decoded view of a `join_state` word.
-pub enum JoinState<D> {
-    Running,
-    Finished,
-    Detached,
-    SyncJoiner(*mut D),
-    AsyncWaker(*mut Waker),
-    /// Same role as `AsyncWaker`, but unboxed: the polling task's own
-    /// descriptor, reachable directly because its waker is known (by
-    /// construction) to be this system's own `run_async_poll` waker.
-    AsyncJoiner(*mut D),
-}
 
 pub(crate) fn decode_join_state<D>(v: usize) -> JoinState<D> {
     match v {
@@ -206,77 +195,18 @@ pub trait TaskDescCore: Send + Sync + Sized + 'static {
     fn owned_cell(&self) -> &UnsafeCell<Self::Owned>;
 }
 
-/// Core per-task descriptor operations: every task, regardless of flavor,
-/// needs these (join protocol, owner-exclusive field storage). Bodyless —
-/// implement directly for a custom descriptor representation, or implement
-/// [`TaskDescCore`] instead to get this crate's own word-based algorithm for
-/// free via the blanket impl below.
-pub trait TaskDesc: Send + Sync + Sized + 'static {
-    /// This descriptor's owner-exclusive fields (see [`BaseOwned`]/
-    /// [`HasBaseOwned`]).  Reached only through a live
-    /// [`RunningTaskToken`]/[`SuspendedTaskToken`]'s `Deref`/`DerefMut` —
-    /// never called directly outside this module.
-    type Owned: HasBaseOwned;
-    fn owned_cell(&self) -> &UnsafeCell<Self::Owned>;
-
-    /// True for the pseudo-descriptor representing a worker's scheduler-loop
-    /// context (the "root continuation"). Fixed at construction.
-    fn is_root(&self) -> bool;
-
-    /// Top of this task's stack allocation (`StackMem::None` for root
-    /// pseudo-descriptors, in which case this must never be called).
-    fn stack_top(&self) -> *mut u8;
-
-    /// Read and decode the current join state (`Acquire`).
-    fn read_join_state(&self) -> JoinState<Self>;
-
-    /// Fast check for the hot join path: is the task already finished?
-    /// (`Acquire` — pairs with the `Release`/`AcqRel` publish in
-    /// [`publish_finished`](Self::publish_finished)/
-    /// [`commit_finished`](Self::commit_finished), making the written result
-    /// visible.)
-    fn is_finished(&self) -> bool;
-
-    /// Direct-handoff exit: the exiting task already switched straight into
-    /// the parked sync joiner's continuation: this just publishes `FINISHED`
-    /// (`Release`) so the joiner (now running) observes its result is ready.
-    fn commit_finished(&self);
-
-    /// General-case exit: publish `FINISHED` (`AcqRel` swap) and return
-    /// whichever party the old state names, so the caller can settle it
-    /// (wake a late-registered joiner/waker, or notice the handle was
-    /// dropped).
-    fn publish_finished(&self) -> JoinState<Self>;
-
-    /// `JoinHandle::join`'s slow path: try to register `joiner` (a parked
-    /// sync joiner's descriptor) as this task's waiter. Returns `false` if
-    /// the task turned out to already be finished (caller should cancel its
-    /// own suspension and proceed immediately) — otherwise commits `joiner`
-    /// and drops any async waker it superseded (a sync join always wins over
-    /// a previously-registered one).
-    ///
-    /// # Safety
-    /// `joiner` must be a stable pointer to a currently-parked task
-    /// descriptor for as long as it might be woken through this slot.
-    unsafe fn try_register_sync_joiner(&self, joiner: *mut Self) -> bool;
-
-    /// `JoinHandle::drop`'s detach attempt: try to mark this task detached
-    /// (no handle left to collect the result). Returns `true` if the task
-    /// was already finished (caller now owns the result and the
-    /// descriptor) — otherwise commits `DETACHED` and drops any registered
-    /// async waker (nobody left to wake).
-    fn try_mark_detached(&self) -> bool;
-}
-
-/// Blanket [`TaskDesc`] for any descriptor using this crate's own
-/// word-based join-state encoding: the actual join-protocol algorithm lives
-/// here (not as trait defaults on [`TaskDescCore`]) so that trait stays a
-/// pure accessor contract.
+/// Blanket [`TaskDesc`] for any descriptor
+/// using this crate's own word-based join-state encoding: the actual
+/// join-protocol algorithm lives here (not as trait defaults on
+/// [`TaskDescCore`]) so that trait stays a pure accessor contract. The two
+/// token types this crate provides ([`SuspendedTaskToken`]/
+/// [`RunningTaskToken`]) are the `Suspended`/`Running` witnesses — their
+/// `DerefMut` (via `owned_cell()`/`UnsafeCell`) is exactly the kind of
+/// implementation detail `TaskDesc` itself never mentions.
 impl<D: TaskDescCore> TaskDesc for D {
     type Owned = <D as TaskDescCore>::Owned;
-    fn owned_cell(&self) -> &UnsafeCell<Self::Owned> { TaskDescCore::owned_cell(self) }
-    fn is_root(&self) -> bool { TaskDescCore::is_root(self) }
-    fn stack_top(&self) -> *mut u8 { TaskDescCore::stack_top(self) }
+    type Suspended = SuspendedTaskToken<D>;
+    type Running = RunningTaskToken<D>;
 
     #[inline]
     fn read_join_state(&self) -> JoinState<Self> {
@@ -350,7 +280,7 @@ impl<D: TaskDescCore> TaskDesc for D {
 /// one struct satisfies it today" shape as `TaskDesc` itself. Every method
 /// here mirrors an existing `DualTaskDesc` inherent fn byte-for-byte; this
 /// is a mechanical accessor split, not a behavior change.
-pub trait TaskDescAlloc: TaskDesc + Sized {
+pub trait TaskDescAlloc: TaskDescCore + Sized {
     /// Construct a descriptor value whose stack storage is `stack` (heap or
     /// arena, per the caller's `StackAlloc` policy). Returns `Self` by
     /// value, not a boxed pointer: pool bookkeeping (the old `pool_next`/
@@ -387,7 +317,7 @@ pub trait TaskDescAlloc: TaskDesc + Sized {
 /// # Safety
 /// The calling OS thread must currently be driving `desc` (mid-execution of
 /// its body, between resume and suspend/exit).
-pub(crate) unsafe fn peek_worker<D: TaskDesc>(desc: *mut D) -> *const () {
+pub(crate) unsafe fn peek_worker<D: TaskDescCore>(desc: *mut D) -> *const () {
     unsafe { (*(*desc).owned_cell().get()).base().worker }
 }
 
@@ -400,9 +330,9 @@ pub(crate) unsafe fn peek_worker<D: TaskDesc>(desc: *mut D) -> *const () {
 /// `StacklessOnlyTaskDesc`, or `DualTaskDesc` for dual) without touching
 /// every deque/pool/worker call site — they're all written generically
 /// over `D: TaskDesc`.
-pub struct SuspendedTaskToken<D: TaskDesc>(pub(crate) *mut D);
+pub struct SuspendedTaskToken<D: TaskDescCore>(pub(crate) *mut D);
 
-unsafe impl<D: TaskDesc> Send for SuspendedTaskToken<D> {}
+unsafe impl<D: TaskDescCore> Send for SuspendedTaskToken<D> {}
 
 /// Cashes in the token's proof of exclusive ownership: sound because a live
 /// `SuspendedTaskToken<D>` is the only handle able to reach `D::Owned`
@@ -410,20 +340,20 @@ unsafe impl<D: TaskDesc> Send for SuspendedTaskToken<D> {}
 /// comment). `join_state`/`waker_refs` live outside `Owned` specifically so
 /// this never claims exclusivity over the genuinely-shared fields `wake()`
 /// touches concurrently.
-impl<D: TaskDesc> Deref for SuspendedTaskToken<D> {
+impl<D: TaskDescCore> Deref for SuspendedTaskToken<D> {
     type Target = D::Owned;
     fn deref(&self) -> &D::Owned {
         unsafe { &*(*self.0).owned_cell().get() }
     }
 }
 
-impl<D: TaskDesc> DerefMut for SuspendedTaskToken<D> {
+impl<D: TaskDescCore> DerefMut for SuspendedTaskToken<D> {
     fn deref_mut(&mut self) -> &mut D::Owned {
         unsafe { &mut *(*self.0).owned_cell().get() }
     }
 }
 
-impl<D: TaskDesc> SuspendedTaskToken<D> {
+impl<D: TaskDescCore> SuspendedTaskToken<D> {
     pub(crate) fn desc(&self) -> *mut D {
         self.0
     }
@@ -467,26 +397,26 @@ impl<D: TaskDesc> SuspendedTaskToken<D> {
 /// descriptor exists at a time, either held by whichever code is actively
 /// driving it, or sitting in the worker's `cur_task`/`polling_async` cell
 /// (never both at once — see `UltWorker::cur_task`'s doc comment).
-pub struct RunningTaskToken<D: TaskDesc>(pub(crate) *mut D);
+pub struct RunningTaskToken<D: TaskDescCore>(pub(crate) *mut D);
 
-unsafe impl<D: TaskDesc> Send for RunningTaskToken<D> {}
+unsafe impl<D: TaskDescCore> Send for RunningTaskToken<D> {}
 
 /// See [`SuspendedTaskToken`]'s matching impl — identical reasoning, same
 /// move-only exclusivity proof.
-impl<D: TaskDesc> Deref for RunningTaskToken<D> {
+impl<D: TaskDescCore> Deref for RunningTaskToken<D> {
     type Target = D::Owned;
     fn deref(&self) -> &D::Owned {
         unsafe { &*(*self.0).owned_cell().get() }
     }
 }
 
-impl<D: TaskDesc> DerefMut for RunningTaskToken<D> {
+impl<D: TaskDescCore> DerefMut for RunningTaskToken<D> {
     fn deref_mut(&mut self) -> &mut D::Owned {
         unsafe { &mut *(*self.0).owned_cell().get() }
     }
 }
 
-impl<D: TaskDesc> RunningTaskToken<D> {
+impl<D: TaskDescCore> RunningTaskToken<D> {
     pub(crate) fn desc(&self) -> *mut D {
         self.0
     }
