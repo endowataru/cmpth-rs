@@ -5,7 +5,7 @@ use cmpth_bench::dual::{run, spawn, spawn_async};
 fn bench_spawn_async(c: &mut Criterion) {
     let mut group = c.benchmark_group("spawn_async");
 
-    for workers in [1, 2, 4] {
+    for workers in 1..=cmpth::available_parallelism() {
         group.bench_with_input(BenchmarkId::new("single", workers), &workers, |b, &w| {
             b.iter(|| run(w, || { spawn_async(async { () }).join().unwrap(); }));
         });
