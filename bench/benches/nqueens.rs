@@ -11,7 +11,7 @@ fn bench_nqueens_system<S: BenchSystem>(
     group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>,
     label: &str,
 ) {
-    for workers in [1, 2, 4] {
+    for workers in 1..=cmpth::available_parallelism() {
         group.bench_with_input(BenchmarkId::new(label, workers), &workers, |b, &w| {
             b.iter(|| {
                 S::run(w, || assert_eq!(nqueens::<S>(vec![], 13, 3), 73_712));

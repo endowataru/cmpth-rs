@@ -33,6 +33,15 @@ impl Poller for OsPoller {
     }
 }
 
+/// Number of CPUs available to this process, per
+/// [`std::thread::available_parallelism`] (falls back to `1` if the OS
+/// can't report it). Shared by [`OsSystem::num_workers`] and by callers
+/// (e.g. benchmarks) that want to size a worker-count sweep to the actual
+/// machine instead of a hardcoded list.
+pub fn available_parallelism() -> usize {
+    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+}
+
 // ---------------------------------------------------------------------------
 // OsSystem
 // ---------------------------------------------------------------------------
@@ -47,7 +56,7 @@ impl TaskSystem for OsSystem {
     }
 
     fn num_workers() -> usize {
-        std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+        available_parallelism()
     }
 }
 

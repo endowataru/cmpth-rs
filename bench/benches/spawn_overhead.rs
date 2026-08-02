@@ -14,7 +14,7 @@ fn bench_spawn_system<S: BenchSystem>(
     group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>,
     label: &str,
 ) {
-    for workers in [1, 2, 4] {
+    for workers in 1..=cmpth::available_parallelism() {
         group.bench_with_input(
             BenchmarkId::new(format!("{label}/single"), workers),
             &workers,

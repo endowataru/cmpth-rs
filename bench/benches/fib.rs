@@ -14,7 +14,7 @@ fn bench_fib_system<S: BenchSystem>(
     group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>,
     label: &str,
 ) {
-    for workers in [1, 2, 4] {
+    for workers in 1..=cmpth::available_parallelism() {
         group.bench_with_input(BenchmarkId::new(label, workers), &workers, |b, &w| {
             b.iter(|| S::run(w, || assert_eq!(fib::<S>(34), 5_702_887)));
         });
@@ -24,7 +24,7 @@ fn bench_fib_system<S: BenchSystem>(
 /// Stackless-only fib doesn't fit `BenchSystem` (no blocking join exists for
 /// a pure stackless-only system) — driven directly through `run_fib_async`.
 fn bench_fib_async(group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>) {
-    for workers in [1, 2, 4] {
+    for workers in 1..=cmpth::available_parallelism() {
         group.bench_with_input(
             BenchmarkId::new("cmpth-stackless-only", workers),
             &workers,
@@ -43,7 +43,7 @@ fn bench_fib_parallel_invoke<S: cmpth::ScopedStackfulTaskSystem>(
     group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>,
     label: &str,
 ) {
-    for workers in [1, 2, 4] {
+    for workers in 1..=cmpth::available_parallelism() {
         group.bench_with_input(BenchmarkId::new(label, workers), &workers, |b, &w| {
             b.iter(|| assert_eq!(run_fib_parallel_invoke::<S>(w, 34), 5_702_887));
         });
