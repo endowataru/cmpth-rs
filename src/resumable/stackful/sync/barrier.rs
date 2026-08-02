@@ -15,13 +15,27 @@ pub struct BarrierState<S: StackfulSchedulerSystem> where <S as SchedulerSystem>
     pub(super) waiters: VecDeque<S::SuspendedThread>,
 }
 
+/// Raw barrier storage: this crate's own `SpinLock<BarrierState>` wait-queue
+/// representation. Implementing this opts a type into [`StackfulBarrier`]
+/// for free via the blanket impl below — the same two-tier relationship as
+/// [`TaskDescCore`](crate::resumable::common::desc::TaskDescCore)/[`TaskDesc`](crate::resumable::common::desc::TaskDesc).
 pub trait BarrierCore: Send + Sync + Sized where <<Self as BarrierCore>::StackfulSchedulerSystem as SchedulerSystem>::Desc: StackfulTaskDesc {
     type StackfulSchedulerSystem: StackfulSchedulerSystem;
 
+    fn new_core(count: usize) -> Self where <<Self as BarrierCore>::StackfulSchedulerSystem as SchedulerSystem>::Desc: StackfulTaskDesc;
     fn n(&self) -> usize;
     fn state(&self) -> &SpinLock<BarrierState<Self::StackfulSchedulerSystem>>;
+}
 
-    fn wait_impl(&self) -> BarrierWaitResult where <<Self as BarrierCore>::StackfulSchedulerSystem as SchedulerSystem>::Desc: StackfulTaskDesc {
+/// Blanket [`StackfulBarrier`] for any [`BarrierCore`]: the wait algorithm
+/// lives here, not as a trait default on `BarrierCore`, so that trait stays
+/// a pure accessor contract.
+impl<M: BarrierCore> StackfulBarrier for M {
+    fn new(count: usize) -> Self {
+        M::new_core(count)
+    }
+
+    fn wait(&self) -> BarrierWaitResult {
         let mut s = self.state().lock();
         s.count += 1;
         if s.count == self.n() {
@@ -32,7 +46,7 @@ pub trait BarrierCore: Send + Sync + Sized where <<Self as BarrierCore>::Stackfu
             return BarrierWaitResult { is_leader: true };
         }
         s.waiters.push_back(Default::default());
-        let sth: *const <Self::StackfulSchedulerSystem as StackfulSchedulerSystem>::SuspendedThread = s.waiters.back().unwrap();
+        let sth: *const <<Self as BarrierCore>::StackfulSchedulerSystem as StackfulSchedulerSystem>::SuspendedThread = s.waiters.back().unwrap();
         unsafe { &*sth }.wait_with(move || drop(s));
         BarrierWaitResult { is_leader: false }
     }
@@ -59,11 +73,7 @@ impl<S: StackfulSchedulerSystem> Barrier<S> where <S as SchedulerSystem>::Desc: 
 
 impl<S: StackfulSchedulerSystem> BarrierCore for Barrier<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
     type StackfulSchedulerSystem = S;
+    fn new_core(count: usize) -> Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc { Barrier::new(count) }
     fn n(&self) -> usize where <S as SchedulerSystem>::Desc: StackfulTaskDesc { self.n }
     fn state(&self) -> &SpinLock<BarrierState<S>> where <S as SchedulerSystem>::Desc: StackfulTaskDesc { &self.state }
-}
-
-impl<S: StackfulSchedulerSystem> StackfulBarrier for Barrier<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
-    fn new(count: usize) -> Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc { Barrier::new(count) }
-    fn wait(&self) -> BarrierWaitResult where <S as SchedulerSystem>::Desc: StackfulTaskDesc { self.wait_impl() }
 }
