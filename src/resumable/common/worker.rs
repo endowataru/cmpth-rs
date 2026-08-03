@@ -105,7 +105,7 @@ pub struct UltWorker<S: SchedulerSystem> {
     /// scheduler, 2026-07-30).
     cur_task_cell: Cell<Option<RunningTaskToken<S::Desc>>>,
     root_desc: S::Desc,
-    pub(crate) root_cont: Cell<*mut S::Desc>,
+    pub(crate) root_cont: Cell<Option<SuspendedTaskToken<S::Desc>>>,
     steal_seed: Cell<usize>,
     pub(crate) shared: Cell<*const Scheduler<S>>,
     /// The descriptor currently being driven by `run_async_poll` on this
@@ -138,7 +138,7 @@ impl<S: SchedulerSystem> UltWorker<S> {
             deque: S::Deque::default(),
             cur_task_cell: Cell::new(None),
             root_desc: S::Desc::new_root(),
-            root_cont: Cell::new(ptr::null_mut()),
+            root_cont: Cell::new(None),
             steal_seed: Cell::new(num.wrapping_mul(0x9E37_79B9).wrapping_add(1)),
             shared: Cell::new(ptr::null()),
             polling_async: Cell::new(ptr::null_mut()),
@@ -232,15 +232,8 @@ impl<S: SchedulerSystem> UltWorker<S> {
     /// Take the stored root (scheduler-loop) continuation. Shared by
     /// `pop_or_root_stackful`/`pop_or_root_dual`.
     pub(crate) fn take_root_cont(&self) -> SuspendedTaskToken<S::Desc> {
-        let root = self.root_cont.replace(ptr::null_mut());
-        assert!(!root.is_null(), "no runnable continuation on worker {}", self.num);
-        // SAFETY: `root_cont` only ever holds a pointer published by
-        // `set_root_cont`'s `cont.into_raw()`, and `root_cont` (a plain
-        // `Cell`, not shared across threads) is only ever touched by this
-        // worker's own OS thread — no ordering is needed beyond that
-        // single-thread discipline, and this `replace` is the sole
-        // consumer of whatever was there.
-        unsafe { SuspendedTaskToken::from_raw(root) }
+        self.root_cont.take()
+            .unwrap_or_else(|| panic!("no runnable continuation on worker {}", self.num))
     }
 }
 

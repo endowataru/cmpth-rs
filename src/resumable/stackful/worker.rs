@@ -202,9 +202,9 @@ where
     }
 
     fn set_root_cont(&self, cont: SuspendedTaskToken<S::Desc>) {
-        debug_assert!(self.root_cont.get().is_null());
         debug_assert!(cont.is_root());
-        self.root_cont.set(cont.into_raw());
+        let old = self.root_cont.replace(Some(cont));
+        debug_assert!(old.is_none(), "cmpth: overwriting a live root_cont");
     }
 }
 
