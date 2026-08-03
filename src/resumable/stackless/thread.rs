@@ -243,7 +243,9 @@ where
         result_layout.size() + result_layout.align() + f_layout.size() + f_layout.align() + 16;
 
     let desc = wk.shared().async_task_pool.alloc(wk.num(), true, stack_size);
-    let mut token = SuspendedTaskToken(desc);
+    // SAFETY: `desc` was just freshly allocated by `async_task_pool.alloc`
+    // and has never been wrapped in a token before — trivially exclusive.
+    let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
     token.commit_as_poll_fn();
     token.base_mut().scheduler = wk.shared.get() as *const ();
     // Arena-backed AsyncPool systems get a cell slot here; tag it with this
@@ -359,7 +361,10 @@ where
             // from within a worker (execute → run_async_poll → poll_fn).
             let wk = UltWorker::<S>::current()
                 .expect("cmpth: poll_spawned_task called outside a worker");
-            wk.push_local_top(SuspendedTaskToken(j_desc));
+            // SAFETY: `j_desc` was published via a real token's `into_raw()`
+            // by `try_register_sync_joiner`'s caller — same provenance as
+            // `stackful/thread.rs`'s matching arms.
+            wk.push_local_top(unsafe { SuspendedTaskToken::from_raw(j_desc) });
         }
         JoinState::AsyncWaker(w) => unsafe { Box::from_raw(w) }.wake(),
         JoinState::AsyncJoiner(j) => {
@@ -530,7 +535,9 @@ where
     // this allocation doesn't necessarily match.
     let payload = S::Desc::alloc(stack_size, false);
     let desc = crate::resumable::common::pool::Node::wrap_fresh(0, true, payload);
-    let mut token = SuspendedTaskToken(desc);
+    // SAFETY: `desc` was just freshly allocated above and has never been
+    // wrapped in a token before — trivially exclusive.
+    let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
     token.commit_as_poll_fn();
     token.base_mut().scheduler = scheduler;
 

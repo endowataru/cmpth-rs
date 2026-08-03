@@ -176,7 +176,11 @@ where
 /// `free_finished_desc` body for stackful-only systems: every descriptor
 /// came from the pool (there is no `spawn_async` allocation path to bypass
 /// it), so always return it there.
-pub fn free_finished_desc_stackful<S>(wk: &UltWorker<S>, desc: *mut S::Desc)
+///
+/// # Safety
+/// No other references to `desc` may exist after this call (same contract
+/// as [`TaskPool::free_task`]).
+pub unsafe fn free_finished_desc_stackful<S>(wk: &UltWorker<S>, desc: *mut S::Desc)
 where
     S: SchedulerSystem,
 {
@@ -321,13 +325,16 @@ where
         let payload = &mut *(a1 as *mut SuspendPayload<S, F>);
         (&*payload.wk, payload.next, ManuallyDrop::take(&mut payload.f))
     };
-    // Already-linear: `next` was consumed from a `SuspendedTaskToken` (or is a
-    // freshly allocated descriptor, `suspend_to_new`) at the call site
-    // before the switch, so it's already exclusively ours here.
     let mut prev_task = wk.take_cur_task();
     let old = prev_task.publish_saved_context(prev.0);
     debug_assert!(old.is_null(), "suspend over live ctx in suspend_shim (is_root={})", prev_task.as_desc().is_root());
-    let mut next_running = RunningTaskToken(next);
+    // SAFETY: `next` (carried across the FFI context switch as a raw
+    // pointer in `SuspendPayload`, since a move-only Rust token can't cross
+    // an `extern "C"` boundary) was already-linear at the call site before
+    // the switch — consumed from a real `SuspendedTaskToken`'s `into_raw()`
+    // (or is a freshly allocated descriptor, `suspend_to_new`) — so it's
+    // exclusively ours here.
+    let mut next_running = unsafe { RunningTaskToken::from_raw(next) };
     let wkp = wk as *const UltWorker<S> as *const ();
     next_running.mark_resumed_on(wkp);
     wk.set_cur_task(next_running);
@@ -423,7 +430,10 @@ where
     // just take it out of `cur_task` and drop the (zero-cost, no `Drop`
     // impl) `RunningTaskToken` wrapper without doing anything else with it.
     let _ = wk.take_cur_task();
-    let mut next_running = RunningTaskToken(next);
+    // SAFETY: same reasoning as `suspend_shim` — `next` was already-linear
+    // at the call site before the switch and is carried across the FFI
+    // boundary as a raw pointer in `ExitPayload`.
+    let mut next_running = unsafe { RunningTaskToken::from_raw(next) };
     let wkp = wk as *const UltWorker<S> as *const ();
     next_running.mark_resumed_on(wkp);
     wk.set_cur_task(next_running);

@@ -42,7 +42,12 @@ where
         // never both obtain the continuation.
         let c = self.cont().swap(ptr::null_mut(), Ordering::Acquire);
         assert!(!c.is_null(), "StackfulOnlyResumableCore: no parked continuation");
-        SuspendedTaskToken(c)
+        // SAFETY: `c` is a pointer published via `into_raw()` by
+        // `wait_with`/`wait_with_cond` (`Release` store into this same
+        // `cont()` slot); the `Acquire` swap above pairs with that store
+        // and the slot only ever holds one such pointer at a time, so this
+        // swap is the sole consumer.
+        unsafe { SuspendedTaskToken::from_raw(c) }
     }
 
     fn wk() -> &'static UltWorker<Self::StackfulSchedulerSystem> {
@@ -88,7 +93,11 @@ impl<T: StackfulOnlyResumableCore> StackfulResumable<T::StackfulSchedulerSystem>
             if !f() {
                 let c = unsafe { (*slot).swap(ptr::null_mut(), Ordering::Acquire) };
                 debug_assert!(!c.is_null());
-                *prev = Some(SuspendedTaskToken(c));
+                // SAFETY: same reasoning as `take_cont` — `c` was published
+                // into this same slot a few lines up by this same closure
+                // (`Release` store), and this `Acquire` swap is the sole
+                // consumer of that publish.
+                *prev = Some(unsafe { SuspendedTaskToken::from_raw(c) });
             }
         });
     }

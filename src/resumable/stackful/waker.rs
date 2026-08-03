@@ -221,7 +221,11 @@ unsafe fn resumable_wake_by_ref<S: StackfulSchedulerSystem>(ptr: *const ()) wher
     let slot: &ResumablePollerSlot<S> = unsafe { desc_from_erased(ptr) };
     if let WakeOutcome::ClaimedParked = waker::try_wake_state(&slot.state) {
         let desc = slot.cont.get();
-        unsafe { push_continuation::<S>(desc) };
+        // SAFETY: `try_wake_state` returning `ClaimedParked` is the proof —
+        // it's a CAS that only succeeds once per park, so this caller is
+        // the sole party entitled to reclaim `desc`.
+        let token = unsafe { crate::resumable::common::desc::SuspendedTaskToken::from_raw(desc) };
+        push_continuation::<S>(token);
     }
 }
 
@@ -335,11 +339,14 @@ unsafe fn try_wake<S: StackfulSchedulerSystem>(desc: *const S::Desc) where <S as
         // invariant even when ctx was atomic: the Acquire CAS inside
         // try_wake_state already happened-after the ctx store (Release) in
         // cond_shim, so no ordering of ctx's own is needed here either way.
-        // `desc` is genuinely parked here (ClaimedParked), so constructing
-        // a transient token just to peek is sound.
-        let _ctx = crate::resumable::common::desc::SuspendedTaskToken(desc_ptr).peek_saved_context();
-        debug_assert!(!_ctx.is_null());
-        unsafe { push_continuation::<S>(desc_ptr) };
+        // SAFETY: `ClaimedParked` is the proof — `try_wake_state`'s CAS
+        // only succeeds once per park, so this caller is the sole party
+        // entitled to reclaim `desc`. One token, used for the debug_assert
+        // peek and then handed straight to `push_continuation` — not
+        // rebuilt a second time.
+        let token = unsafe { crate::resumable::common::desc::SuspendedTaskToken::from_raw(desc_ptr) };
+        debug_assert!(!token.peek_saved_context().is_null());
+        push_continuation::<S>(token);
     }
 }
 

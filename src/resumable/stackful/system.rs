@@ -241,7 +241,7 @@ impl<M: UltIdentity> SchedulerSystem for M {
     }
 
     fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut M::Desc) {
-        crate::resumable::stackful::worker::free_finished_desc_stackful(wk, desc)
+        unsafe { crate::resumable::stackful::worker::free_finished_desc_stackful(wk, desc) }
     }
 }
 

@@ -60,15 +60,20 @@ where
 /// `S::AsyncPool` (a separate pool from the ULT-stack `S::Pool`, see
 /// [`SchedulerSystem::AsyncPool`](crate::resumable::common::system::SchedulerSystem::AsyncPool));
 /// everything else goes through the ULT-stack pool as usual.
-pub fn free_finished_desc_dual<S>(wk: &UltWorker<S>, desc: *mut S::Desc)
+///
+/// # Safety
+/// No other references to `desc` may exist after this call (same contract
+/// as [`TaskPool::free_task`]/[`DescPool::dealloc`]).
+pub unsafe fn free_finished_desc_dual<S>(wk: &UltWorker<S>, desc: *mut S::Desc)
 where
     S: StackfulSchedulerSystem,
     S::Desc: StackfulTaskDesc + AsyncTaskDesc,
 {
-    // Peek-only: `desc` is finished (about to be freed), so no other token
-    // can exist for it — safe to construct one transiently just to read
-    // the dispatch tag.
-    if crate::resumable::common::desc::SuspendedTaskToken(desc).is_poll_fn_dispatch() {
+    // SAFETY: `desc` is finished (about to be freed) — `TaskDesc::join_state`'s
+    // own contract guarantees the exit path never touches the descriptor
+    // again after publishing `FINISHED`, so no other token can exist for
+    // it; safe to construct one transiently just to read the dispatch tag.
+    if unsafe { crate::resumable::common::desc::SuspendedTaskToken::from_raw(desc) }.is_poll_fn_dispatch() {
         unsafe { wk.shared().async_task_pool.dealloc(wk.num(), desc) };
     } else {
         unsafe { wk.free_task(desc) };

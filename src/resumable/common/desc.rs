@@ -330,7 +330,7 @@ pub(crate) unsafe fn peek_worker<D: TaskDescCore>(desc: *mut D) -> *const () {
 /// `StacklessOnlyTaskDesc`, or `DualTaskDesc` for dual) without touching
 /// every deque/pool/worker call site — they're all written generically
 /// over `D: TaskDesc`.
-pub struct SuspendedTaskToken<D: TaskDescCore>(pub(crate) *mut D);
+pub struct SuspendedTaskToken<D: TaskDescCore>(*mut D);
 
 unsafe impl<D: TaskDescCore> Send for SuspendedTaskToken<D> {}
 
@@ -354,6 +354,22 @@ impl<D: TaskDescCore> DerefMut for SuspendedTaskToken<D> {
 }
 
 impl<D: TaskDescCore> SuspendedTaskToken<D> {
+    /// The one sanctioned way to conjure a token from a raw descriptor
+    /// pointer. Every call site must justify, in its own `// SAFETY:`
+    /// comment, why it alone holds exclusive access to `*ptr` right now
+    /// (freshly allocated and never wrapped before; recovered from a
+    /// slot/`join_state` word that only ever holds a pointer produced by a
+    /// real token's `into_raw()`, whose own publish/consume protocol
+    /// already proves single-consumer; or an FFI-boundary handoff of an
+    /// already-linear pointer).
+    ///
+    /// # Safety
+    /// The caller must hold exclusive access to `*ptr` for the lifetime of
+    /// the returned token.
+    pub(crate) unsafe fn from_raw(ptr: *mut D) -> Self {
+        SuspendedTaskToken(ptr)
+    }
+
     pub(crate) fn desc(&self) -> *mut D {
         self.0
     }
@@ -384,7 +400,10 @@ impl<D: TaskDescCore> SuspendedTaskToken<D> {
     /// the name `SuspendedTaskToken` would be a lie for something that's
     /// actively executing.
     pub(crate) fn into_running(self) -> RunningTaskToken<D> {
-        RunningTaskToken(self.into_raw())
+        // SAFETY: `self` is itself the exclusivity proof; converting it to
+        // the running-task counterpart for the same pointer transfers that
+        // proof, it doesn't fabricate a new one.
+        unsafe { RunningTaskToken::from_raw(self.into_raw()) }
     }
 }
 
@@ -397,7 +416,7 @@ impl<D: TaskDescCore> SuspendedTaskToken<D> {
 /// descriptor exists at a time, either held by whichever code is actively
 /// driving it, or sitting in the worker's `cur_task`/`polling_async` cell
 /// (never both at once — see `UltWorker::cur_task`'s doc comment).
-pub struct RunningTaskToken<D: TaskDescCore>(pub(crate) *mut D);
+pub struct RunningTaskToken<D: TaskDescCore>(*mut D);
 
 unsafe impl<D: TaskDescCore> Send for RunningTaskToken<D> {}
 
@@ -417,6 +436,15 @@ impl<D: TaskDescCore> DerefMut for RunningTaskToken<D> {
 }
 
 impl<D: TaskDescCore> RunningTaskToken<D> {
+    /// See [`SuspendedTaskToken::from_raw`] — identical contract.
+    ///
+    /// # Safety
+    /// The caller must hold exclusive access to `*ptr` for the lifetime of
+    /// the returned token.
+    pub(crate) unsafe fn from_raw(ptr: *mut D) -> Self {
+        RunningTaskToken(ptr)
+    }
+
     pub(crate) fn desc(&self) -> *mut D {
         self.0
     }
@@ -434,7 +462,10 @@ impl<D: TaskDescCore> RunningTaskToken<D> {
     /// continuing to run: demote it back to a suspended continuation. The
     /// counterpart to [`SuspendedTaskToken::into_running`].
     pub(crate) fn into_suspended(self) -> SuspendedTaskToken<D> {
-        SuspendedTaskToken(self.into_raw())
+        // SAFETY: `self` is itself the exclusivity proof; converting it to
+        // the suspended counterpart for the same pointer transfers that
+        // proof, it doesn't fabricate a new one.
+        unsafe { SuspendedTaskToken::from_raw(self.into_raw()) }
     }
 
     /// Record that this task is now running on `worker_ptr` — called by
