@@ -3,18 +3,17 @@
 
 use crate::resumable::stackful::worker::StackfulWorker;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::task::{Context, Waker};
 
 use crate::traits::{Resumable, StackfulResumable, StacklessResumable};
-use crate::resumable::common::desc::{SuspendedTaskToken, TaskDescCore};
+use crate::resumable::common::desc::{AtomicTaggedSlot, SuspendedTaskToken, TaggedPtr, TaskDescCore};
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::stackless::desc::AsyncTaskDesc;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
 use crate::resumable::stackful::worker::ContextSwitcher;
 
-const EMPTY: usize = 0;
 const ASYNC_TAG: usize = 1;
 
 /// Dual wait slot: holds zero or one waiter, which may be a real ULT
@@ -30,7 +29,7 @@ const ASYNC_TAG: usize = 1;
 /// this: they only ever *write* a fresh registration into what must already
 /// be an empty slot, so there's no ambiguity about prior content.
 pub struct DualResumable<S: StackfulSchedulerSystem> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
-    state: AtomicUsize,
+    state: AtomicTaggedSlot<1>,
     _marker: PhantomData<S>,
 }
 
@@ -39,7 +38,7 @@ unsafe impl<S: StackfulSchedulerSystem> Sync for DualResumable<S> where S::Desc:
 
 impl<S: StackfulSchedulerSystem> Default for DualResumable<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
     fn default() -> Self {
-        DualResumable { state: AtomicUsize::new(EMPTY), _marker: PhantomData }
+        DualResumable { state: AtomicTaggedSlot::empty(), _marker: PhantomData }
     }
 }
 
@@ -63,39 +62,37 @@ where
 }
 
 impl<S: StackfulSchedulerSystem> DualResumable<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
-    /// Wake whatever `v` (a raw slot value already taken via
-    /// `state.swap(EMPTY, ..)`) represents: push a real ULT continuation to
-    /// the local deque, or wake a boxed [`Waker`]. `v == EMPTY` is a no-op.
-    /// Shared by `notify()` and by `enter`/`swap`'s fallback when the slot
-    /// didn't hold a real continuation to switch into.
-    fn wake_raw(v: usize) {
-        if v == EMPTY {
-            return;
-        }
-        if v & ASYNC_TAG != 0 {
-            let waker_ptr = (v & !ASYNC_TAG) as *mut Waker;
-            let w = unsafe { Box::from_raw(waker_ptr) };
+    /// Wake whatever `v` (already taken via `state.take(..)`) represents:
+    /// push a real ULT continuation to the local deque, or wake a boxed
+    /// [`Waker`]. `None` is a no-op. Shared by `notify()` and by
+    /// `enter`/`swap`'s fallback when the slot didn't hold a real
+    /// continuation to switch into.
+    fn wake_raw(v: Option<(usize, TaggedPtr<1>)>) {
+        let Some((tag, raw)) = v else { return };
+        if tag == ASYNC_TAG {
+            // SAFETY: `tag == ASYNC_TAG` means this slot's `publish` was
+            // called from `register` with a `Box<Waker>`.
+            let w: Box<Waker> = unsafe { raw.into_typed() };
             w.wake();
         } else {
             let wk = UltWorker::<S>::current()
                 .expect("cmpth: DualResumable wake called outside a worker");
-            // SAFETY: `v` was published via a real token's `into_raw()`
-            // (`Release` store into `state`) by `wait_with`/`wait_with_cond`/
-            // `swap`; the caller's own `state.swap(EMPTY, Acquire)` (in
-            // `notify`/`enter`/`swap`, the only callers of `wake_raw`) is
-            // the sole consumer of that publish.
-            wk.push_local_top(unsafe { SuspendedTaskToken::from_raw(v as *mut S::Desc) });
+            // SAFETY: `tag == 0` means this slot's `publish` was called
+            // from `wait_with`/`wait_with_cond`/`swap` with a real
+            // `SuspendedTaskToken`.
+            let c: SuspendedTaskToken<S::Desc> = unsafe { raw.into_typed() };
+            wk.push_local_top(c);
         }
     }
 }
 
 impl<S: StackfulSchedulerSystem> Resumable<S> for DualResumable<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
     fn is_set(&self) -> bool {
-        self.state.load(Ordering::Acquire) != EMPTY
+        self.state.is_set(Ordering::Acquire)
     }
 
     fn notify(&self) {
-        let v = self.state.swap(EMPTY, Ordering::AcqRel);
+        let v = self.state.take(Ordering::AcqRel);
         Self::wake_raw(v);
     }
 }
@@ -105,10 +102,13 @@ impl<S: StackfulSchedulerSystem> StackfulResumable<S> for DualResumable<S> where
         let wk = UltWorker::<S>::current()
             .expect("cmpth: DualResumable::wait_with called outside a worker");
         assert_on_real_ult(wk);
-        let slot = &self.state as *const AtomicUsize;
+        let slot = &self.state as *const AtomicTaggedSlot<1>;
         wk.suspend_to_sched(move |_wk, prev| {
-            // Release: publishes the context saved just before this callback.
-            unsafe { (*slot).store(prev.into_raw() as usize, Ordering::Release) };
+            // Release: publishes the context saved just before this
+            // callback. SAFETY: `slot` outlives this callback (it's
+            // `&self`'s own field, borrowed for as long as `wait_with` is
+            // suspended).
+            unsafe { (*slot).publish(prev, 0, Ordering::Release) };
             f();
         });
     }
@@ -117,18 +117,19 @@ impl<S: StackfulSchedulerSystem> StackfulResumable<S> for DualResumable<S> where
         let wk = UltWorker::<S>::current()
             .expect("cmpth: DualResumable::wait_with_cond called outside a worker");
         assert_on_real_ult(wk);
-        let slot = &self.state as *const AtomicUsize;
+        let slot = &self.state as *const AtomicTaggedSlot<1>;
         wk.cond_suspend_to_sched(move |_wk, prev| {
-            unsafe {
-                (*slot).store(prev.take().unwrap().into_raw() as usize, Ordering::Release)
-            };
+            // SAFETY: `slot` outlives this callback.
+            unsafe { (*slot).publish(prev.take().unwrap(), 0, Ordering::Release) };
             if !f() {
-                let v = unsafe { (*slot).swap(EMPTY, Ordering::Acquire) };
-                debug_assert_ne!(v, EMPTY);
-                // SAFETY: `v` was published a few lines up by this same
-                // closure's own `Release` store (`prev.into_raw()`); this
-                // `Acquire` swap is the sole consumer of that publish.
-                *prev = Some(unsafe { SuspendedTaskToken::from_raw(v as *mut S::Desc) });
+                // SAFETY: `slot` outlives this callback; `take` pairs with
+                // this same closure's `publish` a few lines up.
+                let v = unsafe { (*slot).take(Ordering::Acquire) };
+                let (tag, raw) = v.expect("DualResumable: wait_with_cond cancel raced");
+                debug_assert_eq!(tag, 0, "cmpth: cond-suspend slot held an async waiter");
+                // SAFETY: `tag == 0` means a `SuspendedTaskToken` was
+                // published a few lines up by this same closure.
+                *prev = Some(unsafe { raw.into_typed() });
             }
         });
     }
@@ -137,17 +138,16 @@ impl<S: StackfulSchedulerSystem> StackfulResumable<S> for DualResumable<S> where
         let wk = UltWorker::<S>::current()
             .expect("cmpth: DualResumable::enter called outside a worker");
         assert_on_real_ult(wk);
-        let v = self.state.swap(EMPTY, Ordering::AcqRel);
-        if v != EMPTY && v & ASYNC_TAG == 0 {
-            // SAFETY: `v` was published via a real token's `into_raw()`
-            // (`Release` store into `state`) by `wait_with`/`wait_with_cond`;
-            // this `Acquire` swap is the sole consumer of that publish.
-            let c = unsafe { SuspendedTaskToken::from_raw(v as *mut S::Desc) };
-            wk.suspend_to_cont(c, |wk, prev| wk.push_local_top(prev));
-        } else {
-            // Not a real continuation — no context jump is possible here,
-            // so fall back to a plain wake instead.
-            Self::wake_raw(v);
+        match self.state.take(Ordering::AcqRel) {
+            Some((tag, raw)) if tag != ASYNC_TAG => {
+                // SAFETY: `tag != ASYNC_TAG` means a `SuspendedTaskToken`
+                // was published by `wait_with`/`wait_with_cond`.
+                let c: SuspendedTaskToken<S::Desc> = unsafe { raw.into_typed() };
+                wk.suspend_to_cont(c, |wk, prev| wk.push_local_top(prev));
+            }
+            // Not a real continuation (or empty) — no context jump is
+            // possible here, so fall back to a plain wake instead.
+            v => Self::wake_raw(v),
         }
     }
 
@@ -156,29 +156,29 @@ impl<S: StackfulSchedulerSystem> StackfulResumable<S> for DualResumable<S> where
         let wk = UltWorker::<S>::current()
             .expect("cmpth: DualResumable::swap called outside a worker");
         assert_on_real_ult(wk);
-        let v = next.state.swap(EMPTY, Ordering::AcqRel);
-        if v != EMPTY && v & ASYNC_TAG == 0 {
-            // SAFETY: same provenance as `enter` above — `v` was published
-            // via a real token's `into_raw()` into `next.state`, and this
-            // `Acquire` swap is the sole consumer.
-            let c = unsafe { SuspendedTaskToken::from_raw(v as *mut S::Desc) };
-            let slot = &self.state as *const AtomicUsize;
-            wk.suspend_to_cont(c, move |_wk, prev| {
-                unsafe { (*slot).store(prev.into_raw() as usize, Ordering::Release) };
-            });
-        } else {
+        match next.state.take(Ordering::AcqRel) {
+            Some((tag, raw)) if tag != ASYNC_TAG => {
+                // SAFETY: same provenance as `enter` above.
+                let c: SuspendedTaskToken<S::Desc> = unsafe { raw.into_typed() };
+                let slot = &self.state as *const AtomicTaggedSlot<1>;
+                wk.suspend_to_cont(c, move |_wk, prev| {
+                    // SAFETY: `slot` outlives this callback (it's `self`'s
+                    // own field, and `self` outlives the suspend/resume it
+                    // spans).
+                    unsafe { (*slot).publish(prev, 0, Ordering::Release) };
+                });
+            }
             // Not a real continuation — fall back to a plain wake; `self`
             // never becomes parked since no switch happens.
-            Self::wake_raw(v);
+            v => Self::wake_raw(v),
         }
     }
 }
 
 impl<S: StackfulSchedulerSystem> StacklessResumable<S> for DualResumable<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
     fn register(&self, cx: &mut Context<'_>) {
-        let boxed = Box::new(cx.waker().clone());
-        let ptr = Box::into_raw(boxed) as usize | ASYNC_TAG;
-        let old = self.state.swap(ptr, Ordering::AcqRel);
-        debug_assert_eq!(old, EMPTY, "DualResumable::register called on an already-set slot");
+        debug_assert!(!self.state.is_set(Ordering::Relaxed), "DualResumable::register called on an already-set slot");
+        let boxed: Box<Waker> = Box::new(cx.waker().clone());
+        self.state.publish(boxed, ASYNC_TAG, Ordering::Release);
     }
 }
