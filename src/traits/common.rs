@@ -1,13 +1,11 @@
 //! Shared root types used by both the stackful and stackless flavors:
-//! [`TaskSystem`], [`TaskDesc`], [`Resumable`], [`DualMutex`]/[`DualBarrier`],
-//! [`TlsAnchor`]/[`TlsSlot`].
+//! [`TaskSystem`], [`TaskDesc`], [`Resumable`], [`TlsAnchor`]/[`TlsSlot`].
+//! See [`crate::traits::dual`] for [`DualMutex`](crate::traits::dual::DualMutex)/
+//! [`DualBarrier`](crate::traits::dual::DualBarrier).
 
 use std::ops::DerefMut;
 use std::sync::atomic::AtomicUsize;
 use std::task::Waker;
-
-use crate::traits::stackful::{StackfulBarrier, StackfulMutex};
-use crate::traits::stackless::{StacklessBarrier, StacklessMutex};
 
 // ---------------------------------------------------------------------------
 // TaskDesc
@@ -153,7 +151,7 @@ pub trait Resumable<S>: Default {
     fn notify(&self);
 }
 
-/// Return value of [`StackfulBarrier::wait`], mirroring
+/// Return value of [`StackfulBarrier::wait`](crate::traits::stackful::StackfulBarrier::wait), mirroring
 /// `std::sync::BarrierWaitResult`.
 pub struct BarrierWaitResult {
     pub is_leader: bool,
@@ -162,23 +160,6 @@ pub struct BarrierWaitResult {
 impl BarrierWaitResult {
     pub fn is_leader(&self) -> bool { self.is_leader }
 }
-
-/// A barrier usable from either calling convention — see [`DualMutex`] for
-/// the same pattern applied to mutexes. The interface owns the name here
-/// too: the concrete generic-over-N type
-/// (`resumable::common::sync::DualBarrier`) is re-exported under an alias
-/// (`UltDualBarrier`) at the crate root to make room.
-pub trait DualBarrier: Sized + Send + Sync + StackfulBarrier + StacklessBarrier {}
-
-impl<M: StackfulBarrier + StacklessBarrier> DualBarrier for M {}
-
-/// A mutex usable from either calling convention. Blanket-derived: any type
-/// implementing both flavors gets this for free, so it exists purely as a
-/// convenience bound for generic code that wants "works either way" as one
-/// name (`S::Mutex: DualMutex<T>`) instead of spelling out both traits.
-pub trait DualMutex<T: Send>: StackfulMutex<T> + StacklessMutex<T> {}
-
-impl<T: Send, M: StackfulMutex<T> + StacklessMutex<T>> DualMutex<T> for M {}
 
 /// The untyped storage behind a [`TlsSlot`]: a lazily assigned slot index.
 ///

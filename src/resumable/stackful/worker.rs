@@ -14,7 +14,8 @@ use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, Worker};
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, TaskDescCore, Transferred};
+use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, TaskDescCore};
+use crate::interchange::Transferred;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 
 // ---------------------------------------------------------------------------

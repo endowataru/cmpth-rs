@@ -89,7 +89,7 @@ pub trait WakerTaskDesc: TaskDesc {
 /// inherent methods instead.
 ///
 /// The interface owns the name here, not the implementation:
-/// [`crate::traits::common::DualMutex`] is the trait; the concrete
+/// [`crate::traits::dual::DualMutex`] is the trait; the concrete
 /// generic-over-N type (`resumable::common::sync::DualMutex`) is
 /// re-exported under an alias (`UltDualMutex`) at the crate root to make
 /// room, the same pattern already used for `Barrier`/`UltBarrier`.

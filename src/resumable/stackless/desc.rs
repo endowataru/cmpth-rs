@@ -6,7 +6,7 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Waker};
 
-use crate::resumable::common::desc::{BaseOwned, HasBaseOwned, JoinState, RunningTaskToken, SuspendedTaskToken, TaskDescCore, TaskDescAlloc, decode_join_state, JS_ASYNC_JOINER_TAG, JS_ASYNC_TAG, JS_DETACHED, JS_FINISHED, JS_RUNNING};
+use crate::resumable::common::desc::{DescOwned, HasDescOwned, JoinState, RunningTaskToken, SuspendedTaskToken, TaskDescCore, TaskDescAlloc, decode_join_state, JS_ASYNC_JOINER_TAG, JS_ASYNC_TAG, JS_DETACHED, JS_FINISHED, JS_RUNNING};
 use crate::resumable::common::waker::{self, WakeOutcome, EVER_SHARED, STATE_MASK};
 
 pub use crate::traits::stackless::WakerTaskDesc;
@@ -227,17 +227,17 @@ impl<D: TaskDescCore<Owned: HasPollFn<D>>> RunningTaskToken<D> {
 // context switch)
 // ---------------------------------------------------------------------------
 
-/// Owner-exclusive fields for [`StacklessOnlyTaskDesc`]: [`BaseOwned`] plus
+/// Owner-exclusive fields for [`StacklessOnlyTaskDesc`]: [`DescOwned`] plus
 /// the poll_fn entry point (no `ctx` slot — this flavor never does a real
 /// context switch).
 pub struct StacklessOnlyOwned {
-    base: BaseOwned,
+    desc_owned: DescOwned,
     poll_fn: Option<TaskPollFn<StacklessOnlyTaskDesc>>,
 }
 
-impl HasBaseOwned for StacklessOnlyOwned {
-    fn base(&self) -> &BaseOwned { &self.base }
-    fn base_mut(&mut self) -> &mut BaseOwned { &mut self.base }
+impl HasDescOwned for StacklessOnlyOwned {
+    fn desc_owned(&self) -> &DescOwned { &self.desc_owned }
+    fn desc_owned_mut(&mut self) -> &mut DescOwned { &mut self.desc_owned }
 }
 
 impl HasPollFn<StacklessOnlyTaskDesc> for StacklessOnlyOwned {
@@ -302,10 +302,10 @@ impl StacklessOnlyTaskDesc {
     /// async arena). Captures the cell slot pointer for use by the wake
     /// path.
     pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> StacklessOnlyTaskDesc {
-        let mut base = BaseOwned::new();
-        base.slot = stack.cell_slot();
+        let mut desc_owned = DescOwned::new();
+        desc_owned.slot = stack.cell_slot();
         StacklessOnlyTaskDesc {
-            owned: UnsafeCell::new(StacklessOnlyOwned { base, poll_fn: None }),
+            owned: UnsafeCell::new(StacklessOnlyOwned { desc_owned, poll_fn: None }),
             is_root: false,
             join_state: AtomicUsize::new(if has_handle { JS_RUNNING } else { JS_DETACHED }),
             waker_refs: AtomicUsize::new(0),
@@ -316,7 +316,7 @@ impl StacklessOnlyTaskDesc {
     /// Pseudo-descriptor for a worker's scheduler-loop context.
     pub(crate) fn new_root() -> StacklessOnlyTaskDesc {
         StacklessOnlyTaskDesc {
-            owned: UnsafeCell::new(StacklessOnlyOwned { base: BaseOwned::new(), poll_fn: None }),
+            owned: UnsafeCell::new(StacklessOnlyOwned { desc_owned: DescOwned::new(), poll_fn: None }),
             is_root: true,
             join_state: AtomicUsize::new(JS_DETACHED),
             waker_refs: AtomicUsize::new(0),
@@ -329,8 +329,8 @@ impl StacklessOnlyTaskDesc {
         debug_assert!(!self.is_root);
         let owned = self.owned.get_mut();
         owned.poll_fn = None;
-        owned.base.result = None;
-        owned.base.tls = None;
+        owned.desc_owned.result = None;
+        owned.desc_owned.tls = None;
         *self.join_state.get_mut() = if has_handle { JS_RUNNING } else { JS_DETACHED };
         *self.waker_refs.get_mut() = 0;
     }

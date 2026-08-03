@@ -2,7 +2,7 @@
 
 cmpth is a Rust parallelism library that provides **three** ways to
 express parallel work — **stackful** (real user-level threads),
-**stackless** (`spawn_async`/`.await`), and **scoped** (a Rayon-`join`-like
+**stackless** (`S::spawn`/`.await`), and **scoped** (a Rayon-`join`-like
 binary primitive) — built from the same small set of trait-based
 components (context-switch policy, work-stealing deque, stack allocator,
 …). Use one of the ready-made systems as-is, or swap out individual
@@ -86,20 +86,20 @@ fn main() {
 }
 ```
 
-Need both `spawn`/`.join()` *and* `spawn_async`/`.await` live on the same
-tasks (e.g. a `Mutex` contended from both stackful and stackless callers)?
-`DefaultDualTaskSystem` provides both calling conventions on one system —
-the tradeoff, covered next, is a small per-task dispatch cost neither
-single-flavor default pays.
+Need both `spawn`/`.join()` *and* stackless `S::spawn`/`.await` live on the
+same tasks (e.g. a `Mutex` contended from both stackful and stackless
+callers)? `DefaultDualTaskSystem` provides both calling conventions on one
+system — the tradeoff, covered next, is a small per-task dispatch cost
+neither single-flavor default pays.
 
-### Stackless — `spawn_async` / `.await`
+### Stackless — `S::spawn` / `.await`
 
 A task is a `Future`, driven by polling in place: no stack allocation, no
 context switch per poll. `DefaultStacklessOnlyTaskSystem` is the ready-made
 system for this model — no separate setup needed, and genuinely no stackful
 capability at all (no context-switch policy, no stack allocator), so it
 skips the dual-flavor dispatch `DefaultDualTaskSystem` pays on every task
-(~10–15% faster on a pure-`spawn_async` workload):
+(~10–15% faster on a pure-stackless workload):
 
 ```rust
 use cmpth::DefaultStacklessOnlyTaskSystem;
@@ -121,9 +121,9 @@ fn main() {
 }
 ```
 
-`DefaultDualTaskSystem` still works for `spawn_async` too, if a system needs both
-calling conventions live at once — it's just the wrong default when a
-system is only ever going to be async.
+`DefaultDualTaskSystem` still works for stackless `S::spawn` too, if a
+system needs both calling conventions live at once — it's just the wrong
+default when a system is only ever going to be async.
 
 ### Scoped — binary divide-and-conquer
 
@@ -151,7 +151,7 @@ fn main() {
 **Which one?** Stackful when tasks need to block on locks, barriers, or
 other blocking work alongside spawned tasks (add `DefaultDualTaskSystem`
 instead of `DefaultStackfulOnlyTaskSystem` if the same tasks also need
-`spawn_async`). Stackless when integrating with existing `async`/`.await`
+stackless `S::spawn`). Stackless when integrating with existing `async`/`.await`
 code, or to avoid paying for a stack per task. Scoped when the parallelism
 is a pure recursive divide-and-conquer with no blocking involved — it has
 the lowest overhead of the three.
@@ -230,8 +230,8 @@ the examples do, not that way.
 
 - `spawn` / `JoinHandle` (also usable as a `Future`), detach on drop —
   stackful
-- `spawn_async`: run a `Future` as a task without allocating a stack —
-  stackless
+- `S::spawn` (stackless): run a `Future` as a task without allocating a
+  stack
 - `parallel_call`: binary divide-and-conquer with no task descriptor and
   no heap allocation on the un-stolen path — scoped, in both a blocking
   (`ScopedStackfulTaskSystem`) and an `.await`-based

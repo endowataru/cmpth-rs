@@ -12,7 +12,7 @@ use std::task::{Context, Poll};
 
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
-use crate::resumable::common::desc::{HasBaseOwned, JoinState, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskDescAlloc};
+use crate::resumable::common::desc::{HasDescOwned, JoinState, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskDescAlloc};
 use crate::resumable::common::waker::WakeOutcome;
 use crate::resumable::stackless::desc::WakerTaskDesc;
 use crate::resumable::stackless::desc::{AsyncTaskDesc, HasPollFn, TaskPollResult};
@@ -247,12 +247,12 @@ where
     // and has never been wrapped in a token before — trivially exclusive.
     let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
     token.commit_as_poll_fn();
-    token.base_mut().scheduler = wk.shared.get() as *const ();
+    token.desc_owned_mut().scheduler = wk.shared.get() as *const ();
     // Arena-backed AsyncPool systems get a cell slot here; tag it with this
     // system's identity once (mirrors `spawn`'s own slot setup) so
     // `worker_from_async_arena_addr` can guard against a nested scheduler's
     // descriptor landing in the same arena.
-    if let Some(slot) = token.base().slot {
+    if let Some(slot) = token.desc_owned().slot {
         unsafe { (*slot).system_id.set(crate::resumable::common::lookup::system_id::<S>()) };
     }
 
@@ -539,7 +539,7 @@ where
     // wrapped in a token before — trivially exclusive.
     let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
     token.commit_as_poll_fn();
-    token.base_mut().scheduler = scheduler;
+    token.desc_owned_mut().scheduler = scheduler;
 
     let stack_top = token.as_desc().stack_top() as usize;
     let result_addr = align_down(stack_top - result_layout.size(), result_layout.align());
