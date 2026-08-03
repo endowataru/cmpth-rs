@@ -14,11 +14,56 @@ use std::task::{Context, Poll, Waker};
 pub use crate::traits::common::{Resumable, TaskSystem};
 pub use crate::traits::scoped::ScopedStacklessTaskSystem;
 
-use crate::traits::common::{BarrierWaitResult, TaskDesc, WakeOutcome};
+use crate::traits::common::{BarrierWaitResult, TaskDesc};
 
 // ---------------------------------------------------------------------------
 // WakerTaskDesc
 // ---------------------------------------------------------------------------
+
+/// Outcome of a wake attempt against a POLLING/PARKED/NOTIFIED state
+/// machine — the return type of [`WakerTaskDesc::try_wake_state`]. Stackful
+/// `block_on`'s `Poller` reuses the same three-state shape internally to
+/// drive a real ULT's wait state (not anchored on a descriptor), but that's
+/// an implementation choice inside `block_on`, not a stackful interface
+/// concept — the type itself belongs here, next to the trait that actually
+/// exposes it.
+pub enum WakeOutcome {
+    /// Was POLLING; now NOTIFIED. The task will notice on its next state
+    /// check and re-poll; there is no continuation to push.
+    SetNotified,
+    /// Was PARKED; now POLLING. The caller owns delivering the
+    /// continuation (push to a worker deque or the external queue).
+    ClaimedParked,
+    /// Was already NOTIFIED, or IDLE (a stale wake after the poll session
+    /// ended). Nothing to do.
+    NoOp,
+}
+
+/// [`TaskDesc::JoinOutcome`] for a descriptor with async (`.await`)
+/// capability but no stackful capability — every state a pure-stackless
+/// descriptor's join protocol can actually produce, and nothing more (there
+/// is no `SyncJoiner` variant to accidentally have to handle, since nothing
+/// could ever construct one without
+/// [`SyncJoinerTaskDesc`](crate::traits::stackful::SyncJoinerTaskDesc)
+/// capability this descriptor doesn't have). See
+/// [`JoinState`](crate::traits::common::JoinState) for the full union used
+/// by a descriptor with both capabilities.
+pub enum AsyncJoinState<D> {
+    /// Task alive, nobody waiting.
+    Running,
+    /// Result written (or the task was detached-and-cleaned).
+    Finished,
+    /// The `JoinHandle` was dropped early; the exit path cleans up.
+    Detached,
+    /// A registered async waker — used when the polling task's waker isn't
+    /// verifiably one of this system's own (foreign executor, or no worker
+    /// at all).
+    AsyncWaker(*mut Waker),
+    /// Same role as `AsyncWaker`, but unboxed: the polling task's own
+    /// descriptor, reachable directly because its waker is known (by
+    /// construction) to be this system's own poll-loop waker.
+    AsyncJoiner(*mut D),
+}
 
 /// Descriptor operations needed by a task driven via a real
 /// [`std::task::Waker`] whose wake state must live on the descriptor itself

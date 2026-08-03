@@ -16,11 +16,12 @@ pub mod scoped;
 pub mod stackful;
 pub mod stackless;
 
-pub use common::{BarrierWaitResult, JoinState, Resumable, TaskDesc, TaskSystem, TlsAnchor, TlsSlot, WakeOutcome};
+pub use common::{BarrierWaitResult, JoinState, Resumable, TaskDesc, TaskSystem, TlsAnchor, TlsSlot};
 pub use dual::{DualBarrier, DualMutex};
 pub use scoped::{ScopedStackfulTaskSystem, ScopedStacklessTaskSystem};
 pub use stackful::{
     CondTransfer, Context, ContextPolicy, Delegator, DelegatorConsumer, JoinHandleLike, Poller,
-    StackfulBarrier, StackfulMutex, StackfulResumable, StackfulTaskSystem, ThreadSystem, Transfer,
+    StackfulBarrier, StackfulMutex, StackfulResumable, StackfulTaskSystem, SyncJoinerTaskDesc,
+    ThreadSystem, Transfer,
 };
-pub use stackless::{StacklessBarrier, StacklessMutex, StacklessResumable, StacklessTaskSystem, WakerTaskDesc};
+pub use stackless::{StacklessBarrier, StacklessMutex, StacklessResumable, StacklessTaskSystem, WakeOutcome, WakerTaskDesc};

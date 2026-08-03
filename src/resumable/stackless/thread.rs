@@ -12,7 +12,7 @@ use std::task::{Context, Poll};
 
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
-use crate::resumable::common::desc::{HasDescOwned, JoinState, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskDescAlloc};
+use crate::resumable::common::desc::{HasDescOwned, JoinState, SuspendedTaskToken, TaskDescCore, TaskDescAlloc, publish_finished_raw};
 use crate::resumable::common::waker::WakeOutcome;
 use crate::resumable::stackless::desc::WakerTaskDesc;
 use crate::resumable::stackless::desc::{AsyncTaskDesc, HasPollFn, TaskPollResult};
@@ -355,7 +355,7 @@ where
 
     // Publish FINISHED and settle whoever the old state names.  Runs on the
     // scheduler stack (no context-switch-target decision needed).
-    match desc_ref.publish_finished() {
+    match publish_finished_raw(desc_ref) {
         JoinState::SyncJoiner(j_desc) => {
             // Push the waiting ULT back to the deque.  This is always called
             // from within a worker (execute → run_async_poll → poll_fn).

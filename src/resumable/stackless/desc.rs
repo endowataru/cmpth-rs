@@ -10,6 +10,7 @@ use crate::resumable::common::desc::{DescOwned, HasDescOwned, JoinState, Running
 use crate::resumable::common::waker::{self, WakeOutcome, EVER_SHARED, STATE_MASK};
 
 pub use crate::traits::stackless::WakerTaskDesc;
+use crate::traits::stackless::AsyncJoinState;
 
 /// Raw waker-state storage: this crate's own `AtomicUsize`-encoded
 /// POLLING/PARKED/NOTIFIED/IDLE state machine (see
@@ -265,6 +266,24 @@ impl TaskDescCore for StacklessOnlyTaskDesc {
     fn stack_top(&self) -> *mut u8 { self.stack.top() }
     type Owned = StacklessOnlyOwned;
     fn owned_cell(&self) -> &UnsafeCell<StacklessOnlyOwned> { &self.owned }
+
+    /// No stackful capability at all, so `SyncJoiner` can never actually be
+    /// published (the only writer,
+    /// `SyncJoinerTaskDesc::try_register_sync_joiner`, doesn't exist for
+    /// this type) — narrow to `AsyncJoinState`.
+    type JoinOutcome = AsyncJoinState<Self>;
+    fn decode_join(word: usize) -> AsyncJoinState<Self> {
+        match decode_join_state::<Self>(word) {
+            JoinState::Running => AsyncJoinState::Running,
+            JoinState::Finished => AsyncJoinState::Finished,
+            JoinState::Detached => AsyncJoinState::Detached,
+            JoinState::AsyncWaker(w) => AsyncJoinState::AsyncWaker(w),
+            JoinState::AsyncJoiner(j) => AsyncJoinState::AsyncJoiner(j),
+            JoinState::SyncJoiner(_) => {
+                unreachable!("cmpth: sync join state on a system with no stackful capability")
+            }
+        }
+    }
 }
 
 impl WakerTaskDescCore for StacklessOnlyTaskDesc {
