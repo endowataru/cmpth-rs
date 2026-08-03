@@ -218,6 +218,6 @@ impl<M: UltAsyncIdentity> SchedulerSystem for UltAsyncSystem<M> {
     }
 
     fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut M::Desc) {
-        crate::resumable::stackless::worker::free_finished_desc_async(wk, desc)
+        unsafe { crate::resumable::stackless::worker::free_finished_desc_async(wk, desc) }
     }
 }

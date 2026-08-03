@@ -41,7 +41,9 @@ where
     let wk = UltWorker::<S>::current().expect("cmpth: spawn called outside a worker");
     let desc = wk.alloc_task(true, S::STACK_SIZE);
     let stack_top = {
-        let mut token = SuspendedTaskToken(desc);
+        // SAFETY: `desc` was just freshly allocated by `alloc_task` and has
+        // never been wrapped in a token before — trivially exclusive.
+        let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
         token.commit_as_ctx();
         token.base_mut().scheduler = wk.shared.get() as *const ();
         if let Some(slot) = token.base().slot {
@@ -109,7 +111,9 @@ pub(crate) fn fork_parent_first<S: StackfulSchedulerSystem>(body: ErasedBody, sc
     // recover the node via `Node::node_of` and always raw-frees it.
     let payload = S::Desc::alloc_with(S::StackAlloc::alloc_stack(S::STACK_SIZE).into(), false);
     let desc = crate::resumable::common::pool::Node::wrap_fresh(0, true, payload);
-    let mut token = SuspendedTaskToken(desc);
+    // SAFETY: `desc` was just freshly allocated above and has never been
+    // wrapped in a token before — trivially exclusive.
+    let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
     token.commit_as_ctx();
     token.base_mut().scheduler = scheduler;
     if let Some(slot) = token.base().slot {
@@ -161,7 +165,12 @@ fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
             // Direct handoff: switch straight to the parked joiner.
             let sr = match val { Ok(v) => StackResult::Ok(v), Err(e) => StackResult::Err(e) };
             unsafe { result_ptr.write(sr) };
-            wk.exit_to_cont(SuspendedTaskToken(j_desc), move |_wk| {
+            // SAFETY: `j_desc` was published by `try_register_sync_joiner`'s
+            // caller (`JoinHandle::join`'s slow path), which only commits
+            // it after `into_raw()`ing a real token it exclusively held —
+            // this decode is the sole consumer of that publish.
+            let j_token = unsafe { SuspendedTaskToken::from_raw(j_desc) };
+            wk.exit_to_cont(j_token, move |_wk| {
                 desc.commit_finished();
             })
         }
@@ -179,7 +188,10 @@ fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
                     // No joiner appeared: the JoinHandle collects the result.
                     JoinState::Running => {}
                     // A joiner registered while we were exiting.
-                    JoinState::SyncJoiner(j) => wk.push_local_top(SuspendedTaskToken(j)),
+                    // SAFETY: same provenance as the other SyncJoiner arm
+                    // above — `j` was published via a real token's
+                    // `into_raw()` by `try_register_sync_joiner`'s caller.
+                    JoinState::SyncJoiner(j) => wk.push_local_top(unsafe { SuspendedTaskToken::from_raw(j) }),
                     JoinState::AsyncWaker(w) => unsafe { Box::from_raw(w) }.wake(),
                     JoinState::AsyncJoiner(j) => S::wake_async_joiner(j),
                     // The handle was dropped while we were exiting: the
@@ -201,7 +213,11 @@ fn exit<S: StackfulSchedulerSystem>(wk: &UltWorker<S>, desc: &S::Desc) -> ! wher
     let desc_ptr = desc as *const S::Desc as *mut S::Desc;
     match desc.read_join_state() {
         JoinState::SyncJoiner(j_desc) => {
-            wk.exit_to_cont(SuspendedTaskToken(j_desc), move |_wk| {
+            // SAFETY: same provenance as `exit_with_result`'s matching arm
+            // — `j_desc` was published via a real token's `into_raw()` by
+            // `try_register_sync_joiner`'s caller.
+            let j_token = unsafe { SuspendedTaskToken::from_raw(j_desc) };
+            wk.exit_to_cont(j_token, move |_wk| {
                 desc.commit_finished();
             })
         }
@@ -210,7 +226,8 @@ fn exit<S: StackfulSchedulerSystem>(wk: &UltWorker<S>, desc: &S::Desc) -> ! wher
         _ => wk.exit_to_sched(move |wk| {
             match desc.publish_finished() {
                 JoinState::Running => {}
-                JoinState::SyncJoiner(j) => wk.push_local_top(SuspendedTaskToken(j)),
+                // SAFETY: same provenance as above.
+                JoinState::SyncJoiner(j) => wk.push_local_top(unsafe { SuspendedTaskToken::from_raw(j) }),
                 JoinState::AsyncWaker(w) => unsafe { Box::from_raw(w) }.wake(),
                 JoinState::AsyncJoiner(j) => S::wake_async_joiner(j),
                 JoinState::Detached => unsafe { wk.free_task(desc_ptr) },

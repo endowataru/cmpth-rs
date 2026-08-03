@@ -721,7 +721,7 @@ impl cmpth::SchedulerSystem for ManualSystem {
     }
 
     fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut DualTaskDesc) {
-        cmpth::resumable::stackful::worker::free_finished_desc_stackful(wk, desc)
+        unsafe { cmpth::resumable::stackful::worker::free_finished_desc_stackful(wk, desc) }
     }
 }
 

@@ -30,7 +30,11 @@ pub(crate) unsafe fn try_wake_async<S: SchedulerSystem>(desc: *const S::Desc) wh
     let desc: &S::Desc = unsafe { &*desc };
     if let WakeOutcome::ClaimedParked = desc.try_wake_state() {
         // No ctx to load for async tasks; just push to deque.
-        unsafe { push_continuation::<S>(desc_ptr) };
+        // SAFETY: `ClaimedParked` is the proof — `try_wake_state`'s CAS
+        // only succeeds once per park, so this caller is the sole party
+        // entitled to reclaim `desc_ptr`.
+        let token = unsafe { crate::resumable::common::desc::SuspendedTaskToken::from_raw(desc_ptr) };
+        push_continuation::<S>(token);
     }
 }
 

@@ -79,7 +79,12 @@ impl<S: StackfulSchedulerSystem> DualResumable<S> where S::Desc: StackfulTaskDes
         } else {
             let wk = UltWorker::<S>::current()
                 .expect("cmpth: DualResumable wake called outside a worker");
-            wk.push_local_top(SuspendedTaskToken(v as *mut S::Desc));
+            // SAFETY: `v` was published via a real token's `into_raw()`
+            // (`Release` store into `state`) by `wait_with`/`wait_with_cond`/
+            // `swap`; the caller's own `state.swap(EMPTY, Acquire)` (in
+            // `notify`/`enter`/`swap`, the only callers of `wake_raw`) is
+            // the sole consumer of that publish.
+            wk.push_local_top(unsafe { SuspendedTaskToken::from_raw(v as *mut S::Desc) });
         }
     }
 }
@@ -120,7 +125,10 @@ impl<S: StackfulSchedulerSystem> StackfulResumable<S> for DualResumable<S> where
             if !f() {
                 let v = unsafe { (*slot).swap(EMPTY, Ordering::Acquire) };
                 debug_assert_ne!(v, EMPTY);
-                *prev = Some(SuspendedTaskToken(v as *mut S::Desc));
+                // SAFETY: `v` was published a few lines up by this same
+                // closure's own `Release` store (`prev.into_raw()`); this
+                // `Acquire` swap is the sole consumer of that publish.
+                *prev = Some(unsafe { SuspendedTaskToken::from_raw(v as *mut S::Desc) });
             }
         });
     }
@@ -131,7 +139,10 @@ impl<S: StackfulSchedulerSystem> StackfulResumable<S> for DualResumable<S> where
         assert_on_real_ult(wk);
         let v = self.state.swap(EMPTY, Ordering::AcqRel);
         if v != EMPTY && v & ASYNC_TAG == 0 {
-            let c = SuspendedTaskToken(v as *mut S::Desc);
+            // SAFETY: `v` was published via a real token's `into_raw()`
+            // (`Release` store into `state`) by `wait_with`/`wait_with_cond`;
+            // this `Acquire` swap is the sole consumer of that publish.
+            let c = unsafe { SuspendedTaskToken::from_raw(v as *mut S::Desc) };
             wk.suspend_to_cont(c, |wk, prev| wk.push_local_top(prev));
         } else {
             // Not a real continuation — no context jump is possible here,
@@ -147,7 +158,10 @@ impl<S: StackfulSchedulerSystem> StackfulResumable<S> for DualResumable<S> where
         assert_on_real_ult(wk);
         let v = next.state.swap(EMPTY, Ordering::AcqRel);
         if v != EMPTY && v & ASYNC_TAG == 0 {
-            let c = SuspendedTaskToken(v as *mut S::Desc);
+            // SAFETY: same provenance as `enter` above — `v` was published
+            // via a real token's `into_raw()` into `next.state`, and this
+            // `Acquire` swap is the sole consumer.
+            let c = unsafe { SuspendedTaskToken::from_raw(v as *mut S::Desc) };
             let slot = &self.state as *const AtomicUsize;
             wk.suspend_to_cont(c, move |_wk, prev| {
                 unsafe { (*slot).store(prev.into_raw() as usize, Ordering::Release) };

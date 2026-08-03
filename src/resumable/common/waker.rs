@@ -147,10 +147,12 @@ pub(crate) fn try_wake_state(state: &AtomicUsize) -> WakeOutcome {
     }
 }
 
-/// # Safety
-/// `desc` must be a currently-suspended task whose ctx has just been cleared.
-pub(crate) unsafe fn push_continuation<S: SchedulerSystem>(desc: *mut S::Desc) {
-    let token = SuspendedTaskToken(desc);
+/// Takes an already-constructed token (rather than a raw pointer it would
+/// have to re-validate) so the `ClaimedParked` callers that already hold
+/// exclusive ownership at their call site don't have to hand off a raw
+/// pointer just to have this function immediately reconstruct a token from
+/// it — one `from_raw` per genuine ownership transfer, not two.
+pub(crate) fn push_continuation<S: SchedulerSystem>(token: SuspendedTaskToken<S::Desc>) {
     match UltWorker::<S>::current() {
         Some(wk) => wk.push_local_top(token),
         None => {

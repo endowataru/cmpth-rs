@@ -28,6 +28,13 @@ use crate::resumable::common::pool::DescPool;
 /// the task that just finished. A `loop` rather than a recursive call, so
 /// an arbitrarily long completion chain (however deep the fork-join
 /// recursion) costs no native call-stack depth.
+///
+/// # Safety (invariant, not `unsafe fn`)
+/// `desc` must already be exclusively owned by the caller for the duration
+/// of this call — every caller establishes this via a real
+/// `SuspendedTaskToken` (consumed with `into_raw()`, or implicitly via
+/// `pop_local()`'s own single-consumer guarantee plus the token's `Drop`
+/// being a no-op) before passing the raw pointer in.
 pub(crate) fn run_async_poll<S>(
     wk: &UltWorker<S>,
     mut desc: *mut S::Desc,
@@ -60,7 +67,12 @@ pub(crate) fn run_async_poll<S>(
         // `JoinHandle::poll`'s `self` address, see
         // `worker_from_async_arena_addr` — find `wk` via address masking
         // instead of a TLS lookup.
-        RunningTaskToken(desc).mark_resumed_on(wk as *const UltWorker<S> as *const ());
+        // SAFETY: covered by this function's own contract above — `desc`
+        // is already exclusively owned by the caller. The temporary token
+        // is just let go afterward (no `Drop` glue, so nothing is
+        // invalidated) since `desc` itself stays the loop's working
+        // pointer — `poll_fn` below needs it raw, not as a token.
+        unsafe { RunningTaskToken::from_raw(desc) }.mark_resumed_on(wk as *const UltWorker<S> as *const ());
 
         let raw = RawWaker::new(desc as *const (), crate::resumable::stackless::waker::async_task_private_vtable::<S>());
         let waker = unsafe { Waker::from_raw(raw) };
@@ -93,12 +105,22 @@ pub(crate) fn run_async_poll<S>(
                 let parked = desc_ref.park_after_poll();
                 wk.polling_async.set(prev_polling);
                 if !parked {
-                    wk.push_local_top(SuspendedTaskToken(desc));
+                    // SAFETY: `park_after_poll` returning `false` means no
+                    // wake raced in — this call is still the sole owner of
+                    // `desc` (same contract as this function's own entry
+                    // invariant, still holding since poll_fn returned
+                    // control back to us without handing `desc` to anyone
+                    // else).
+                    wk.push_local_top(unsafe { SuspendedTaskToken::from_raw(desc) });
                 }
                 return;
             }
             TaskPollResult::ReadyAndContinue(next) => {
-                poll_fn = RunningTaskToken(next).poll_fn().expect(
+                // SAFETY: per `TaskPollResult::ReadyAndContinue`'s own
+                // contract, `next` is only ever constructed from a
+                // `try_wake_state` `ClaimedParked` outcome, which proves
+                // nobody else can be concurrently polling that descriptor.
+                poll_fn = unsafe { RunningTaskToken::from_raw(next) }.poll_fn().expect(
                     "cmpth: symmetric-transfer target has no poll_fn (not a spawn_async task)",
                 );
                 desc = next;
@@ -127,7 +149,11 @@ where
 /// is a `spawn_async` allocation, so always route it through `S::AsyncPool`
 /// (which itself decides pool-return vs. raw-free based on whether the
 /// descriptor's `Node` wrapper was marked oversized at allocation time).
-pub fn free_finished_desc_async<S>(wk: &UltWorker<S>, desc: *mut S::Desc)
+///
+/// # Safety
+/// No other references to `desc` may exist after this call (same contract
+/// as [`DescPool::dealloc`]).
+pub unsafe fn free_finished_desc_async<S>(wk: &UltWorker<S>, desc: *mut S::Desc)
 where
     S: SchedulerSystem,
 {

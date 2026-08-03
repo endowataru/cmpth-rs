@@ -234,7 +234,13 @@ impl<S: SchedulerSystem> UltWorker<S> {
     pub(crate) fn take_root_cont(&self) -> SuspendedTaskToken<S::Desc> {
         let root = self.root_cont.replace(ptr::null_mut());
         assert!(!root.is_null(), "no runnable continuation on worker {}", self.num);
-        SuspendedTaskToken(root)
+        // SAFETY: `root_cont` only ever holds a pointer published by
+        // `set_root_cont`'s `cont.into_raw()`, and `root_cont` (a plain
+        // `Cell`, not shared across threads) is only ever touched by this
+        // worker's own OS thread — no ordering is needed beyond that
+        // single-thread discipline, and this `replace` is the sole
+        // consumer of whatever was there.
+        unsafe { SuspendedTaskToken::from_raw(root) }
     }
 }
 

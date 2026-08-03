@@ -47,9 +47,16 @@ unsafe impl<S: SchedulerSystem> Sync for Scheduler<S> {}
 
 pub(crate) fn worker_loop<S: SchedulerSystem>(wk: &UltWorker<S>) {
     S::worker_tls().set(wk as *const UltWorker<S> as *mut UltWorker<S>);
-    wk.set_cur_task(crate::resumable::common::desc::RunningTaskToken(
-        wk.root_desc() as *const _ as *mut _,
-    ));
+    // SAFETY: `root_desc` is embedded by value in `UltWorker` and only ever
+    // reachable through `wk.root_desc() -> &S::Desc` (never a token) until
+    // this very call, which runs once per worker at startup — this is the
+    // first token ever constructed for it, so exclusivity is trivial.
+    let root_task = unsafe {
+        crate::resumable::common::desc::RunningTaskToken::from_raw(
+            wk.root_desc() as *const _ as *mut _,
+        )
+    };
+    wk.set_cur_task(root_task);
 
     let shared = wk.shared();
     let mut idle_rounds = 0u32;
