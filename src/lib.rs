@@ -26,6 +26,7 @@
 pub mod traits;
 mod os;
 mod spin;
+pub mod interchange;
 pub mod resumable;
 pub mod scoped;
 

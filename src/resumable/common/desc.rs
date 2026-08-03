@@ -18,7 +18,7 @@
 //! (`worker`/`slot`/`result`/`tls`/`scheduler`, plus each flavor's own
 //! `ctx`/`poll_fn`) live in a per-flavor [`TaskDesc::Owned`] struct, reached
 //! only through a [`SuspendedTaskToken`]/[`RunningTaskToken`]'s `Deref`/
-//! `DerefMut` — see [`BaseOwned`]/[`HasBaseOwned`]'s doc comments for why.
+//! `DerefMut` — see [`DescOwned`]/[`HasDescOwned`]'s doc comments for why.
 //!
 //! Only the shared machinery lives in this module. The three concrete
 //! descriptor types, one per scheduler flavor, live alongside their own
@@ -35,7 +35,7 @@
 //!
 //! # Layering
 //!
-//! `TaskDesc`/`TaskDescAlloc`/`JoinState`/`BaseOwned`/`HasBaseOwned`/
+//! `TaskDesc`/`TaskDescAlloc`/`JoinState`/`DescOwned`/`HasDescOwned`/
 //! `SuspendedTaskToken`/`RunningTaskToken` live here because they're
 //! genuinely shared: the join-protocol (`join_state`/`JS_*`) applies to
 //! every task regardless of flavor, and the tokens are generic over `D:
@@ -63,6 +63,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Waker;
 
 pub use crate::traits::common::{JoinState, TaskDesc};
+use crate::interchange::PointerInterchangeable;
 
 pub type TaskResult = Result<Box<dyn Any + Send>, Box<dyn Any + Send>>;
 
@@ -115,14 +116,7 @@ pub(crate) fn decode_join_state<D>(v: usize) -> JoinState<D> {
 /// all. Reached only through a token's [`Deref`]/[`DerefMut`] (`Target =
 /// D::Owned`), the same "the token proves the precondition, `Deref` cashes
 /// it in" pattern as `MutexGuard`/`RefMut`.
-pub struct BaseOwned {
-    /// Type-erased `*const UltWorker<S>`: the worker that most recently
-    /// switched into this task, written by the switch shims alongside
-    /// `cur_task`.  A task cannot migrate between its last resume and its
-    /// next suspension, so the exit path reads this instead of doing a TLS
-    /// lookup.  Only valid while the task is running.
-    pub(crate) worker: *const (),
-
+pub struct DescOwned {
     /// Points at the arena cell's `[worker, system_id]` slot for arena
     /// stacks, or `None` for heap/root stacks.  The switch shims write the
     /// resuming worker pointer here when present.
@@ -144,23 +138,24 @@ pub struct BaseOwned {
     /// through worker TLS.  Null for root pseudo-descriptors. Only actually
     /// read by the `AsyncTaskDesc` wake path (`waker.rs::push_continuation`)
     /// today, but writing it doesn't need `AsyncTaskDesc` capability, so it
-    /// lives on the base fields rather than gating every constructor on it.
+    /// lives on the desc_owned fields rather than gating every constructor
+    /// on it.
     pub(crate) scheduler: *const (),
 }
 
-impl BaseOwned {
+impl DescOwned {
     pub(crate) const fn new() -> Self {
-        BaseOwned { worker: std::ptr::null(), slot: None, result: None, tls: None, scheduler: std::ptr::null() }
+        DescOwned { slot: None, result: None, tls: None, scheduler: std::ptr::null() }
     }
 }
 
 /// Implemented by every [`TaskDesc::Owned`] type: gives generic code (e.g.
 /// `RunningTaskToken::mark_resumed_on`) access to the fields every flavor
 /// shares, regardless of what flavor-specific fields (`ctx`, `poll_fn`,
-/// `dispatch`) the concrete `Owned` type adds alongside `base`.
-pub trait HasBaseOwned {
-    fn base(&self) -> &BaseOwned;
-    fn base_mut(&mut self) -> &mut BaseOwned;
+/// `dispatch`) the concrete `Owned` type adds alongside `desc_owned`.
+pub trait HasDescOwned {
+    fn desc_owned(&self) -> &DescOwned;
+    fn desc_owned_mut(&mut self) -> &mut DescOwned;
 }
 
 /// Raw per-task descriptor storage: this crate's own concrete field layout
@@ -187,11 +182,11 @@ pub trait TaskDescCore: Send + Sync + Sized + 'static {
     /// pseudo-descriptors, in which case this must never be called).
     fn stack_top(&self) -> *mut u8;
 
-    /// This descriptor's owner-exclusive fields (see [`BaseOwned`]/
-    /// [`HasBaseOwned`]).  Reached only through a live
+    /// This descriptor's owner-exclusive fields (see [`DescOwned`]/
+    /// [`HasDescOwned`]).  Reached only through a live
     /// [`RunningTaskToken`]/[`SuspendedTaskToken`]'s `Deref`/`DerefMut` —
     /// never called directly outside this module.
-    type Owned: HasBaseOwned;
+    type Owned: HasDescOwned;
     fn owned_cell(&self) -> &UnsafeCell<Self::Owned>;
 }
 
@@ -302,23 +297,6 @@ pub trait TaskDescAlloc: TaskDescCore + Sized {
 
     /// Reset a pooled descriptor for reuse (the stack allocation is kept).
     fn reinit(&mut self, has_handle: bool);
-}
-
-/// Peek at `desc`'s owner-exclusive `worker` field without going through a
-/// token. For the handful of call sites that know, by construction, that
-/// they're currently executing as `desc`'s own task, but have no token
-/// value in local scope to route through — typically because they're using
-/// `worker` to *rediscover* which `UltWorker` they're now running on after
-/// a possible cross-worker migration, so there's no `wk` handy yet either.
-/// Same peek discipline as [`UltWorker::cur_task`](crate::resumable::common::worker::UltWorker::cur_task):
-/// sound because the caller is the only thread that could possibly be
-/// touching this descriptor right now.
-///
-/// # Safety
-/// The calling OS thread must currently be driving `desc` (mid-execution of
-/// its body, between resume and suspend/exit).
-pub(crate) unsafe fn peek_worker<D: TaskDescCore>(desc: *mut D) -> *const () {
-    unsafe { (*(*desc).owned_cell().get()).base().worker }
 }
 
 /// Owning handle to a suspended task.  Not `Clone`, not `Drop`: ownership is
@@ -470,48 +448,25 @@ impl<D: TaskDescCore> RunningTaskToken<D> {
 
     /// Record that this task is now running on `worker_ptr` — called by
     /// every context-switch shim immediately after promoting `self` to
-    /// `RunningTaskToken`. Propagates to the arena cell slot too (when
-    /// present), since every caller that sets `worker` here has always also
-    /// needed to update `slot` in the same breath.
+    /// `RunningTaskToken`. Propagates to the arena cell slot (when present)
+    /// so the sp-based lookup can find the current worker without a TLS
+    /// read.
     #[inline]
     pub(crate) fn mark_resumed_on(&mut self, worker_ptr: *const ()) {
-        let base = self.base_mut();
-        base.worker = worker_ptr;
-        if let Some(slot) = base.slot {
+        if let Some(slot) = self.desc_owned().slot {
             unsafe { (*slot).worker.set(worker_ptr) };
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// PointerInterchangeable / Transferred
+// PointerInterchangeable impls for this crate's own token types
 // ---------------------------------------------------------------------------
-
-/// Implemented by move-only/linear values that can be losslessly flattened
-/// to a raw pointer and reconstructed from one. Generalizes the
-/// `into_raw`/`from_raw` naming convention `Box`/`Rc`/`Arc` each hand-roll
-/// independently (the standard library has no shared trait for it) so
-/// generic code — e.g. an FFI payload carrying "some interchangeable
-/// value" across a context switch — can convert without knowing which
-/// concrete linear type it's holding.
-pub trait PointerInterchangeable: Sized {
-    type Pointee;
-
-    /// Consume `self`, discarding the wrapper but keeping the pointer.
-    /// Always safe: the caller already owned `self`, this just changes its
-    /// representation.
-    fn into_ptr(self) -> *mut Self::Pointee;
-
-    /// Reconstruct `Self` from a pointer previously produced by a matching
-    /// [`into_ptr`](Self::into_ptr) (of this or a compatible type sharing
-    /// the same `Pointee`), whose resulting claim hasn't been reclaimed
-    /// since.
-    ///
-    /// # Safety
-    /// The caller must hold exclusive access to `*ptr` for the lifetime of
-    /// the returned value.
-    unsafe fn from_ptr(ptr: *mut Self::Pointee) -> Self;
-}
+//
+// The trait itself, [`Transferred`], and the atomic hand-off slots built on
+// it now live in [`crate::interchange`] — none of that machinery mentions
+// any cmpth-specific type. These two impls are the bridge from that generic
+// machinery to this crate's own linear token types.
 
 impl<D: TaskDescCore> PointerInterchangeable for SuspendedTaskToken<D> {
     type Pointee = D;
@@ -523,162 +478,6 @@ impl<D: TaskDescCore> PointerInterchangeable for RunningTaskToken<D> {
     type Pointee = D;
     fn into_ptr(self) -> *mut D { self.into_raw() }
     unsafe fn from_ptr(ptr: *mut D) -> Self { unsafe { Self::from_raw(ptr) } }
-}
-
-impl<T> PointerInterchangeable for Box<T> {
-    type Pointee = T;
-    fn into_ptr(self) -> *mut T { Box::into_raw(self) }
-    unsafe fn from_ptr(ptr: *mut T) -> Self { unsafe { Box::from_raw(ptr) } }
-}
-
-/// A [`PointerInterchangeable`] value, flattened so it can cross an
-/// `extern "C"` context-switch boundary — a move-only Rust value can't
-/// survive the actual assembly switch, so the shims carry this instead.
-///
-/// Constructing one from an already-owned value is safe (the caller
-/// already holds whatever claim the value represented; this just reshapes
-/// it for the FFI hop). Unpacking it back out the other side
-/// ([`into_inner`](Self::into_inner), possibly as a *different*
-/// `PointerInterchangeable` type sharing the same `Pointee` — e.g.
-/// `SuspendedTaskToken` in, `RunningTaskToken` out) is therefore also safe
-/// — a live `Transferred<T>` is itself the proof a real value was
-/// flattened to make it, the same "the type's own existence is the proof"
-/// pattern the tokens already use for `Owned` access. `from_raw` remains
-/// as the one unavoidable exception (no predecessor value exists yet —
-/// freshly allocated stacks), and is now the *only* unsafe surface left in
-/// the whole FFI-crossing family, instead of being re-derived
-/// independently at both ends of every shim.
-#[repr(transparent)]
-pub(crate) struct Transferred<T: PointerInterchangeable>(*mut T::Pointee);
-
-impl<T: PointerInterchangeable> Transferred<T> {
-    pub(crate) fn new(t: T) -> Self {
-        Transferred(t.into_ptr())
-    }
-
-    /// # Safety
-    /// The caller must hold exclusive access to `*ptr` for the lifetime of
-    /// the returned value.
-    pub(crate) unsafe fn from_raw(ptr: *mut T::Pointee) -> Self {
-        Transferred(ptr)
-    }
-
-    pub(crate) fn into_inner<U>(self) -> U
-    where
-        U: PointerInterchangeable<Pointee = T::Pointee>,
-    {
-        // SAFETY: every `Transferred` either came from a real
-        // `PointerInterchangeable` value (`new`) or from a call site that
-        // independently justified `from_raw` — this doesn't add a new
-        // claim, it just un-flattens the one already made.
-        unsafe { U::from_ptr(self.0) }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// AtomicTaggedSlot / TaggedPtr / SingleSlot
-// ---------------------------------------------------------------------------
-
-/// An atomic slot holding at most one [`PointerInterchangeable`] value,
-/// with `TAG_BITS` low bits available for a caller-chosen tag (e.g.
-/// [`DualResumable`](crate::resumable::dual::dual_wait::DualResumable)'s
-/// wait slot, which holds either a real continuation or a boxed
-/// [`Waker`]). Generalizes the "swap out a published pointer, reconstruct
-/// a token from it" pattern that used to be hand-rolled — with its own
-/// `// SAFETY:` comment — at every publish/take call site; the encode/
-/// decode unsafe now lives here once, in [`TaggedPtr::into_typed`].
-///
-/// `0` is reserved for "empty": a published value's pointer is never null
-/// ([`PointerInterchangeable::into_ptr`] always comes from an owned,
-/// already-allocated value), so a zero word unambiguously means no value
-/// is currently published.
-pub(crate) struct AtomicTaggedSlot<const TAG_BITS: usize>(AtomicUsize);
-
-impl<const TAG_BITS: usize> AtomicTaggedSlot<TAG_BITS> {
-    const TAG_MASK: usize = (1usize << TAG_BITS) - 1;
-
-    pub(crate) const fn empty() -> Self {
-        AtomicTaggedSlot(AtomicUsize::new(0))
-    }
-
-    pub(crate) fn is_set(&self, order: Ordering) -> bool {
-        self.0.load(order) != 0
-    }
-
-    /// Publish `t` OR'd with `tag` (must be `<= (1 << TAG_BITS) - 1`).
-    /// Checked at compile time: `T::Pointee`'s alignment must cover
-    /// `TAG_BITS` low bits, or the tag would corrupt the pointer.
-    pub(crate) fn publish<T: PointerInterchangeable>(&self, t: T, tag: usize, order: Ordering) {
-        const { assert!(std::mem::align_of::<T::Pointee>().trailing_zeros() as usize >= TAG_BITS) };
-        debug_assert!(tag <= Self::TAG_MASK);
-        self.0.store(t.into_ptr() as usize | tag, order);
-    }
-
-    /// Swap the slot to empty, returning the tag and a still-untyped
-    /// handle to reconstruct from — `None` if the slot was already empty.
-    pub(crate) fn take(&self, order: Ordering) -> Option<(usize, TaggedPtr<TAG_BITS>)> {
-        let word = self.0.swap(0, order);
-        (word != 0).then_some((word & Self::TAG_MASK, TaggedPtr(word)))
-    }
-}
-
-/// An untyped handle produced by [`AtomicTaggedSlot::take`], not yet
-/// reconstructed into a concrete [`PointerInterchangeable`] type.
-pub(crate) struct TaggedPtr<const TAG_BITS: usize>(usize);
-
-impl<const TAG_BITS: usize> TaggedPtr<TAG_BITS> {
-    /// Reconstruct as `T`.
-    ///
-    /// # Safety
-    /// The caller must know — from the `tag` [`AtomicTaggedSlot::take`]
-    /// returned alongside this value — that `T` is the type that was
-    /// actually [`publish`](AtomicTaggedSlot::publish)ed for that tag.
-    /// Forwards to [`PointerInterchangeable::from_ptr`], whose exclusivity
-    /// contract is satisfied for the same reason it always is here: the
-    /// `Acquire`-ordered `take` that produced this value is the sole
-    /// consumer of the `Release`-ordered `publish` that put it there.
-    pub(crate) unsafe fn into_typed<T: PointerInterchangeable>(self) -> T {
-        const { assert!(std::mem::align_of::<T::Pointee>().trailing_zeros() as usize >= TAG_BITS) };
-        let ptr = (self.0 & !((1usize << TAG_BITS) - 1)) as *mut T::Pointee;
-        unsafe { T::from_ptr(ptr) }
-    }
-}
-
-/// An atomic slot specialized to hold exactly one
-/// [`PointerInterchangeable`] type — `TAG_BITS = 0`, so there is no tag
-/// ambiguity to resolve at the call site. `publish`/`take` are therefore
-/// both fully safe: the one `into_typed` call this wraps is justified
-/// once, here, by the type parameter itself (every `publish` on a given
-/// `SingleSlot<T>` can only ever have stored a `T`).
-pub struct SingleSlot<T: PointerInterchangeable>(AtomicTaggedSlot<0>, std::marker::PhantomData<T>);
-
-// SAFETY: only one thread ever has live access to the contained `T` at a
-// time — `publish`/`take` are an exclusive atomic hand-off, never
-// concurrent access to the same `T` — so `Sync` only needs `T: Send`, the
-// same reasoning `std::sync::Mutex<T>: Sync where T: Send` rests on.
-// (`Send` itself is unaffected: auto-derived already, since it correctly
-// does require `T: Send` via the `PhantomData<T>` field.)
-unsafe impl<T: PointerInterchangeable + Send> Sync for SingleSlot<T> {}
-
-impl<T: PointerInterchangeable> SingleSlot<T> {
-    pub const fn empty() -> Self {
-        SingleSlot(AtomicTaggedSlot::empty(), std::marker::PhantomData)
-    }
-
-    pub fn is_set(&self, order: Ordering) -> bool {
-        self.0.is_set(order)
-    }
-
-    pub fn publish(&self, t: T, order: Ordering) {
-        self.0.publish(t, 0, order);
-    }
-
-    pub fn take(&self, order: Ordering) -> Option<T> {
-        // SAFETY: this slot's only `publish` call site (above) always
-        // stores a `T` (the type parameter is fixed on `Self`, not chosen
-        // per call), so whatever `AtomicTaggedSlot::take` finds is a `T`.
-        self.0.take(order).map(|(_, raw)| unsafe { raw.into_typed::<T>() })
-    }
 }
 
 #[cfg(test)]

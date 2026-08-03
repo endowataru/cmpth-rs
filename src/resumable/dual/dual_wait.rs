@@ -7,7 +7,8 @@ use std::sync::atomic::Ordering;
 use std::task::{Context, Waker};
 
 use crate::traits::{Resumable, StackfulResumable, StacklessResumable};
-use crate::resumable::common::desc::{AtomicTaggedSlot, SuspendedTaskToken, TaggedPtr, TaskDescCore};
+use crate::resumable::common::desc::{SuspendedTaskToken, TaskDescCore};
+use crate::interchange::{AtomicTaggedSlot, TaggedPtr};
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::stackless::desc::AsyncTaskDesc;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;

@@ -13,7 +13,7 @@ use crate::traits::stackful::{ContextPolicy, JoinHandleLike, Transfer};
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::desc::{HasBaseOwned, JoinState, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskDescAlloc};
+use crate::resumable::common::desc::{HasDescOwned, JoinState, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskDescAlloc};
 use crate::resumable::stackful::desc::{HasCtx, StackfulTaskDesc};
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, Worker};
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulWorker};
@@ -45,8 +45,8 @@ where
         // never been wrapped in a token before — trivially exclusive.
         let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
         token.commit_as_ctx();
-        token.base_mut().scheduler = wk.shared.get() as *const ();
-        if let Some(slot) = token.base().slot {
+        token.desc_owned_mut().scheduler = wk.shared.get() as *const ();
+        if let Some(slot) = token.desc_owned().slot {
             unsafe { (*slot).system_id.set(crate::resumable::common::lookup::system_id::<S>()) };
         }
         let stack_top = token.as_desc().stack_top() as usize;
@@ -85,10 +85,8 @@ where
         wk.push_local_top(prev);
         let val = catch_unwind(AssertUnwindSafe(|| unsafe { f_ptr.read() }()));
         // The closure may have suspended and resumed on a different worker,
-        // but every resume records the worker in the descriptor — cheaper
-        // than a TLS lookup.
-        let wk = unsafe { &*(crate::resumable::common::desc::peek_worker(desc) as *const UltWorker<S>) };
-        debug_assert!(std::ptr::eq(wk, UltWorker::<S>::current().expect("cmpth: worker vanished")));
+        // so re-derive which one we're on now.
+        let wk = UltWorker::<S>::current().expect("cmpth: worker vanished");
         debug_assert!(std::ptr::eq(wk.cur_task(), desc));
         exit_with_result(wk, wk.cur_task_ref(), result_ptr, val)
     };
@@ -119,8 +117,8 @@ pub(crate) fn fork_parent_first<S: StackfulSchedulerSystem>(body: ErasedBody, sc
     // wrapped in a token before — trivially exclusive.
     let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
     token.commit_as_ctx();
-    token.base_mut().scheduler = scheduler;
-    if let Some(slot) = token.base().slot {
+    token.desc_owned_mut().scheduler = scheduler;
+    if let Some(slot) = token.desc_owned().slot {
         unsafe { (*slot).system_id.set(crate::resumable::common::lookup::system_id::<S>()) };
     }
     let arg = Box::into_raw(Box::new(body));
@@ -136,11 +134,11 @@ unsafe extern "C" fn task_entry<S: StackfulSchedulerSystem>(transfer: Transfer, 
     let desc = wk.cur_task();
     let body = *unsafe { Box::from_raw(arg as *mut ErasedBody) };
     let result = catch_unwind(AssertUnwindSafe(body));
-    // See spawn: the descriptor tracks the current worker across migrations.
-    let wk = unsafe { &*(crate::resumable::common::desc::peek_worker(desc) as *const UltWorker<S>) };
-    debug_assert!(std::ptr::eq(wk, UltWorker::<S>::current().expect("cmpth: worker vanished")));
+    // See spawn: the body may have suspended and resumed on a different
+    // worker, so re-derive which one we're on now.
+    let wk = UltWorker::<S>::current().expect("cmpth: worker vanished");
     debug_assert!(std::ptr::eq(wk.cur_task(), desc));
-    wk.cur_task_token_mut().base_mut().result = Some(result);
+    wk.cur_task_token_mut().desc_owned_mut().result = Some(result);
     exit(wk, wk.cur_task_ref())
 }
 

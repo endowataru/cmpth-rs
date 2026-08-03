@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::resumable::common::scheduler::Scheduler;
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
-use crate::resumable::common::desc::{HasBaseOwned, SuspendedTaskToken};
+use crate::resumable::common::desc::{HasDescOwned, SuspendedTaskToken};
 use crate::resumable::common::external_queue::ExternalQueue;
 
 pub use crate::traits::common::WakeOutcome;
@@ -156,7 +156,7 @@ pub(crate) fn push_continuation<S: SchedulerSystem>(token: SuspendedTaskToken<S:
     match UltWorker::<S>::current() {
         Some(wk) => wk.push_local_top(token),
         None => {
-            let scheduler = token.base().scheduler;
+            let scheduler = token.desc_owned().scheduler;
             assert!(
                 !scheduler.is_null(),
                 "cmpth: wake() called from outside ULT scheduler \

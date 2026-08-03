@@ -7,7 +7,7 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::AtomicUsize;
 
-use crate::resumable::common::desc::{BaseOwned, HasBaseOwned, TaskDescCore, TaskDescAlloc, JS_DETACHED, JS_RUNNING};
+use crate::resumable::common::desc::{DescOwned, HasDescOwned, TaskDescCore, TaskDescAlloc, JS_DETACHED, JS_RUNNING};
 use crate::resumable::stackless::desc::{TaskPollFn, WakerTaskDescCore};
 
 /// A dual task is never both a real ULT and a `spawn_async` future — this
@@ -28,19 +28,19 @@ enum TaskDispatch<D> {
     PollFn(Option<TaskPollFn<D>>),
 }
 
-/// Owner-exclusive fields for [`DualTaskDesc`]: [`BaseOwned`] plus the
+/// Owner-exclusive fields for [`DualTaskDesc`]: [`DescOwned`] plus the
 /// `ctx`/`poll_fn` union — a dual task is never both a real ULT and a
 /// `spawn_async` future at once, but which one it is isn't known until the
 /// allocating call site commits (see [`HasCtx::commit_as_ctx`](crate::resumable::stackful::desc::HasCtx::commit_as_ctx)/
 /// [`HasPollFn::commit_as_poll_fn`](crate::resumable::stackless::desc::HasPollFn::commit_as_poll_fn)).
 pub struct DualOwned {
-    base: BaseOwned,
+    desc_owned: DescOwned,
     dispatch: TaskDispatch<DualTaskDesc>,
 }
 
-impl HasBaseOwned for DualOwned {
-    fn base(&self) -> &BaseOwned { &self.base }
-    fn base_mut(&mut self) -> &mut BaseOwned { &mut self.base }
+impl HasDescOwned for DualOwned {
+    fn desc_owned(&self) -> &DescOwned { &self.desc_owned }
+    fn desc_owned_mut(&mut self) -> &mut DescOwned { &mut self.desc_owned }
 }
 
 impl crate::resumable::stackful::desc::HasCtx for DualOwned {
@@ -165,10 +165,10 @@ impl DualTaskDesc {
     /// shims. See [`DualTaskDesc::alloc`]'s doc comment for the `dispatch`
     /// placeholder-then-commit protocol this also follows.
     pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> DualTaskDesc {
-        let mut base = BaseOwned::new();
-        base.slot = stack.cell_slot();
+        let mut desc_owned = DescOwned::new();
+        desc_owned.slot = stack.cell_slot();
         DualTaskDesc {
-            owned: UnsafeCell::new(DualOwned { base, dispatch: TaskDispatch::Ctx(std::ptr::null_mut()) }),
+            owned: UnsafeCell::new(DualOwned { desc_owned, dispatch: TaskDispatch::Ctx(std::ptr::null_mut()) }),
             is_root: false,
             join_state: AtomicUsize::new(if has_handle { JS_RUNNING } else { JS_DETACHED }),
             waker_refs: AtomicUsize::new(0),
@@ -183,7 +183,7 @@ impl DualTaskDesc {
     /// per-call-site ambiguity to resolve here.
     pub(crate) fn new_root() -> DualTaskDesc {
         DualTaskDesc {
-            owned: UnsafeCell::new(DualOwned { base: BaseOwned::new(), dispatch: TaskDispatch::Ctx(std::ptr::null_mut()) }),
+            owned: UnsafeCell::new(DualOwned { desc_owned: DescOwned::new(), dispatch: TaskDispatch::Ctx(std::ptr::null_mut()) }),
             is_root: true,
             join_state: AtomicUsize::new(JS_DETACHED),
             waker_refs: AtomicUsize::new(0),
@@ -212,8 +212,8 @@ impl DualTaskDesc {
             TaskDispatch::Ctx(ctx) => *ctx = std::ptr::null_mut(),
             TaskDispatch::PollFn(poll_fn) => *poll_fn = None,
         }
-        owned.base.result = None;
-        owned.base.tls = None;
+        owned.desc_owned.result = None;
+        owned.desc_owned.tls = None;
         *self.join_state.get_mut() = if has_handle { JS_RUNNING } else { JS_DETACHED };
         *self.waker_refs.get_mut() = 0;
     }
