@@ -9,7 +9,7 @@
 use std::mem::ManuallyDrop;
 use std::ptr;
 
-use crate::context::{CondTransfer, Context, ContextPolicy, Transfer};
+use crate::traits::stackful::{CondTransfer, Context, ContextPolicy, Transfer};
 use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, Worker};
 use crate::resumable::common::system::SchedulerSystem;
