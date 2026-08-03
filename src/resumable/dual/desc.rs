@@ -7,7 +7,8 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::AtomicUsize;
 
-use crate::resumable::common::desc::{DescOwned, HasDescOwned, TaskDescCore, TaskDescAlloc, JS_DETACHED, JS_RUNNING};
+use crate::resumable::common::desc::{DescOwned, HasDescOwned, TaskDescCore, TaskDescAlloc, decode_join_state, JS_DETACHED, JS_RUNNING};
+use crate::traits::common::JoinState;
 use crate::resumable::stackless::desc::{TaskPollFn, WakerTaskDescCore};
 
 /// A dual task is never both a real ULT and a `spawn_async` future — this
@@ -120,6 +121,12 @@ impl TaskDescCore for DualTaskDesc {
     fn stack_top(&self) -> *mut u8 { self.stack.top() }
     type Owned = DualOwned;
     fn owned_cell(&self) -> &UnsafeCell<DualOwned> { &self.owned }
+
+    /// A dual descriptor has both stackful and async capability, so its
+    /// join protocol can genuinely produce any of the 6 states — the full
+    /// union, unchanged.
+    type JoinOutcome = JoinState<Self>;
+    fn decode_join(word: usize) -> JoinState<Self> { decode_join_state(word) }
 }
 
 impl WakerTaskDescCore for DualTaskDesc {

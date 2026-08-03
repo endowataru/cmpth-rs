@@ -16,7 +16,57 @@ use std::task::{Context as TaskContext, Poll, RawWaker, RawWakerVTable, Waker};
 pub use crate::traits::common::{Resumable, TaskSystem};
 pub use crate::traits::scoped::ScopedStackfulTaskSystem;
 
-use crate::traits::common::{BarrierWaitResult, TlsSlot};
+use crate::traits::common::{BarrierWaitResult, TaskDesc, TlsSlot};
+
+// ---------------------------------------------------------------------------
+// SyncJoinerTaskDesc
+// ---------------------------------------------------------------------------
+
+/// [`TaskDesc::JoinOutcome`] for a descriptor with stackful (blocking-join)
+/// capability but no async capability — every state a pure-stackful
+/// descriptor's join protocol can actually produce, and nothing more (there
+/// is no `AsyncWaker`/`AsyncJoiner` variant to accidentally have to handle,
+/// since nothing could ever construct one without
+/// [`WakerTaskDesc`](crate::traits::stackless::WakerTaskDesc) capability
+/// this descriptor doesn't have). See
+/// [`JoinState`](crate::traits::common::JoinState) for the full union used
+/// by a descriptor with both capabilities.
+pub enum SyncJoinState<D> {
+    /// Task alive, nobody waiting.
+    Running,
+    /// Result written (or the task was detached-and-cleaned).
+    Finished,
+    /// The `JoinHandle` was dropped early; the exit path cleans up.
+    Detached,
+    /// A parked sync joiner, registered via
+    /// [`SyncJoinerTaskDesc::try_register_sync_joiner`].
+    SyncJoiner(*mut D),
+}
+
+/// Descriptor operation needed by a blocking `.join()` — registering the
+/// parked joiner. Bodyless — pure behavior, same spirit as [`TaskDesc`].
+/// Implement directly for a custom representation, or implement
+/// [`TaskDescCore`](crate::resumable::common::desc::TaskDescCore) instead to
+/// get this crate's own word-based algorithm for free via a blanket impl.
+///
+/// Lives here rather than on the base `TaskDesc` specifically so a
+/// descriptor with no stackful capability at all never gets it — the only
+/// caller in this crate is `JoinHandle::join`'s slow path, which itself
+/// requires `S::Desc: StackfulTaskDesc: SyncJoinerTaskDesc` — mirrors why
+/// `try_register_async_joiner`/`try_register_waker` live on
+/// [`WakerTaskDesc`](crate::traits::stackless::WakerTaskDesc) instead of
+/// `TaskDesc`.
+pub trait SyncJoinerTaskDesc: TaskDesc {
+    /// Try to register `joiner` (a parked sync joiner's descriptor) as
+    /// this task's waiter. Returns `false` if the task turned out to
+    /// already be finished (caller should cancel its own suspension and
+    /// proceed immediately) — otherwise commits `joiner`.
+    ///
+    /// # Safety
+    /// `joiner` must be a stable pointer to a currently-parked task
+    /// descriptor for as long as it might be woken through this slot.
+    unsafe fn try_register_sync_joiner(&self, joiner: *mut Self) -> bool;
+}
 
 /// Threading system interface bundle — swap the entire backend by changing
 /// one type parameter.

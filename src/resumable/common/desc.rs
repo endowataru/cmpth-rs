@@ -63,6 +63,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Waker;
 
 pub use crate::traits::common::{JoinState, TaskDesc};
+pub use crate::traits::stackful::SyncJoinerTaskDesc;
 use crate::interchange::PointerInterchangeable;
 
 pub type TaskResult = Result<Box<dyn Any + Send>, Box<dyn Any + Send>>;
@@ -188,6 +189,38 @@ pub trait TaskDescCore: Send + Sync + Sized + 'static {
     /// never called directly outside this module.
     type Owned: HasDescOwned;
     fn owned_cell(&self) -> &UnsafeCell<Self::Owned>;
+
+    /// Per-flavor "who might be waiting" outcome type — see
+    /// [`TaskDesc::JoinOutcome`].
+    /// Hand-specified per concrete flavor (same as `Owned` above), not
+    /// blanket-derived, since the variant set genuinely differs.
+    type JoinOutcome;
+
+    /// Decode a raw `join_state` word (per the `JS_*` encoding above) into
+    /// this flavor's own [`JoinOutcome`](Self::JoinOutcome).
+    fn decode_join(word: usize) -> Self::JoinOutcome;
+}
+
+/// Internal, always-full-union decode — used only by this crate's own
+/// resumable/-layer exit-completion code (`exit_with_result`/`exit`/
+/// `poll_spawned_task`), which is already generic over a *concrete*
+/// capability-bound flavor combination (`StackfulTaskDesc`/`AsyncTaskDesc`)
+/// and needs to handle whichever waiter kind a `Dual` instantiation might
+/// actually produce, regardless of which narrower
+/// [`TaskDescCore::JoinOutcome`] the same generic code's *other*
+/// instantiations (`StackfulOnlyTaskDesc`/`StacklessOnlyTaskDesc`) declare.
+/// Deliberately bypasses the abstract [`TaskDesc::read_join_state`]/
+/// [`TaskDesc::publish_finished`] (whose return type is properly narrowed
+/// per flavor for external implementors) — this is the crate's own
+/// implementation detail, not part of that public contract.
+pub(crate) fn read_join_state_raw<D: TaskDescCore>(desc: &D) -> JoinState<D> {
+    decode_join_state(desc.join_state().load(Ordering::Acquire))
+}
+
+/// See [`read_join_state_raw`] — same reasoning, the swap-and-decode
+/// counterpart of [`TaskDesc::publish_finished`].
+pub(crate) fn publish_finished_raw<D: TaskDescCore>(desc: &D) -> JoinState<D> {
+    decode_join_state(desc.join_state().swap(JS_FINISHED, Ordering::AcqRel))
 }
 
 /// Blanket [`TaskDesc`] for any descriptor
@@ -202,10 +235,11 @@ impl<D: TaskDescCore> TaskDesc for D {
     type Owned = <D as TaskDescCore>::Owned;
     type Suspended = SuspendedTaskToken<D>;
     type Running = RunningTaskToken<D>;
+    type JoinOutcome = <D as TaskDescCore>::JoinOutcome;
 
     #[inline]
-    fn read_join_state(&self) -> JoinState<Self> {
-        decode_join_state(self.join_state().load(Ordering::Acquire))
+    fn read_join_state(&self) -> Self::JoinOutcome {
+        D::decode_join(self.join_state().load(Ordering::Acquire))
     }
 
     #[inline]
@@ -219,10 +253,36 @@ impl<D: TaskDescCore> TaskDesc for D {
     }
 
     #[inline]
-    fn publish_finished(&self) -> JoinState<Self> {
-        decode_join_state(self.join_state().swap(JS_FINISHED, Ordering::AcqRel))
+    fn publish_finished(&self) -> Self::JoinOutcome {
+        D::decode_join(self.join_state().swap(JS_FINISHED, Ordering::AcqRel))
     }
 
+    fn try_mark_detached(&self) -> bool {
+        let mut cur = self.join_state().load(Ordering::Acquire);
+        loop {
+            if cur == JS_FINISHED {
+                return true;
+            }
+            match self.join_state().compare_exchange_weak(
+                cur, JS_DETACHED, Ordering::AcqRel, Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    if let JoinState::AsyncWaker(w) = decode_join_state::<Self>(cur) {
+                        drop(unsafe { Box::from_raw(w) });
+                    }
+                    return false;
+                }
+                Err(c) => cur = c,
+            }
+        }
+    }
+}
+
+/// Blanket [`SyncJoinerTaskDesc`] for any descriptor using this crate's own
+/// word-based join-state encoding — same algorithm this used to be, just
+/// relocated off the base [`TaskDesc`] (see that trait's doc comment for
+/// why: only stackful call sites ever invoke it).
+impl<D: TaskDescCore> SyncJoinerTaskDesc for D {
     unsafe fn try_register_sync_joiner(&self, joiner: *mut Self) -> bool {
         let mut cur = self.join_state().load(Ordering::Relaxed);
         loop {
@@ -240,26 +300,6 @@ impl<D: TaskDescCore> TaskDesc for D {
                         drop(unsafe { Box::from_raw(w) });
                     }
                     return true;
-                }
-                Err(c) => cur = c,
-            }
-        }
-    }
-
-    fn try_mark_detached(&self) -> bool {
-        let mut cur = self.join_state().load(Ordering::Acquire);
-        loop {
-            if cur == JS_FINISHED {
-                return true;
-            }
-            match self.join_state().compare_exchange_weak(
-                cur, JS_DETACHED, Ordering::AcqRel, Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    if let JoinState::AsyncWaker(w) = decode_join_state::<Self>(cur) {
-                        drop(unsafe { Box::from_raw(w) });
-                    }
-                    return false;
                 }
                 Err(c) => cur = c,
             }

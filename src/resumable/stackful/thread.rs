@@ -9,11 +9,11 @@ use std::any::Any;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use crate::traits::stackful::{ContextPolicy, JoinHandleLike, Transfer};
+use crate::traits::stackful::{ContextPolicy, JoinHandleLike, SyncJoinerTaskDesc, Transfer};
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::desc::{HasDescOwned, JoinState, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskDescAlloc};
+use crate::resumable::common::desc::{HasDescOwned, JoinState, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskDescAlloc, publish_finished_raw, read_join_state_raw};
 use crate::resumable::stackful::desc::{HasCtx, StackfulTaskDesc};
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, Worker};
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulWorker};
@@ -162,7 +162,7 @@ fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
     val: Result<T, Box<dyn Any + Send>>,
 ) -> ! where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
     let desc_ptr = desc as *const S::Desc as *mut S::Desc;
-    match desc.read_join_state() {
+    match read_join_state_raw(desc) {
         JoinState::SyncJoiner(j_desc) => {
             // Direct handoff: switch straight to the parked joiner.
             let sr = match val { Ok(v) => StackResult::Ok(v), Err(e) => StackResult::Err(e) };
@@ -186,7 +186,7 @@ fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
             let sr = match val { Ok(v) => StackResult::Ok(v), Err(e) => StackResult::Err(e) };
             unsafe { result_ptr.write(sr) };
             wk.exit_to_sched(move |wk| {
-                match desc.publish_finished() {
+                match publish_finished_raw(desc) {
                     // No joiner appeared: the JoinHandle collects the result.
                     JoinState::Running => {}
                     // A joiner registered while we were exiting.
@@ -213,7 +213,7 @@ fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
 /// is already in `desc.result`.  Same state machine as `exit_with_result`.
 fn exit<S: StackfulSchedulerSystem>(wk: &UltWorker<S>, desc: &S::Desc) -> ! where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
     let desc_ptr = desc as *const S::Desc as *mut S::Desc;
-    match desc.read_join_state() {
+    match read_join_state_raw(desc) {
         JoinState::SyncJoiner(j_desc) => {
             // SAFETY: same provenance as `exit_with_result`'s matching arm
             // — `j_desc` was published via a real token's `into_raw()` by
@@ -226,7 +226,7 @@ fn exit<S: StackfulSchedulerSystem>(wk: &UltWorker<S>, desc: &S::Desc) -> ! wher
         // Root tasks start in this state; desc.result drops with the desc.
         JoinState::Detached => wk.exit_to_sched(move |wk| unsafe { wk.free_task(desc_ptr) }),
         _ => wk.exit_to_sched(move |wk| {
-            match desc.publish_finished() {
+            match publish_finished_raw(desc) {
                 JoinState::Running => {}
                 // SAFETY: same provenance as above.
                 JoinState::SyncJoiner(j) => wk.push_local_top(unsafe { SuspendedTaskToken::from_raw(j) }),

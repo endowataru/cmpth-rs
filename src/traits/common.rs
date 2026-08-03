@@ -21,7 +21,7 @@ pub enum JoinState<D> {
     /// The `JoinHandle` was dropped early; the exit path cleans up.
     Detached,
     /// A parked sync joiner, registered via
-    /// [`TaskDesc::try_register_sync_joiner`].
+    /// [`SyncJoinerTaskDesc::try_register_sync_joiner`](crate::traits::stackful::SyncJoinerTaskDesc::try_register_sync_joiner).
     SyncJoiner(*mut D),
     /// A registered async waker — used when the polling task's waker isn't
     /// verifiably one of this system's own (foreign executor, or no worker
@@ -67,8 +67,19 @@ pub trait TaskDesc: Send + Sync + Sized + 'static {
     /// parked.
     type Running: DerefMut<Target = Self::Owned> + Send;
 
+    /// Whatever "who might be waiting" states this descriptor's own
+    /// capabilities allow — narrower per flavor
+    /// ([`SyncJoinState`](crate::traits::stackful::SyncJoinState)/
+    /// [`AsyncJoinState`](crate::traits::stackless::AsyncJoinState)/
+    /// [`JoinState`]), since a pure-stackful implementor's outcome type
+    /// need not (and structurally cannot, because nothing would ever
+    /// construct it) represent an async waiter, and vice versa. A
+    /// descriptor combining both capabilities (this crate's own
+    /// `DualTaskDesc`) uses `JoinState` itself, which can represent either.
+    type JoinOutcome;
+
     /// Read and decode the current join state.
-    fn read_join_state(&self) -> JoinState<Self>;
+    fn read_join_state(&self) -> Self::JoinOutcome;
 
     /// Fast check for the hot join path: is the task already finished?
     fn is_finished(&self) -> bool;
@@ -82,40 +93,13 @@ pub trait TaskDesc: Send + Sync + Sized + 'static {
     /// General-case exit: publish `Finished` and return whichever party
     /// the old state names, so the caller can settle it (wake a
     /// late-registered joiner/waker, or notice the handle was dropped).
-    fn publish_finished(&self) -> JoinState<Self>;
-
-    /// Try to register `joiner` (a parked sync joiner's descriptor) as
-    /// this task's waiter. Returns `false` if the task turned out to
-    /// already be finished (caller should cancel its own suspension and
-    /// proceed immediately) — otherwise commits `joiner`.
-    ///
-    /// # Safety
-    /// `joiner` must be a stable pointer to a currently-parked task
-    /// descriptor for as long as it might be woken through this slot.
-    unsafe fn try_register_sync_joiner(&self, joiner: *mut Self) -> bool;
+    fn publish_finished(&self) -> Self::JoinOutcome;
 
     /// Try to mark this task detached (no handle left to collect the
     /// result). Returns `true` if the task was already finished (caller
     /// now owns the result and the descriptor) — otherwise commits
     /// detached.
     fn try_mark_detached(&self) -> bool;
-}
-
-/// Outcome of a wake attempt against a POLLING/PARKED/NOTIFIED state
-/// machine — shared by `WakerTaskDesc`'s
-/// `try_wake_state` (stackless: `spawn_async`) and stackful `block_on`'s
-/// `Poller` (a real ULT's wait state uses the same three-state shape, just
-/// not anchored on a descriptor).
-pub enum WakeOutcome {
-    /// Was POLLING; now NOTIFIED. The task will notice on its next state
-    /// check and re-poll; there is no continuation to push.
-    SetNotified,
-    /// Was PARKED; now POLLING. The caller owns delivering the
-    /// continuation (push to a worker deque or the external queue).
-    ClaimedParked,
-    /// Was already NOTIFIED, or IDLE (a stale wake after the poll session
-    /// ended). Nothing to do.
-    NoOp,
 }
 
 /// Declares that a system provides an efficient (work-stealing) scheduler

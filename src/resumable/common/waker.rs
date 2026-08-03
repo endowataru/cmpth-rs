@@ -22,7 +22,7 @@ use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
 use crate::resumable::common::desc::{HasDescOwned, SuspendedTaskToken};
 use crate::resumable::common::external_queue::ExternalQueue;
 
-pub use crate::traits::common::WakeOutcome;
+pub use crate::traits::stackless::WakeOutcome;
 
 // ---------------------------------------------------------------------------
 // waker state encoding

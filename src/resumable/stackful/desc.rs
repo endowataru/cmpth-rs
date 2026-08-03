@@ -5,7 +5,9 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::AtomicUsize;
 
-use crate::resumable::common::desc::{DescOwned, HasDescOwned, RunningTaskToken, SuspendedTaskToken, TaskDescCore, TaskDescAlloc, JS_DETACHED, JS_RUNNING};
+use crate::resumable::common::desc::{DescOwned, HasDescOwned, RunningTaskToken, SuspendedTaskToken, TaskDescCore, TaskDescAlloc, decode_join_state, JS_DETACHED, JS_RUNNING};
+use crate::traits::common::JoinState;
+use crate::traits::stackful::{SyncJoinState, SyncJoinerTaskDesc};
 
 /// Implemented by a [`TaskDescCore::Owned`] type that can hold a saved-context
 /// pointer — either directly ([`StackfulOnlyTaskDesc`]'s
@@ -70,9 +72,9 @@ pub trait HasCtx {
 /// execution stack (stackful ULTs). A pure-stackless descriptor type would
 /// not implement this — there is no saved context to hand off, since
 /// `run_async_poll` never does a context switch.
-pub trait StackfulTaskDesc: TaskDescCore<Owned: HasCtx> {}
+pub trait StackfulTaskDesc: SyncJoinerTaskDesc + TaskDescCore<Owned: HasCtx> {}
 
-impl<D: TaskDescCore<Owned: HasCtx>> StackfulTaskDesc for D {}
+impl<D: SyncJoinerTaskDesc + TaskDescCore<Owned: HasCtx>> StackfulTaskDesc for D {}
 
 impl<D: TaskDescCore<Owned: HasCtx>> SuspendedTaskToken<D> {
     /// Claim this task's saved context before switching into it (swap to
@@ -161,6 +163,23 @@ impl TaskDescCore for StackfulOnlyTaskDesc {
     fn stack_top(&self) -> *mut u8 { self.stack.top() }
     type Owned = StackfulOnlyOwned;
     fn owned_cell(&self) -> &UnsafeCell<StackfulOnlyOwned> { &self.owned }
+
+    /// No async capability at all, so `AsyncWaker`/`AsyncJoiner` can never
+    /// actually be published (the only writers,
+    /// `WakerTaskDesc::try_register_waker`/`try_register_async_joiner`,
+    /// don't exist for this type) — narrow to `SyncJoinState`.
+    type JoinOutcome = SyncJoinState<Self>;
+    fn decode_join(word: usize) -> SyncJoinState<Self> {
+        match decode_join_state::<Self>(word) {
+            JoinState::Running => SyncJoinState::Running,
+            JoinState::Finished => SyncJoinState::Finished,
+            JoinState::Detached => SyncJoinState::Detached,
+            JoinState::SyncJoiner(j) => SyncJoinState::SyncJoiner(j),
+            JoinState::AsyncWaker(_) | JoinState::AsyncJoiner(_) => {
+                unreachable!("cmpth: async join state on a system with no async capability")
+            }
+        }
+    }
 }
 
 impl TaskDescAlloc for StackfulOnlyTaskDesc {
