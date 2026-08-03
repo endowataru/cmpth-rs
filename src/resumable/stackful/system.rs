@@ -18,8 +18,7 @@
 //! impl cmpth::UltIdentity for DefaultNestedDualTaskSystem { type Base = DefaultDualTaskSystem; ... }
 //! ```
 
-use crate::context::ContextPolicy;
-use crate::traits::stackful::ThreadSystem;
+use crate::traits::stackful::{ContextPolicy, ThreadSystem};
 use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::system::SchedulerSystem;

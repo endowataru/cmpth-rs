@@ -16,7 +16,7 @@ pub mod stackless;
 pub use common::{BarrierWaitResult, DualBarrier, DualMutex, JoinState, Resumable, TaskDesc, TaskSystem, TlsAnchor, TlsSlot, WakeOutcome};
 pub use scoped::{ScopedStackfulTaskSystem, ScopedStacklessTaskSystem};
 pub use stackful::{
-    Delegator, DelegatorConsumer, JoinHandleLike, Poller, StackfulBarrier, StackfulMutex,
-    StackfulResumable, StackfulTaskSystem, ThreadSystem,
+    CondTransfer, Context, ContextPolicy, Delegator, DelegatorConsumer, JoinHandleLike, Poller,
+    StackfulBarrier, StackfulMutex, StackfulResumable, StackfulTaskSystem, ThreadSystem, Transfer,
 };
 pub use stackless::{StacklessBarrier, StacklessMutex, StacklessResumable, StacklessTaskSystem, WakerTaskDesc};

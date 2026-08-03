@@ -9,8 +9,7 @@ use std::any::Any;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use crate::context::{ContextPolicy, Transfer};
-use crate::traits::stackful::JoinHandleLike;
+use crate::traits::stackful::{ContextPolicy, JoinHandleLike, Transfer};
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;

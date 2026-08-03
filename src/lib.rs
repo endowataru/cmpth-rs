@@ -23,17 +23,16 @@
 //! nest: set `type Base = DefaultDualTaskSystem` in a second `ThreadSystem`
 //! implementation to run ULTs on top of ULTs.
 
-mod context;
 pub mod traits;
 mod os;
 mod spin;
 pub mod resumable;
 pub mod scoped;
 
-pub use context::{CondTransfer, Context, ContextPolicy, NativeContext, Transfer};
-pub use traits::{BarrierWaitResult, DelegatorConsumer, Delegator, DualBarrier, DualMutex, JoinHandleLike, JoinState, Poller, Resumable, ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, StackfulResumable, TaskDesc, TaskSystem, TlsAnchor, TlsSlot, ThreadSystem, WakeOutcome, WakerTaskDesc};
+pub use traits::{BarrierWaitResult, CondTransfer, Context, ContextPolicy, DelegatorConsumer, Delegator, DualBarrier, DualMutex, JoinHandleLike, JoinState, Poller, Resumable, ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, StackfulResumable, TaskDesc, TaskSystem, TlsAnchor, TlsSlot, ThreadSystem, Transfer, WakeOutcome, WakerTaskDesc};
 pub use scoped::ScopedTaskSystem;
 pub use os::{available_parallelism, OsBarrier, OsCondvar, OsMutex, OsPoller, OsSystem, OsTls};
+pub use resumable::stackful::context::NativeContext;
 pub use resumable::stackful::waker::UltPoller;
 pub use resumable::common::deque::{CrossbeamDeque, SpinDeque, WorkerDeque};
 pub use resumable::common::desc::{SuspendedTaskToken, TaskDescAlloc};
