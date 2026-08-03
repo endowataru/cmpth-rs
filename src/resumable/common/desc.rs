@@ -483,6 +483,92 @@ impl<D: TaskDescCore> RunningTaskToken<D> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// PointerInterchangeable / Transferred
+// ---------------------------------------------------------------------------
+
+/// Implemented by move-only/linear values that can be losslessly flattened
+/// to a raw pointer and reconstructed from one. Generalizes the
+/// `into_raw`/`from_raw` naming convention `Box`/`Rc`/`Arc` each hand-roll
+/// independently (the standard library has no shared trait for it) so
+/// generic code — e.g. an FFI payload carrying "some interchangeable
+/// value" across a context switch — can convert without knowing which
+/// concrete linear type it's holding.
+pub(crate) trait PointerInterchangeable: Sized {
+    type Pointee;
+
+    /// Consume `self`, discarding the wrapper but keeping the pointer.
+    /// Always safe: the caller already owned `self`, this just changes its
+    /// representation.
+    fn into_ptr(self) -> *mut Self::Pointee;
+
+    /// Reconstruct `Self` from a pointer previously produced by a matching
+    /// [`into_ptr`](Self::into_ptr) (of this or a compatible type sharing
+    /// the same `Pointee`), whose resulting claim hasn't been reclaimed
+    /// since.
+    ///
+    /// # Safety
+    /// The caller must hold exclusive access to `*ptr` for the lifetime of
+    /// the returned value.
+    unsafe fn from_ptr(ptr: *mut Self::Pointee) -> Self;
+}
+
+impl<D: TaskDescCore> PointerInterchangeable for SuspendedTaskToken<D> {
+    type Pointee = D;
+    fn into_ptr(self) -> *mut D { self.into_raw() }
+    unsafe fn from_ptr(ptr: *mut D) -> Self { unsafe { Self::from_raw(ptr) } }
+}
+
+impl<D: TaskDescCore> PointerInterchangeable for RunningTaskToken<D> {
+    type Pointee = D;
+    fn into_ptr(self) -> *mut D { self.into_raw() }
+    unsafe fn from_ptr(ptr: *mut D) -> Self { unsafe { Self::from_raw(ptr) } }
+}
+
+/// A [`PointerInterchangeable`] value, flattened so it can cross an
+/// `extern "C"` context-switch boundary — a move-only Rust value can't
+/// survive the actual assembly switch, so the shims carry this instead.
+///
+/// Constructing one from an already-owned value is safe (the caller
+/// already holds whatever claim the value represented; this just reshapes
+/// it for the FFI hop). Unpacking it back out the other side
+/// ([`into_inner`](Self::into_inner), possibly as a *different*
+/// `PointerInterchangeable` type sharing the same `Pointee` — e.g.
+/// `SuspendedTaskToken` in, `RunningTaskToken` out) is therefore also safe
+/// — a live `Transferred<T>` is itself the proof a real value was
+/// flattened to make it, the same "the type's own existence is the proof"
+/// pattern the tokens already use for `Owned` access. `from_raw` remains
+/// as the one unavoidable exception (no predecessor value exists yet —
+/// freshly allocated stacks), and is now the *only* unsafe surface left in
+/// the whole FFI-crossing family, instead of being re-derived
+/// independently at both ends of every shim.
+#[repr(transparent)]
+pub(crate) struct Transferred<T: PointerInterchangeable>(*mut T::Pointee);
+
+impl<T: PointerInterchangeable> Transferred<T> {
+    pub(crate) fn new(t: T) -> Self {
+        Transferred(t.into_ptr())
+    }
+
+    /// # Safety
+    /// The caller must hold exclusive access to `*ptr` for the lifetime of
+    /// the returned value.
+    pub(crate) unsafe fn from_raw(ptr: *mut T::Pointee) -> Self {
+        Transferred(ptr)
+    }
+
+    pub(crate) fn into_inner<U>(self) -> U
+    where
+        U: PointerInterchangeable<Pointee = T::Pointee>,
+    {
+        // SAFETY: every `Transferred` either came from a real
+        // `PointerInterchangeable` value (`new`) or from a call site that
+        // independently justified `from_raw` — this doesn't add a new
+        // claim, it just un-flattens the one already made.
+        unsafe { U::from_ptr(self.0) }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::resumable::dual::desc::DualTaskDesc;

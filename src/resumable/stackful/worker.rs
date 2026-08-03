@@ -14,7 +14,7 @@ use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, Worker};
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, TaskDescCore};
+use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, TaskDescCore, Transferred};
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 
 // ---------------------------------------------------------------------------
@@ -52,7 +52,11 @@ where
     /// Save the current context, switch to a **fresh** stack at `stack_top`,
     /// run `f(wk, prev)` there.  Used for child-first fork; `f` must never
     /// return.
-    fn suspend_to_new<F>(&self, stack_top: *mut u8, next: *mut S::Desc, f: F) -> &Self
+    ///
+    /// # Safety
+    /// `next` must be a freshly allocated descriptor that has never been
+    /// wrapped in a token before, exclusively owned by the caller.
+    unsafe fn suspend_to_new<F>(&self, stack_top: *mut u8, next: *mut S::Desc, f: F) -> &Self
     where
         F: FnOnce(&Self, SuspendedTaskToken<S::Desc>);
 
@@ -218,7 +222,7 @@ where
         debug_assert!(!next_ctx.is_null(), "double-resume in suspend_to_cont (is_root={})", next.is_root());
         let mut payload = SuspendPayload::<S, F> {
             wk: self,
-            next: next.into_raw(),
+            next: Transferred::new(next),
             f: ManuallyDrop::new(f),
         };
         let tr = unsafe {
@@ -256,10 +260,15 @@ where
         unsafe { &*(tr.0 as *const UltWorker<S>) }
     }
 
-    fn suspend_to_new<F>(&self, stack_top: *mut u8, next: *mut S::Desc, f: F) -> &Self
+    unsafe fn suspend_to_new<F>(&self, stack_top: *mut u8, next: *mut S::Desc, f: F) -> &Self
     where
         F: FnOnce(&Self, SuspendedTaskToken<S::Desc>),
     {
+        // SAFETY: `next` is a freshly allocated descriptor (child-first
+        // fork) that has never been wrapped in a token before — trivially
+        // exclusive. Unlike `suspend_to_cont`/`exit_to_cont`, there's no
+        // predecessor token to consume via `Transferred::new`.
+        let next = unsafe { Transferred::<SuspendedTaskToken<S::Desc>>::from_raw(next) };
         let mut payload = SuspendPayload::<S, F> { wk: self, next, f: ManuallyDrop::new(f) };
         let tr = unsafe {
             S::Ctx::save_context(
@@ -280,7 +289,7 @@ where
         debug_assert!(!next_ctx.is_null(), "double-resume in exit_to_cont (is_root={})", next.is_root());
         let mut payload = ExitPayload::<S, F> {
             wk: self,
-            next: next.into_raw(),
+            next: Transferred::new(next),
             f: ManuallyDrop::new(f),
         };
         unsafe {
@@ -311,7 +320,7 @@ where
     S::Desc: StackfulTaskDesc,
 {
     wk: *const UltWorker<S>,
-    next: *mut S::Desc,
+    next: Transferred<SuspendedTaskToken<S::Desc>>,
     f: ManuallyDrop<F>,
 }
 
@@ -323,18 +332,12 @@ where
 {
     let (wk, next, f) = unsafe {
         let payload = &mut *(a1 as *mut SuspendPayload<S, F>);
-        (&*payload.wk, payload.next, ManuallyDrop::take(&mut payload.f))
+        (&*payload.wk, ptr::read(&payload.next), ManuallyDrop::take(&mut payload.f))
     };
     let mut prev_task = wk.take_cur_task();
     let old = prev_task.publish_saved_context(prev.0);
     debug_assert!(old.is_null(), "suspend over live ctx in suspend_shim (is_root={})", prev_task.as_desc().is_root());
-    // SAFETY: `next` (carried across the FFI context switch as a raw
-    // pointer in `SuspendPayload`, since a move-only Rust token can't cross
-    // an `extern "C"` boundary) was already-linear at the call site before
-    // the switch — consumed from a real `SuspendedTaskToken`'s `into_raw()`
-    // (or is a freshly allocated descriptor, `suspend_to_new`) — so it's
-    // exclusively ours here.
-    let mut next_running = unsafe { RunningTaskToken::from_raw(next) };
+    let mut next_running = next.into_inner::<RunningTaskToken<S::Desc>>();
     let wkp = wk as *const UltWorker<S> as *const ();
     next_running.mark_resumed_on(wkp);
     wk.set_cur_task(next_running);
@@ -411,7 +414,7 @@ where
     S::Desc: StackfulTaskDesc,
 {
     wk: *const UltWorker<S>,
-    next: *mut S::Desc,
+    next: Transferred<SuspendedTaskToken<S::Desc>>,
     f: ManuallyDrop<F>,
 }
 
@@ -423,17 +426,14 @@ where
 {
     let (wk, next, f) = unsafe {
         let payload = &mut *(a1 as *mut ExitPayload<S, F>);
-        (&*payload.wk, payload.next, ManuallyDrop::take(&mut payload.f))
+        (&*payload.wk, ptr::read(&payload.next), ManuallyDrop::take(&mut payload.f))
     };
     // The exiting task's own descriptor isn't being saved anywhere -- `f`
     // is responsible for its cleanup/freeing via the join protocol -- so
     // just take it out of `cur_task` and drop the (zero-cost, no `Drop`
     // impl) `RunningTaskToken` wrapper without doing anything else with it.
     let _ = wk.take_cur_task();
-    // SAFETY: same reasoning as `suspend_shim` — `next` was already-linear
-    // at the call site before the switch and is carried across the FFI
-    // boundary as a raw pointer in `ExitPayload`.
-    let mut next_running = unsafe { RunningTaskToken::from_raw(next) };
+    let mut next_running = next.into_inner::<RunningTaskToken<S::Desc>>();
     let wkp = wk as *const UltWorker<S> as *const ();
     next_running.mark_resumed_on(wkp);
     wk.set_cur_task(next_running);

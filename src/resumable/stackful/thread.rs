@@ -79,7 +79,7 @@ where
     // Write the closure onto the child's stack before switching.
     unsafe { f_ptr.write(f) };
 
-    wk.suspend_to_new(exec_top, desc, move |wk, prev| {
+    let child = move |wk: &UltWorker<S>, prev| {
         // Running on the child's stack.  Publish the parent for stealing, run
         // the closure, then exit via exit_with_result.
         wk.push_local_top(prev);
@@ -91,7 +91,11 @@ where
         debug_assert!(std::ptr::eq(wk, UltWorker::<S>::current().expect("cmpth: worker vanished")));
         debug_assert!(std::ptr::eq(wk.cur_task(), desc));
         exit_with_result(wk, wk.cur_task_ref(), result_ptr, val)
-    });
+    };
+    // SAFETY: `desc` was freshly allocated above and, after the token built
+    // at line 46 was released via `into_raw`, has never been re-tokenized —
+    // still exclusively owned here.
+    unsafe { wk.suspend_to_new(exec_top, desc, child) };
 
     JoinHandle { desc, result_ptr, result_drop: drop_stack_result::<T>, _marker: PhantomData }
 }
