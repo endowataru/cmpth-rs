@@ -5,7 +5,6 @@ pub mod async_wait;
 pub mod desc;
 pub mod lookup;
 pub mod scheduler;
-pub mod stack;
 pub mod system;
 pub mod thread;
 pub mod waker;

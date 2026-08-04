@@ -87,7 +87,7 @@ impl resumable::common::system::SchedulerSystem for DefaultDualTaskSystem {
     type Deque = CrossbeamDeque<resumable::dual::desc::DualTaskDesc>;
     type ExternalQueue   = resumable::common::external_queue::StealPathQueue<resumable::dual::desc::DualTaskDesc>;
     type Pool            = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc, resumable::common::stack::HeapStack>;
-    type AsyncPool       = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc, resumable::stackless::stack::AsyncArenaStack>;
+    type AsyncPool       = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc, resumable::common::stack::HeapStack>;
     const ASYNC_POOL_SIZE: usize = 512;
     type RecursionPool   = resumable::common::pool::ThresholdPool<resumable::common::pool::BlockPool>;
     type Lookup          = resumable::common::lookup::TlsCurrent;
@@ -163,7 +163,7 @@ impl resumable::common::system::SchedulerSystem for DefaultNestedDualTaskSystem 
     type Deque = CrossbeamDeque<resumable::dual::desc::DualTaskDesc>;
     type ExternalQueue   = resumable::common::external_queue::StealPathQueue<resumable::dual::desc::DualTaskDesc>;
     type Pool            = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc, resumable::common::stack::HeapStack>;
-    type AsyncPool       = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc, resumable::stackless::stack::AsyncArenaStack>;
+    type AsyncPool       = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc, resumable::common::stack::HeapStack>;
     const ASYNC_POOL_SIZE: usize = 512;
     type RecursionPool   = resumable::common::pool::ThresholdPool<resumable::common::pool::BlockPool>;
     type Lookup          = resumable::common::lookup::TlsCurrent;

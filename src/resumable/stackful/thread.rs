@@ -46,9 +46,6 @@ where
         let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
         token.commit_as_ctx();
         token.desc_owned_mut().scheduler = wk.shared.get() as *const ();
-        if let Some(slot) = token.desc_owned().slot {
-            unsafe { (*slot).system_id.set(crate::resumable::common::lookup::system_id::<S>()) };
-        }
         let stack_top = token.as_desc().stack_top() as usize;
         let _ = token.into_raw();
         stack_top
@@ -118,9 +115,6 @@ pub(crate) fn fork_parent_first<S: StackfulSchedulerSystem>(body: ErasedBody, sc
     let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
     token.commit_as_ctx();
     token.desc_owned_mut().scheduler = scheduler;
-    if let Some(slot) = token.desc_owned().slot {
-        unsafe { (*slot).system_id.set(crate::resumable::common::lookup::system_id::<S>()) };
-    }
     let arg = Box::into_raw(Box::new(body));
     let ctx = unsafe {
         S::Ctx::make_context(token.as_desc().stack_top(), task_entry::<S>, arg as *mut ())

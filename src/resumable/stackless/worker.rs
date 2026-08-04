@@ -60,20 +60,6 @@ pub(crate) fn run_async_poll<S>(
         // Mark as POLLING so the waker's state machine works correctly.
         desc_ref.mark_polling();
 
-        // Same bookkeeping the stackful switch shims do on every real
-        // context switch: publish `wk` on the descriptor itself (and, for
-        // an arena-backed AsyncPool, on the cell slot too). Lets anything
-        // holding a pointer into this task's own arena cell — e.g.
-        // `JoinHandle::poll`'s `self` address, see
-        // `worker_from_async_arena_addr` — find `wk` via address masking
-        // instead of a TLS lookup.
-        // SAFETY: covered by this function's own contract above — `desc`
-        // is already exclusively owned by the caller. The temporary token
-        // is just let go afterward (no `Drop` glue, so nothing is
-        // invalidated) since `desc` itself stays the loop's working
-        // pointer — `poll_fn` below needs it raw, not as a token.
-        unsafe { RunningTaskToken::from_raw(desc) }.mark_resumed_on(wk as *const UltWorker<S> as *const ());
-
         let raw = RawWaker::new(desc as *const (), crate::resumable::stackless::waker::async_task_private_vtable::<S>());
         let waker = unsafe { Waker::from_raw(raw) };
 

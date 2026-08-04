@@ -30,12 +30,6 @@ where
     type Output = T;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
-        // `self`'s own address, captured before `get_mut()`: `self` (this
-        // JoinHandle) is a field of the enclosing `spawn_async`'d future,
-        // stored inline inside that future's own arena-allocated descriptor
-        // (see `worker_from_async_arena_addr`) — so this address doubles as
-        // a way to find the enclosing task's own worker, no TLS needed.
-        let self_addr = &*self as *const Self as usize;
         let this = self.get_mut(); // JoinHandle: Unpin
         let desc = this.desc;
 
@@ -50,12 +44,7 @@ where
         // `Box<Waker>` allocation. A hand-rolled `Future` that manually
         // swaps in a foreign `Context` inside that span would violate this —
         // not something any code in this crate does.
-        //
-        // `current_worker_from_cx` finds that worker via, in order: the
-        // arena cell `self_addr` lands in (see
-        // `worker_from_async_arena_addr`), or `UltWorker::<S>::current()`
-        // (the TLS fallback).
-        let current_wk = current_worker_from_cx::<S>(self_addr);
+        let current_wk = UltWorker::<S>::current();
 
         // Reclaim fast path: if `desc` is still sitting untouched on our
         // own local deque (nobody has started or stolen it), pop it back
@@ -97,16 +86,6 @@ where
             Err(e) => std::panic::resume_unwind(e),
         })
     }
-}
-
-/// Find the current worker for a `JoinHandle::poll` call: first via
-/// `self_addr`'s arena cell (no TLS — see `worker_from_async_arena_addr`),
-/// otherwise `UltWorker::<S>::current()` (TLS).
-fn current_worker_from_cx<S: SchedulerSystem>(self_addr: usize) -> Option<&'static UltWorker<S>> {
-    if let Some(wk) = crate::resumable::stackless::lookup::worker_from_async_arena_addr::<S>(self_addr) {
-        return Some(wk);
-    }
-    UltWorker::<S>::current()
 }
 
 /// See [`JoinHandle::poll`]'s reclaim fast path. Pops `wk`'s own local
@@ -248,13 +227,6 @@ where
     let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
     token.commit_as_poll_fn();
     token.desc_owned_mut().scheduler = wk.shared.get() as *const ();
-    // Arena-backed AsyncPool systems get a cell slot here; tag it with this
-    // system's identity once (mirrors `spawn`'s own slot setup) so
-    // `worker_from_async_arena_addr` can guard against a nested scheduler's
-    // descriptor landing in the same arena.
-    if let Some(slot) = token.desc_owned().slot {
-        unsafe { (*slot).system_id.set(crate::resumable::common::lookup::system_id::<S>()) };
-    }
 
     let stack_top = token.as_desc().stack_top() as usize;
     let result_addr = align_down(stack_top - result_layout.size(), result_layout.align());

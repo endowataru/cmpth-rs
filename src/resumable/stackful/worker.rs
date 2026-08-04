@@ -338,9 +338,7 @@ where
     let mut prev_task = wk.take_cur_task();
     let old = prev_task.publish_saved_context(prev.0);
     debug_assert!(old.is_null(), "suspend over live ctx in suspend_shim (is_root={})", prev_task.as_desc().is_root());
-    let mut next_running = next.into_inner::<RunningTaskToken<S::Desc>>();
-    let wkp = wk as *const UltWorker<S> as *const ();
-    next_running.mark_resumed_on(wkp);
+    let next_running = next.into_inner::<RunningTaskToken<S::Desc>>();
     wk.set_cur_task(next_running);
     f(wk, prev_task.into_suspended());
     Transfer(wk as *const UltWorker<S> as *mut ())
@@ -377,11 +375,9 @@ where
     // the same descriptor at the same time -- unlike the old
     // `Cell<*mut S::Desc>` design, there is no window where `cur_task` and
     // a live `SuspendedTaskToken`/local variable alias the same task while
-    // owner-exclusive fields (`worker`/`slot`/`ctx`) are mutated through
-    // one of them. See `RunningTaskToken`'s doc comment.
-    let mut next_running = next_cont.into_running();
-    let wkp = wk as *const UltWorker<S> as *const ();
-    next_running.mark_resumed_on(wkp);
+    // owner-exclusive fields (`ctx`) are mutated through one of them. See
+    // `RunningTaskToken`'s doc comment.
+    let next_running = next_cont.into_running();
     wk.set_cur_task(next_running);
 
     let mut prev_cont = Some(prev_task.into_suspended());
@@ -434,9 +430,7 @@ where
     // just take it out of `cur_task` and drop the (zero-cost, no `Drop`
     // impl) `RunningTaskToken` wrapper without doing anything else with it.
     let _ = wk.take_cur_task();
-    let mut next_running = next.into_inner::<RunningTaskToken<S::Desc>>();
-    let wkp = wk as *const UltWorker<S> as *const ();
-    next_running.mark_resumed_on(wkp);
+    let next_running = next.into_inner::<RunningTaskToken<S::Desc>>();
     wk.set_cur_task(next_running);
     f(wk);
     Transfer(wk as *const UltWorker<S> as *mut ())
