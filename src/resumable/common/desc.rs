@@ -15,7 +15,7 @@
 //! (implementors supply accessors; scheduler code only ever calls the
 //! trait) — a concrete descriptor type is a contract to implement, not a
 //! fixed struct to match byte-for-byte. Owner-exclusive fields
-//! (`result`/`tls`/`scheduler`, plus each flavor's own `ctx`/`poll_fn`) live
+//! (`tls`/`scheduler`, plus each flavor's own `ctx`/`poll_fn`) live
 //! in a per-flavor [`TaskDesc::Owned`] struct, reached only through a
 //! [`SuspendedTaskToken`]/[`RunningTaskToken`]'s `Deref`/`DerefMut` — see
 //! [`DescOwned`]/[`HasDescOwned`]'s doc comments for why.
@@ -55,7 +55,6 @@
 //! out to [`common::waker`](crate::resumable::common::waker) so both share
 //! it) instead of a per-task field.
 
-use std::any::Any;
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
@@ -65,8 +64,6 @@ use std::task::Waker;
 pub use crate::traits::common::{JoinState, TaskDesc};
 pub use crate::traits::stackful::SyncJoinerTaskDesc;
 use crate::interchange::PointerInterchangeable;
-
-pub type TaskResult = Result<Box<dyn Any + Send>, Box<dyn Any + Send>>;
 
 // ---------------------------------------------------------------------------
 // join_state encoding
@@ -118,11 +115,6 @@ pub(crate) fn decode_join_state<D>(v: usize) -> JoinState<D> {
 /// D::Owned`), the same "the token proves the precondition, `Deref` cashes
 /// it in" pattern as `MutexGuard`/`RefMut`.
 pub struct DescOwned {
-    /// Written by the task itself before exiting; read by the joiner after
-    /// `FINISHED` is observed.  (Root tasks only; spawned tasks put the
-    /// result on their own stack.)
-    pub(crate) result: Option<TaskResult>,
-
     /// Used by nested schedulers for their per-worker pointer (`UltTls`).
     /// Only touched by the OS thread currently running this task.
     pub(crate) tls: Option<HashMap<usize, *mut ()>>,
@@ -130,7 +122,7 @@ pub struct DescOwned {
 
 impl DescOwned {
     pub(crate) const fn new() -> Self {
-        DescOwned { result: None, tls: None }
+        DescOwned { tls: None }
     }
 }
 

@@ -21,8 +21,8 @@ const ASYNC_TAG: usize = 1;
 /// continuation *or* a registered async [`Waker`] — chosen
 /// per wait attempt by whichever entry point (sync or async) the caller
 /// used. Internally a single tagged word (bit 0 = async), matching
-/// `cmpth-rs`'s own existing "task" vocabulary (`TaskDesc::TaskResult`,
-/// `UltWorker::cur_task` already mean "whichever kind is running").
+/// `cmpth-rs`'s own existing "task" vocabulary (`UltWorker::cur_task`
+/// already means "whichever kind is running").
 ///
 /// `enter`/`swap` (via [`StackfulResumable`]) fall back to a plain wake when
 /// the slot turns out to hold an async waiter — a real context jump is only
