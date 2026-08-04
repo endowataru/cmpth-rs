@@ -207,11 +207,9 @@ impl StackfulOnlyTaskDesc {
         Self::alloc_with(HeapStack::alloc_stack(stack_size).into(), has_handle)
     }
 
-    /// Construct a descriptor value with a policy-allocated stack. For arena
-    /// stacks, captures the cell slot pointer for use by the switch shims.
+    /// Construct a descriptor value with a policy-allocated stack.
     pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> StackfulOnlyTaskDesc {
-        let mut desc_owned = DescOwned::new();
-        desc_owned.slot = stack.cell_slot();
+        let desc_owned = DescOwned::new();
         StackfulOnlyTaskDesc {
             owned: UnsafeCell::new(StackfulOnlyOwned { desc_owned, ctx: std::ptr::null_mut() }),
             is_root: false,

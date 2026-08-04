@@ -203,7 +203,7 @@ impl<M: UltAsyncIdentity> SchedulerSystem for UltAsyncSystem<M> {
     // cheapest DescPool to instantiate for a type that's never used.
     type Pool = crate::resumable::common::pool::SimplePool<M::Desc>;
     const ASYNC_POOL_SIZE: usize = <M as UltAsyncIdentity>::ASYNC_POOL_SIZE;
-    type AsyncPool = crate::resumable::common::pool::ReturnPool<M::Desc, crate::resumable::stackless::stack::AsyncArenaStack>;
+    type AsyncPool = crate::resumable::common::pool::ReturnPool<M::Desc, crate::resumable::common::stack::HeapStack>;
     type RecursionPool = crate::resumable::common::pool::ThresholdPool<crate::resumable::common::pool::BlockPool>;
     type Lookup = <M as UltAsyncIdentity>::Lookup;
 

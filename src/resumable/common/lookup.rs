@@ -15,12 +15,6 @@ pub trait CurrentLookup<S: SchedulerSystem>: Send + Sync + 'static {
     fn current() -> Option<&'static UltWorker<S>>;
 }
 
-/// A unique identity for system `S`: the address of its `worker_tls` static.
-#[inline]
-pub(crate) fn system_id<S: SchedulerSystem>() -> *const () {
-    S::worker_tls() as *const _ as *const ()
-}
-
 // ---------------------------------------------------------------------------
 // TlsCurrent
 // ---------------------------------------------------------------------------

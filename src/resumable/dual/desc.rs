@@ -154,7 +154,7 @@ impl TaskDescAlloc for DualTaskDesc {
 impl DualTaskDesc {
     /// Construct a descriptor value with a heap stack. Used (among other
     /// things) by `spawn_async` (whose "stack" only stores the future — no
-    /// code runs on it, so it never needs the arena).
+    /// code runs on it, but it's allocated the same way regardless).
     ///
     /// `dispatch` starts as `Ctx` (an arbitrary placeholder — this
     /// constructor is shared by pooled allocation for *both* `S::Pool` and
@@ -167,13 +167,11 @@ impl DualTaskDesc {
         Self::alloc_with(HeapStack::alloc_stack(stack_size).into(), has_handle)
     }
 
-    /// Construct a descriptor value with a policy-allocated stack.  For
-    /// arena stacks, captures the cell slot pointer for use by the switch
-    /// shims. See [`DualTaskDesc::alloc`]'s doc comment for the `dispatch`
+    /// Construct a descriptor value with a policy-allocated stack. See
+    /// [`DualTaskDesc::alloc`]'s doc comment for the `dispatch`
     /// placeholder-then-commit protocol this also follows.
     pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> DualTaskDesc {
-        let mut desc_owned = DescOwned::new();
-        desc_owned.slot = stack.cell_slot();
+        let desc_owned = DescOwned::new();
         DualTaskDesc {
             owned: UnsafeCell::new(DualOwned { desc_owned, dispatch: TaskDispatch::Ctx(std::ptr::null_mut()) }),
             is_root: false,

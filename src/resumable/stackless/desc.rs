@@ -311,18 +311,15 @@ impl TaskDescAlloc for StacklessOnlyTaskDesc {
 impl StacklessOnlyTaskDesc {
     /// Construct a descriptor value with a heap stack. Used by
     /// `spawn_async` (whose "stack" only stores the future — no code runs
-    /// on it, so it never needs the arena).
+    /// on it, but it's allocated the same way regardless).
     pub(crate) fn alloc(stack_size: usize, has_handle: bool) -> StacklessOnlyTaskDesc {
         use crate::resumable::common::stack::{HeapStack, StackAlloc as _};
         Self::alloc_with(HeapStack::alloc_stack(stack_size).into(), has_handle)
     }
 
-    /// Construct a descriptor value with a policy-allocated stack (e.g. an
-    /// async arena). Captures the cell slot pointer for use by the wake
-    /// path.
+    /// Construct a descriptor value with a policy-allocated stack.
     pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> StacklessOnlyTaskDesc {
-        let mut desc_owned = DescOwned::new();
-        desc_owned.slot = stack.cell_slot();
+        let desc_owned = DescOwned::new();
         StacklessOnlyTaskDesc {
             owned: UnsafeCell::new(StacklessOnlyOwned { desc_owned, poll_fn: None }),
             is_root: false,

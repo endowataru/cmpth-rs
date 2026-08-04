@@ -118,11 +118,6 @@ pub(crate) fn decode_join_state<D>(v: usize) -> JoinState<D> {
 /// D::Owned`), the same "the token proves the precondition, `Deref` cashes
 /// it in" pattern as `MutexGuard`/`RefMut`.
 pub struct DescOwned {
-    /// Points at the arena cell's `[worker, system_id]` slot for arena
-    /// stacks, or `None` for heap/root stacks.  The switch shims write the
-    /// resuming worker pointer here when present.
-    pub(crate) slot: Option<*mut crate::resumable::common::stack::CellSlot>,
-
     /// Written by the task itself before exiting; read by the joiner after
     /// `FINISHED` is observed.  (Root tasks only; spawned tasks put the
     /// result on their own stack.)
@@ -146,14 +141,14 @@ pub struct DescOwned {
 
 impl DescOwned {
     pub(crate) const fn new() -> Self {
-        DescOwned { slot: None, result: None, tls: None, scheduler: std::ptr::null() }
+        DescOwned { result: None, tls: None, scheduler: std::ptr::null() }
     }
 }
 
-/// Implemented by every [`TaskDesc::Owned`] type: gives generic code (e.g.
-/// `RunningTaskToken::mark_resumed_on`) access to the fields every flavor
-/// shares, regardless of what flavor-specific fields (`ctx`, `poll_fn`,
-/// `dispatch`) the concrete `Owned` type adds alongside `desc_owned`.
+/// Implemented by every [`TaskDesc::Owned`] type: gives generic code access
+/// to the fields every flavor shares, regardless of what flavor-specific
+/// fields (`ctx`, `poll_fn`, `dispatch`) the concrete `Owned` type adds
+/// alongside `desc_owned`.
 pub trait HasDescOwned {
     fn desc_owned(&self) -> &DescOwned;
     fn desc_owned_mut(&mut self) -> &mut DescOwned;
@@ -316,19 +311,19 @@ impl<D: TaskDescCore> SyncJoinerTaskDesc for D {
 /// here mirrors an existing `DualTaskDesc` inherent fn byte-for-byte; this
 /// is a mechanical accessor split, not a behavior change.
 pub trait TaskDescAlloc: TaskDescCore + Sized {
-    /// Construct a descriptor value whose stack storage is `stack` (heap or
-    /// arena, per the caller's `StackAlloc` policy). Returns `Self` by
-    /// value, not a boxed pointer: pool bookkeeping (the old `pool_next`/
-    /// `alloc_wk`/`oversized` fields) no longer lives on the descriptor, so
-    /// wrapping it in a heap allocation (bare `Box<Self>`, or a pool's
-    /// `Node<Self>`) is entirely the caller's decision, not this trait's.
-    /// Used by the pool and by `spawn`'s parent-first fork path.
+    /// Construct a descriptor value whose stack storage is `stack`, per the
+    /// caller's `StackAlloc` policy. Returns `Self` by value, not a boxed
+    /// pointer: pool bookkeeping (the old `pool_next`/`alloc_wk`/`oversized`
+    /// fields) no longer lives on the descriptor, so wrapping it in a heap
+    /// allocation (bare `Box<Self>`, or a pool's `Node<Self>`) is entirely
+    /// the caller's decision, not this trait's. Used by the pool and by
+    /// `spawn`'s parent-first fork path.
     fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> Self;
 
     /// Construct a descriptor value with a plain heap buffer of
-    /// `stack_size` bytes, bypassing any arena/guard-page policy. Used by
-    /// `spawn_async`, whose "stack" only ever stores a `Future` + result —
-    /// no code runs on it, so it never needs the arena.
+    /// `stack_size` bytes. Used by `spawn_async`, whose "stack" only ever
+    /// stores a `Future` + result — no code runs on it, but it's allocated
+    /// through the same `HeapStack` policy as a real stack regardless.
     fn alloc(stack_size: usize, has_handle: bool) -> Self;
 
     /// Pseudo-descriptor for a worker's own scheduler-loop context (the
@@ -486,17 +481,6 @@ impl<D: TaskDescCore> RunningTaskToken<D> {
         unsafe { SuspendedTaskToken::from_raw(self.into_raw()) }
     }
 
-    /// Record that this task is now running on `worker_ptr` — called by
-    /// every context-switch shim immediately after promoting `self` to
-    /// `RunningTaskToken`. Propagates to the arena cell slot (when present)
-    /// so the sp-based lookup can find the current worker without a TLS
-    /// read.
-    #[inline]
-    pub(crate) fn mark_resumed_on(&mut self, worker_ptr: *const ()) {
-        if let Some(slot) = self.desc_owned().slot {
-            unsafe { (*slot).worker.set(worker_ptr) };
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
