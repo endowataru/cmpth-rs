@@ -128,7 +128,7 @@ where
         // → Scheduler.  When run() drops the last strong Arc, the Weak becomes
         // dead and the poller ULT exits on its next iteration.
         let sched_weak: Weak<Scheduler<S>> = Arc::downgrade(scheduler);
-        let scheduler_ptr = Arc::as_ptr(scheduler) as *const ();
+        let scheduler_ptr = Arc::as_ptr(scheduler);
 
         let body: ErasedBody = Box::new(move || {
             loop {

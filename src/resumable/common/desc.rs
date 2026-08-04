@@ -15,10 +15,10 @@
 //! (implementors supply accessors; scheduler code only ever calls the
 //! trait) — a concrete descriptor type is a contract to implement, not a
 //! fixed struct to match byte-for-byte. Owner-exclusive fields
-//! (`worker`/`slot`/`result`/`tls`/`scheduler`, plus each flavor's own
-//! `ctx`/`poll_fn`) live in a per-flavor [`TaskDesc::Owned`] struct, reached
-//! only through a [`SuspendedTaskToken`]/[`RunningTaskToken`]'s `Deref`/
-//! `DerefMut` — see [`DescOwned`]/[`HasDescOwned`]'s doc comments for why.
+//! (`result`/`tls`/`scheduler`, plus each flavor's own `ctx`/`poll_fn`) live
+//! in a per-flavor [`TaskDesc::Owned`] struct, reached only through a
+//! [`SuspendedTaskToken`]/[`RunningTaskToken`]'s `Deref`/`DerefMut` — see
+//! [`DescOwned`]/[`HasDescOwned`]'s doc comments for why.
 //!
 //! Only the shared machinery lives in this module. The three concrete
 //! descriptor types, one per scheduler flavor, live alongside their own
@@ -126,23 +126,60 @@ pub struct DescOwned {
     /// Used by nested schedulers for their per-worker pointer (`UltTls`).
     /// Only touched by the OS thread currently running this task.
     pub(crate) tls: Option<HashMap<usize, *mut ()>>,
-
-    /// Type-erased `*const Scheduler<S>`.  Set at task-creation time —
-    /// `spawn`, `spawn_async`, and `fork_parent_first` all record it,
-    /// regardless of task flavor — so that `wake()` called from an external
-    /// OS thread can reach the scheduler's `ExternalQueue` without going
-    /// through worker TLS.  Null for root pseudo-descriptors. Only actually
-    /// read by the `AsyncTaskDesc` wake path (`waker.rs::push_continuation`)
-    /// today, but writing it doesn't need `AsyncTaskDesc` capability, so it
-    /// lives on the desc_owned fields rather than gating every constructor
-    /// on it.
-    pub(crate) scheduler: *const (),
 }
 
 impl DescOwned {
     pub(crate) const fn new() -> Self {
-        DescOwned { result: None, tls: None, scheduler: std::ptr::null() }
+        DescOwned { result: None, tls: None }
     }
+}
+
+/// Implemented by a [`TaskDescCore::Owned`] type that can hold a pointer
+/// back to the [`Scheduler<S>`](crate::resumable::common::scheduler::Scheduler)
+/// that owns this task — genuinely per-`S`-instance, not per-`S`-type: a
+/// system's `run::<S>()` can have multiple live `Scheduler<S>` instances at
+/// once (nothing prevents two independent `run::<S>()` calls on different
+/// threads), so this can't be resolved through a single `S`-keyed static the
+/// way `S::worker_tls()` is. Set at task-creation time (`spawn`/
+/// `spawn_async`/`fork_parent_first`, regardless of task flavor) so `wake()`
+/// called from an external OS thread — with no worker TLS to consult at all —
+/// can still reach the right instance's `ExternalQueue`. Null for root
+/// pseudo-descriptors.
+///
+/// Same shape as [`HasCtx`](crate::resumable::stackful::desc::HasCtx)/
+/// [`HasPollFn`](crate::resumable::stackless::desc::HasPollFn): a capability
+/// trait implemented by each flavor's own `Owned` struct. `System` (not a
+/// generic parameter) names which `SchedulerSystem` this `Owned` belongs to
+/// — this crate's three concrete `Owned` types are each already
+/// parameterized by their own `S`, so `System = S` is a trivial projection,
+/// not an extra type to track.
+///
+/// Folded in as a supertrait bound (unpinned `Owned: HasScheduler`, no
+/// `System` equality yet) on
+/// [`StackfulTaskDesc`](crate::resumable::stackful::desc::StackfulTaskDesc)
+/// and [`AsyncTaskDesc`](crate::resumable::stackless::desc::AsyncTaskDesc).
+/// The equality that actually matters for call sites —
+/// `HasScheduler<System = S>` for the exact `S` in scope — is instead pinned
+/// on [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem)/
+/// [`StacklessSchedulerSystem`](crate::resumable::stackless::system::StacklessSchedulerSystem)
+/// (each `S`-aware, unlike the `D`-only marker traits above), nested
+/// directly in their own supertrait bound list
+/// (`SchedulerSystem<Desc: ... + TaskDescCore<Owned: HasScheduler<System =
+/// Self>>>`), not a separate `where`-clause. This distinction is load-bearing,
+/// not stylistic: a `where`-clause attached to an associated type's own
+/// declaration (whether on `SchedulerSystem::Desc` itself, or as a
+/// *separate* `where`-clause on `StackfulSchedulerSystem`'s trait
+/// declaration) is *not* an implied bound at call sites merely bounded by
+/// the trait — verified empirically, twice, the hard way. Only an
+/// associated-type bound nested inside a supertrait's own bound list
+/// propagates as a real implied bound. `push_continuation` is the one
+/// genuine leaf that reads `scheduler` without either flavor trait in scope
+/// (it's only ever bounded on bare `SchedulerSystem`), so it restates
+/// `HasScheduler<System = S>` explicitly instead.
+pub trait HasScheduler {
+    type System: crate::resumable::common::system::SchedulerSystem;
+    fn scheduler(&self) -> *const crate::resumable::common::scheduler::Scheduler<Self::System>;
+    fn set_scheduler(&mut self, scheduler: *const crate::resumable::common::scheduler::Scheduler<Self::System>);
 }
 
 /// Implemented by every [`TaskDesc::Owned`] type: gives generic code access
@@ -509,6 +546,7 @@ mod tests {
     use crate::resumable::dual::desc::DualTaskDesc;
     use crate::resumable::stackful::desc::StackfulOnlyTaskDesc;
     use crate::resumable::stackless::desc::StacklessOnlyTaskDesc;
+    use crate::{DefaultDualTaskSystem, DefaultStackfulOnlyTaskSystem, DefaultStacklessOnlyTaskSystem};
 
     /// Regression guard for the whole point of splitting the descriptor per
     /// flavor: a stackful-only/stackless-only system must not carry the
@@ -517,9 +555,9 @@ mod tests {
     /// it defeated the split.
     #[test]
     fn narrow_descriptors_are_smaller_than_dual() {
-        let dual = std::mem::size_of::<DualTaskDesc>();
-        let stackful = std::mem::size_of::<StackfulOnlyTaskDesc>();
-        let stackless = std::mem::size_of::<StacklessOnlyTaskDesc>();
+        let dual = std::mem::size_of::<DualTaskDesc<DefaultDualTaskSystem>>();
+        let stackful = std::mem::size_of::<StackfulOnlyTaskDesc<DefaultStackfulOnlyTaskSystem>>();
+        let stackless = std::mem::size_of::<StacklessOnlyTaskDesc<DefaultStacklessOnlyTaskSystem>>();
         assert!(stackful < dual, "StackfulOnlyTaskDesc ({stackful}) should be smaller than DualTaskDesc ({dual})");
         assert!(stackless < dual, "StacklessOnlyTaskDesc ({stackless}) should be smaller than DualTaskDesc ({dual})");
     }

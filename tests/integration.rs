@@ -696,12 +696,12 @@ struct ManualSystem;
 
 impl cmpth::SchedulerSystem for ManualSystem {
     type Base  = OsSystem;
-    type Desc  = DualTaskDesc;
-    type Deque = CrossbeamDeque<DualTaskDesc>;
-    type ExternalQueue   = StealPathQueue<DualTaskDesc>;
-    type Pool            = ReturnPool<DualTaskDesc, HeapStack>;
+    type Desc  = DualTaskDesc<Self>;
+    type Deque = CrossbeamDeque<DualTaskDesc<Self>>;
+    type ExternalQueue   = StealPathQueue<DualTaskDesc<Self>>;
+    type Pool            = ReturnPool<DualTaskDesc<Self>, HeapStack>;
     // Unused: ManualSystem never calls spawn_async.
-    type AsyncPool       = cmpth::resumable::common::pool::SimplePool<DualTaskDesc>;
+    type AsyncPool       = cmpth::resumable::common::pool::SimplePool<DualTaskDesc<Self>>;
     const ASYNC_POOL_SIZE: usize = 0;
     // Unused: ManualSystem never calls recurse.
     type RecursionPool   = cmpth::resumable::common::pool::ThresholdPool<cmpth::resumable::common::pool::BlockPool>;
@@ -716,11 +716,11 @@ impl cmpth::SchedulerSystem for ManualSystem {
     }
 
     // Stackful-only: no poll_fn tag check, see `execute_stackful`'s doc comment.
-    fn execute(wk: &UltWorker<Self>, cont: cmpth::SuspendedTaskToken<DualTaskDesc>) {
+    fn execute(wk: &UltWorker<Self>, cont: cmpth::SuspendedTaskToken<DualTaskDesc<Self>>) {
         cmpth::resumable::stackful::worker::execute_stackful(wk, cont)
     }
 
-    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut DualTaskDesc) {
+    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut DualTaskDesc<Self>) {
         unsafe { cmpth::resumable::stackful::worker::free_finished_desc_stackful(wk, desc) }
     }
 }

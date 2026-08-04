@@ -16,10 +16,9 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::resumable::common::scheduler::Scheduler;
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
-use crate::resumable::common::desc::{HasDescOwned, SuspendedTaskToken};
+use crate::resumable::common::desc::{HasScheduler, SuspendedTaskToken};
 use crate::resumable::common::external_queue::ExternalQueue;
 
 pub use crate::traits::stackless::WakeOutcome;
@@ -152,17 +151,20 @@ pub(crate) fn try_wake_state(state: &AtomicUsize) -> WakeOutcome {
 /// exclusive ownership at their call site don't have to hand off a raw
 /// pointer just to have this function immediately reconstruct a token from
 /// it — one `from_raw` per genuine ownership transfer, not two.
-pub(crate) fn push_continuation<S: SchedulerSystem>(token: SuspendedTaskToken<S::Desc>) {
+pub(crate) fn push_continuation<S: SchedulerSystem>(token: SuspendedTaskToken<S::Desc>)
+where
+    <S::Desc as crate::resumable::common::desc::TaskDescCore>::Owned: HasScheduler<System = S>,
+{
     match UltWorker::<S>::current() {
         Some(wk) => wk.push_local_top(token),
         None => {
-            let scheduler = token.desc_owned().scheduler;
+            let scheduler = token.scheduler();
             assert!(
                 !scheduler.is_null(),
                 "cmpth: wake() called from outside ULT scheduler \
                  and task has no scheduler reference"
             );
-            let scheduler = unsafe { &*(scheduler as *const Scheduler<S>) };
+            let scheduler = unsafe { &*scheduler };
             scheduler.external_queue.push(token);
         }
     }

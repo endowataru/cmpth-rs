@@ -5,7 +5,9 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::AtomicUsize;
 
-use crate::resumable::common::desc::{DescOwned, HasDescOwned, RunningTaskToken, SuspendedTaskToken, TaskDescCore, TaskDescAlloc, decode_join_state, JS_DETACHED, JS_RUNNING};
+use crate::resumable::common::desc::{DescOwned, HasDescOwned, HasScheduler, RunningTaskToken, SuspendedTaskToken, TaskDescCore, TaskDescAlloc, decode_join_state, JS_DETACHED, JS_RUNNING};
+use crate::resumable::common::scheduler::Scheduler;
+use crate::resumable::common::system::SchedulerSystem;
 use crate::traits::common::JoinState;
 use crate::traits::stackful::{SyncJoinState, SyncJoinerTaskDesc};
 
@@ -72,9 +74,9 @@ pub trait HasCtx {
 /// execution stack (stackful ULTs). A pure-stackless descriptor type would
 /// not implement this — there is no saved context to hand off, since
 /// `run_async_poll` never does a context switch.
-pub trait StackfulTaskDesc: SyncJoinerTaskDesc + TaskDescCore<Owned: HasCtx> {}
+pub trait StackfulTaskDesc: SyncJoinerTaskDesc + TaskDescCore<Owned: HasCtx + HasScheduler> {}
 
-impl<D: SyncJoinerTaskDesc + TaskDescCore<Owned: HasCtx>> StackfulTaskDesc for D {}
+impl<D: SyncJoinerTaskDesc + TaskDescCore<Owned: HasCtx + HasScheduler>> StackfulTaskDesc for D {}
 
 impl<D: TaskDescCore<Owned: HasCtx>> SuspendedTaskToken<D> {
     /// Claim this task's saved context before switching into it (swap to
@@ -128,17 +130,24 @@ impl<D: TaskDescCore<Owned: HasCtx>> RunningTaskToken<D> {
 /// Owner-exclusive fields for [`StackfulOnlyTaskDesc`]: [`DescOwned`] plus
 /// the real saved-context pointer (no `poll_fn` slot — this flavor never
 /// has one).
-pub struct StackfulOnlyOwned {
+pub struct StackfulOnlyOwned<S: SchedulerSystem> {
     desc_owned: DescOwned,
+    scheduler: *const Scheduler<S>,
     ctx: *mut u8,
 }
 
-impl HasDescOwned for StackfulOnlyOwned {
+impl<S: SchedulerSystem> HasDescOwned for StackfulOnlyOwned<S> {
     fn desc_owned(&self) -> &DescOwned { &self.desc_owned }
     fn desc_owned_mut(&mut self) -> &mut DescOwned { &mut self.desc_owned }
 }
 
-impl HasCtx for StackfulOnlyOwned {
+impl<S: SchedulerSystem> HasScheduler for StackfulOnlyOwned<S> {
+    type System = S;
+    fn scheduler(&self) -> *const Scheduler<S> { self.scheduler }
+    fn set_scheduler(&mut self, scheduler: *const Scheduler<S>) { self.scheduler = scheduler; }
+}
+
+impl<S: SchedulerSystem> HasCtx for StackfulOnlyOwned<S> {
     fn ctx(&self) -> *mut u8 { self.ctx }
     fn set_ctx(&mut self, ptr: *mut u8) { self.ctx = ptr; }
 }
@@ -147,22 +156,22 @@ impl HasCtx for StackfulOnlyOwned {
 /// real ULT with no `spawn_async` capability, so no `poll_fn` slot exists
 /// at all (contrast [`DualTaskDesc`](crate::resumable::dual::desc::DualTaskDesc),
 /// which needs both on the same struct).
-pub struct StackfulOnlyTaskDesc {
-    owned: UnsafeCell<StackfulOnlyOwned>,
+pub struct StackfulOnlyTaskDesc<S: SchedulerSystem> {
+    owned: UnsafeCell<StackfulOnlyOwned<S>>,
     join_state: AtomicUsize,
     is_root: bool,
     stack: crate::resumable::common::stack::StackMem,
 }
 
-unsafe impl Send for StackfulOnlyTaskDesc {}
-unsafe impl Sync for StackfulOnlyTaskDesc {}
+unsafe impl<S: SchedulerSystem> Send for StackfulOnlyTaskDesc<S> {}
+unsafe impl<S: SchedulerSystem> Sync for StackfulOnlyTaskDesc<S> {}
 
-impl TaskDescCore for StackfulOnlyTaskDesc {
+impl<S: SchedulerSystem> TaskDescCore for StackfulOnlyTaskDesc<S> {
     fn join_state(&self) -> &AtomicUsize { &self.join_state }
     fn is_root(&self) -> bool { self.is_root }
     fn stack_top(&self) -> *mut u8 { self.stack.top() }
-    type Owned = StackfulOnlyOwned;
-    fn owned_cell(&self) -> &UnsafeCell<StackfulOnlyOwned> { &self.owned }
+    type Owned = StackfulOnlyOwned<S>;
+    fn owned_cell(&self) -> &UnsafeCell<StackfulOnlyOwned<S>> { &self.owned }
 
     /// No async capability at all, so `AsyncWaker`/`AsyncJoiner` can never
     /// actually be published (the only writers,
@@ -182,7 +191,7 @@ impl TaskDescCore for StackfulOnlyTaskDesc {
     }
 }
 
-impl TaskDescAlloc for StackfulOnlyTaskDesc {
+impl<S: SchedulerSystem> TaskDescAlloc for StackfulOnlyTaskDesc<S> {
     fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> Self {
         StackfulOnlyTaskDesc::alloc_with(stack, has_handle)
     }
@@ -200,18 +209,18 @@ impl TaskDescAlloc for StackfulOnlyTaskDesc {
     }
 }
 
-impl StackfulOnlyTaskDesc {
+impl<S: SchedulerSystem> StackfulOnlyTaskDesc<S> {
     /// Construct a descriptor value with a heap stack.
-    pub(crate) fn alloc(stack_size: usize, has_handle: bool) -> StackfulOnlyTaskDesc {
+    pub(crate) fn alloc(stack_size: usize, has_handle: bool) -> StackfulOnlyTaskDesc<S> {
         use crate::resumable::common::stack::{HeapStack, StackAlloc as _};
         Self::alloc_with(HeapStack::alloc_stack(stack_size).into(), has_handle)
     }
 
     /// Construct a descriptor value with a policy-allocated stack.
-    pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> StackfulOnlyTaskDesc {
+    pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> StackfulOnlyTaskDesc<S> {
         let desc_owned = DescOwned::new();
         StackfulOnlyTaskDesc {
-            owned: UnsafeCell::new(StackfulOnlyOwned { desc_owned, ctx: std::ptr::null_mut() }),
+            owned: UnsafeCell::new(StackfulOnlyOwned { desc_owned, scheduler: std::ptr::null(), ctx: std::ptr::null_mut() }),
             is_root: false,
             join_state: AtomicUsize::new(if has_handle { JS_RUNNING } else { JS_DETACHED }),
             stack,
@@ -219,9 +228,9 @@ impl StackfulOnlyTaskDesc {
     }
 
     /// Pseudo-descriptor for a worker's scheduler-loop context.
-    pub(crate) fn new_root() -> StackfulOnlyTaskDesc {
+    pub(crate) fn new_root() -> StackfulOnlyTaskDesc<S> {
         StackfulOnlyTaskDesc {
-            owned: UnsafeCell::new(StackfulOnlyOwned { desc_owned: DescOwned::new(), ctx: std::ptr::null_mut() }),
+            owned: UnsafeCell::new(StackfulOnlyOwned { desc_owned: DescOwned::new(), scheduler: std::ptr::null(), ctx: std::ptr::null_mut() }),
             is_root: true,
             join_state: AtomicUsize::new(JS_DETACHED),
             stack: crate::resumable::common::stack::StackMem::None,

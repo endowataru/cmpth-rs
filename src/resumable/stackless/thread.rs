@@ -11,8 +11,9 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 
 use crate::resumable::common::system::SchedulerSystem;
+use crate::resumable::stackless::system::StacklessSchedulerSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
-use crate::resumable::common::desc::{HasDescOwned, JoinState, SuspendedTaskToken, TaskDescCore, TaskDescAlloc, publish_finished_raw};
+use crate::resumable::common::desc::{HasScheduler, JoinState, SuspendedTaskToken, TaskDescAlloc, TaskDescCore, publish_finished_raw};
 use crate::resumable::common::waker::WakeOutcome;
 use crate::resumable::stackless::desc::WakerTaskDesc;
 use crate::resumable::stackless::desc::{AsyncTaskDesc, HasPollFn, TaskPollResult};
@@ -23,10 +24,7 @@ use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
 // .await-ing a JoinHandle
 // ---------------------------------------------------------------------------
 
-impl<S: SchedulerSystem, T: Send + 'static> Future for JoinHandle<S, T>
-where
-    S::Desc: AsyncTaskDesc,
-{
+impl<S: StacklessSchedulerSystem, T: Send + 'static> Future for JoinHandle<S, T> {
     type Output = T;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
@@ -100,8 +98,7 @@ where
 /// stackful) goes right back — not something this fast path can help with.
 fn try_reclaim_and_run<S>(wk: &UltWorker<S>, desc: *mut S::Desc)
 where
-    S: SchedulerSystem,
-    S::Desc: AsyncTaskDesc,
+    S: StacklessSchedulerSystem,
 {
     match wk.pop_local() {
         Some(popped) if std::ptr::eq(popped.desc(), desc) => {
@@ -171,11 +168,10 @@ where
 /// change — see `SpawnAction`'s own docs.
 pub fn spawn_async<S, T, F, Mk>(mk: Mk) -> SpawnAction<S, T>
 where
-    S: SchedulerSystem,
+    S: StacklessSchedulerSystem,
     F: Future<Output = T> + Send + 'static,
     Mk: FnOnce() -> F + Send + 'static,
     T: Send + 'static,
-    S::Desc: AsyncTaskDesc,
 {
     SpawnAction { handle: Some(spawn_now::<S, T, F, Mk>(mk)) }
 }
@@ -199,11 +195,10 @@ where
 /// result) on the easy-to-optimize side of that boundary.
 fn spawn_now<S, T, F, Mk>(mk: Mk) -> JoinHandle<S, T>
 where
-    S: SchedulerSystem,
+    S: StacklessSchedulerSystem,
     F: Future<Output = T> + Send + 'static,
     Mk: FnOnce() -> F,
     T: Send + 'static,
-    S::Desc: AsyncTaskDesc,
 {
     let wk = UltWorker::<S>::current().expect("cmpth: spawn_async called outside a worker");
 
@@ -226,7 +221,7 @@ where
     // and has never been wrapped in a token before — trivially exclusive.
     let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
     token.commit_as_poll_fn();
-    token.desc_owned_mut().scheduler = wk.shared.get() as *const ();
+    token.set_scheduler(wk.shared.get());
 
     let stack_top = token.as_desc().stack_top() as usize;
     let result_addr = align_down(stack_top - result_layout.size(), result_layout.align());
@@ -482,10 +477,9 @@ impl<S: SchedulerSystem, F> Drop for RecursionFrame<S, F> {
 /// stackful root. `has_handle = false` (no `JoinHandle` is produced), so
 /// completion runs the same `JoinState::Detached` path as the stackful
 /// root's `exit()` — reuses [`poll_spawned_task`] directly with `T = ()`.
-pub(crate) fn fork_async_parent_first<S, F>(f: F, scheduler: *const ()) -> SuspendedTaskToken<S::Desc>
+pub(crate) fn fork_async_parent_first<S, F>(f: F, scheduler: *const crate::resumable::common::scheduler::Scheduler<S>) -> SuspendedTaskToken<S::Desc>
 where
-    S: SchedulerSystem,
-    S::Desc: AsyncTaskDesc,
+    S: StacklessSchedulerSystem,
     F: Future<Output = ()> + Send + 'static,
 {
     let result_layout = Layout::new::<StackResult<()>>();
@@ -511,7 +505,7 @@ where
     // wrapped in a token before — trivially exclusive.
     let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
     token.commit_as_poll_fn();
-    token.desc_owned_mut().scheduler = scheduler;
+    token.set_scheduler(scheduler);
 
     let stack_top = token.as_desc().stack_top() as usize;
     let result_addr = align_down(stack_top - result_layout.size(), result_layout.align());
