@@ -6,7 +6,9 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Waker};
 
-use crate::resumable::common::desc::{DescOwned, HasDescOwned, JoinState, RunningTaskToken, SuspendedTaskToken, TaskDescCore, TaskDescAlloc, decode_join_state, JS_ASYNC_JOINER_TAG, JS_ASYNC_TAG, JS_DETACHED, JS_FINISHED, JS_RUNNING};
+use crate::resumable::common::desc::{DescOwned, HasDescOwned, HasScheduler, JoinState, RunningTaskToken, SuspendedTaskToken, TaskDescCore, TaskDescAlloc, decode_join_state, JS_ASYNC_JOINER_TAG, JS_ASYNC_TAG, JS_DETACHED, JS_FINISHED, JS_RUNNING};
+use crate::resumable::common::scheduler::Scheduler;
+use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::waker::{self, WakeOutcome, EVER_SHARED, STATE_MASK};
 
 pub use crate::traits::stackless::WakerTaskDesc;
@@ -186,9 +188,9 @@ pub trait HasPollFn<D> {
 /// Future — the type-erased poll entry point. Builds on [`WakerTaskDesc`]
 /// (a `spawn_async` task's own poll loop, `run_async_poll`, uses
 /// `mark_polling`/`park_after_poll` on itself just like `block_on` does).
-pub trait AsyncTaskDesc: WakerTaskDesc + TaskDescCore<Owned: HasPollFn<Self>> {}
+pub trait AsyncTaskDesc: WakerTaskDesc + TaskDescCore<Owned: HasPollFn<Self> + HasScheduler> {}
 
-impl<D: WakerTaskDesc + TaskDescCore<Owned: HasPollFn<D>>> AsyncTaskDesc for D {}
+impl<D: WakerTaskDesc + TaskDescCore<Owned: HasPollFn<D> + HasScheduler>> AsyncTaskDesc for D {}
 
 impl<D: TaskDescCore<Owned: HasPollFn<D>>> SuspendedTaskToken<D> {
     /// The type-erased poll entry point, non-null once `spawn_now`/
@@ -231,41 +233,48 @@ impl<D: TaskDescCore<Owned: HasPollFn<D>>> RunningTaskToken<D> {
 /// Owner-exclusive fields for [`StacklessOnlyTaskDesc`]: [`DescOwned`] plus
 /// the poll_fn entry point (no `ctx` slot — this flavor never does a real
 /// context switch).
-pub struct StacklessOnlyOwned {
+pub struct StacklessOnlyOwned<S: SchedulerSystem> {
     desc_owned: DescOwned,
-    poll_fn: Option<TaskPollFn<StacklessOnlyTaskDesc>>,
+    scheduler: *const Scheduler<S>,
+    poll_fn: Option<TaskPollFn<StacklessOnlyTaskDesc<S>>>,
 }
 
-impl HasDescOwned for StacklessOnlyOwned {
+impl<S: SchedulerSystem> HasDescOwned for StacklessOnlyOwned<S> {
     fn desc_owned(&self) -> &DescOwned { &self.desc_owned }
     fn desc_owned_mut(&mut self) -> &mut DescOwned { &mut self.desc_owned }
 }
 
-impl HasPollFn<StacklessOnlyTaskDesc> for StacklessOnlyOwned {
-    fn poll_fn(&self) -> Option<TaskPollFn<StacklessOnlyTaskDesc>> { self.poll_fn }
-    fn set_poll_fn(&mut self, f: Option<TaskPollFn<StacklessOnlyTaskDesc>>) { self.poll_fn = f; }
+impl<S: SchedulerSystem> HasScheduler for StacklessOnlyOwned<S> {
+    type System = S;
+    fn scheduler(&self) -> *const Scheduler<S> { self.scheduler }
+    fn set_scheduler(&mut self, scheduler: *const Scheduler<S>) { self.scheduler = scheduler; }
+}
+
+impl<S: SchedulerSystem> HasPollFn<StacklessOnlyTaskDesc<S>> for StacklessOnlyOwned<S> {
+    fn poll_fn(&self) -> Option<TaskPollFn<StacklessOnlyTaskDesc<S>>> { self.poll_fn }
+    fn set_poll_fn(&mut self, f: Option<TaskPollFn<StacklessOnlyTaskDesc<S>>>) { self.poll_fn = f; }
 }
 
 /// Concrete descriptor for `UltAsyncIdentity`-based (stackless-only)
 /// systems: a `spawn_async` task with no real context switch, so no `ctx`
 /// slot exists at all.
-pub struct StacklessOnlyTaskDesc {
-    owned: UnsafeCell<StacklessOnlyOwned>,
+pub struct StacklessOnlyTaskDesc<S: SchedulerSystem> {
+    owned: UnsafeCell<StacklessOnlyOwned<S>>,
     join_state: AtomicUsize,
     is_root: bool,
     waker_refs: AtomicUsize,
     stack: crate::resumable::common::stack::StackMem,
 }
 
-unsafe impl Send for StacklessOnlyTaskDesc {}
-unsafe impl Sync for StacklessOnlyTaskDesc {}
+unsafe impl<S: SchedulerSystem> Send for StacklessOnlyTaskDesc<S> {}
+unsafe impl<S: SchedulerSystem> Sync for StacklessOnlyTaskDesc<S> {}
 
-impl TaskDescCore for StacklessOnlyTaskDesc {
+impl<S: SchedulerSystem> TaskDescCore for StacklessOnlyTaskDesc<S> {
     fn join_state(&self) -> &AtomicUsize { &self.join_state }
     fn is_root(&self) -> bool { self.is_root }
     fn stack_top(&self) -> *mut u8 { self.stack.top() }
-    type Owned = StacklessOnlyOwned;
-    fn owned_cell(&self) -> &UnsafeCell<StacklessOnlyOwned> { &self.owned }
+    type Owned = StacklessOnlyOwned<S>;
+    fn owned_cell(&self) -> &UnsafeCell<StacklessOnlyOwned<S>> { &self.owned }
 
     /// No stackful capability at all, so `SyncJoiner` can never actually be
     /// published (the only writer,
@@ -286,11 +295,11 @@ impl TaskDescCore for StacklessOnlyTaskDesc {
     }
 }
 
-impl WakerTaskDescCore for StacklessOnlyTaskDesc {
+impl<S: SchedulerSystem> WakerTaskDescCore for StacklessOnlyTaskDesc<S> {
     fn waker_refs(&self) -> &AtomicUsize { &self.waker_refs }
 }
 
-impl TaskDescAlloc for StacklessOnlyTaskDesc {
+impl<S: SchedulerSystem> TaskDescAlloc for StacklessOnlyTaskDesc<S> {
     fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> Self {
         StacklessOnlyTaskDesc::alloc_with(stack, has_handle)
     }
@@ -308,20 +317,20 @@ impl TaskDescAlloc for StacklessOnlyTaskDesc {
     }
 }
 
-impl StacklessOnlyTaskDesc {
+impl<S: SchedulerSystem> StacklessOnlyTaskDesc<S> {
     /// Construct a descriptor value with a heap stack. Used by
     /// `spawn_async` (whose "stack" only stores the future — no code runs
     /// on it, but it's allocated the same way regardless).
-    pub(crate) fn alloc(stack_size: usize, has_handle: bool) -> StacklessOnlyTaskDesc {
+    pub(crate) fn alloc(stack_size: usize, has_handle: bool) -> StacklessOnlyTaskDesc<S> {
         use crate::resumable::common::stack::{HeapStack, StackAlloc as _};
         Self::alloc_with(HeapStack::alloc_stack(stack_size).into(), has_handle)
     }
 
     /// Construct a descriptor value with a policy-allocated stack.
-    pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> StacklessOnlyTaskDesc {
+    pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> StacklessOnlyTaskDesc<S> {
         let desc_owned = DescOwned::new();
         StacklessOnlyTaskDesc {
-            owned: UnsafeCell::new(StacklessOnlyOwned { desc_owned, poll_fn: None }),
+            owned: UnsafeCell::new(StacklessOnlyOwned { desc_owned, scheduler: std::ptr::null(), poll_fn: None }),
             is_root: false,
             join_state: AtomicUsize::new(if has_handle { JS_RUNNING } else { JS_DETACHED }),
             waker_refs: AtomicUsize::new(0),
@@ -330,9 +339,9 @@ impl StacklessOnlyTaskDesc {
     }
 
     /// Pseudo-descriptor for a worker's scheduler-loop context.
-    pub(crate) fn new_root() -> StacklessOnlyTaskDesc {
+    pub(crate) fn new_root() -> StacklessOnlyTaskDesc<S> {
         StacklessOnlyTaskDesc {
-            owned: UnsafeCell::new(StacklessOnlyOwned { desc_owned: DescOwned::new(), poll_fn: None }),
+            owned: UnsafeCell::new(StacklessOnlyOwned { desc_owned: DescOwned::new(), scheduler: std::ptr::null(), poll_fn: None }),
             is_root: true,
             join_state: AtomicUsize::new(JS_DETACHED),
             waker_refs: AtomicUsize::new(0),

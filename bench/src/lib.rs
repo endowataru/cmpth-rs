@@ -165,8 +165,8 @@ pub struct AsyncOnlyMarker;
 
 impl cmpth::UltAsyncIdentity for AsyncOnlyMarker {
     type Base = cmpth::OsSystem;
-    type Desc = cmpth::StacklessOnlyTaskDesc;
-    type Deque = cmpth::CrossbeamDeque<cmpth::StacklessOnlyTaskDesc>;
+    type Desc = cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>;
+    type Deque = cmpth::CrossbeamDeque<cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>>;
     type Lookup = cmpth::InlineTlsCurrent;
 
     fn worker_tls_anchor() -> &'static <cmpth::OsSystem as cmpth::ThreadSystem>::ThreadSpecific<cmpth::UltWorker<cmpth::UltAsyncSystem<Self>>> {
@@ -341,10 +341,10 @@ pub fn fib<S: BenchSystem>(n: u64) -> u64 {
 /// its immediate caller, right here).
 pub fn fib_async<S>(n: u64) -> impl std::future::Future<Output = u64> + Send
 where
-    S: cmpth::SchedulerSystem + cmpth::StacklessTaskSystem,
-    S::Desc: cmpth::AsyncTaskDesc,
+    S: cmpth::StacklessSchedulerSystem,
 {
     async move {
+        use cmpth::StacklessTaskSystem as _;
         if n <= 1 {
             return n;
         }
@@ -358,8 +358,7 @@ where
 /// the result.
 pub fn run_fib_async<S>(num_workers: usize, n: u64) -> u64
 where
-    S: cmpth::SchedulerSystem,
-    S::Desc: cmpth::AsyncTaskDesc,
+    S: cmpth::StacklessSchedulerSystem,
 {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;

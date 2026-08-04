@@ -50,7 +50,7 @@ where
     shared.external_queue.on_start(&shared);
 
     let shared2 = Arc::clone(&shared);
-    let scheduler_ptr = Arc::as_ptr(&shared) as *const ();
+    let scheduler_ptr = Arc::as_ptr(&shared);
     let root_cont = fork_parent_first::<S>(Box::new(move || {
         root();
         shared2.finished.store(true, Ordering::Release);

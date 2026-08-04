@@ -10,9 +10,8 @@ use crate::traits::common::TlsSlot;
 use crate::traits::stackful::{JoinHandleLike, ThreadSystem};
 use crate::resumable::common::external_queue::ExternalQueue;
 use crate::resumable::common::scheduler::{recursion_pool_threshold, worker_loop, Scheduler};
-use crate::resumable::stackless::desc::AsyncTaskDesc;
 use crate::resumable::common::pool::{DescPool, DynamicPool};
-use crate::resumable::common::system::SchedulerSystem;
+use crate::resumable::stackless::system::StacklessSchedulerSystem;
 use crate::resumable::stackless::thread::fork_async_parent_first;
 use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
 
@@ -27,13 +26,13 @@ use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
 /// not `S: StackfulSchedulerSystem`), and no current worker exists yet to call
 /// `spawn_async` through. The worker dispatch loop is reused unchanged from
 /// `run` — `Worker::execute` already dispatches through
-/// [`SchedulerSystem::execute`], so a stackless-only system's override
+/// [`SchedulerSystem::execute`](crate::resumable::common::system::SchedulerSystem::execute),
+/// so a stackless-only system's override
 /// (always poll, never switch) is exercised automatically, with no separate
 /// dispatch loop needed here.
 pub fn run_async<S, F>(num_workers: usize, root: F)
 where
-    S: SchedulerSystem,
-    S::Desc: AsyncTaskDesc,
+    S: StacklessSchedulerSystem,
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     assert!(num_workers >= 1, "need at least one worker");
@@ -64,7 +63,7 @@ where
     shared.external_queue.on_start(&shared);
 
     let shared2 = Arc::clone(&shared);
-    let scheduler_ptr = Arc::as_ptr(&shared) as *const ();
+    let scheduler_ptr = Arc::as_ptr(&shared);
     let root_cont = fork_async_parent_first::<S, _>(
         async move {
             root.await;

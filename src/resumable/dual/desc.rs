@@ -7,7 +7,9 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::AtomicUsize;
 
-use crate::resumable::common::desc::{DescOwned, HasDescOwned, TaskDescCore, TaskDescAlloc, decode_join_state, JS_DETACHED, JS_RUNNING};
+use crate::resumable::common::desc::{DescOwned, HasDescOwned, HasScheduler, TaskDescCore, TaskDescAlloc, decode_join_state, JS_DETACHED, JS_RUNNING};
+use crate::resumable::common::scheduler::Scheduler;
+use crate::resumable::common::system::SchedulerSystem;
 use crate::traits::common::JoinState;
 use crate::resumable::stackless::desc::{TaskPollFn, WakerTaskDescCore};
 
@@ -34,17 +36,24 @@ enum TaskDispatch<D> {
 /// `spawn_async` future at once, but which one it is isn't known until the
 /// allocating call site commits (see [`HasCtx::commit_as_ctx`](crate::resumable::stackful::desc::HasCtx::commit_as_ctx)/
 /// [`HasPollFn::commit_as_poll_fn`](crate::resumable::stackless::desc::HasPollFn::commit_as_poll_fn)).
-pub struct DualOwned {
+pub struct DualOwned<S: SchedulerSystem> {
     desc_owned: DescOwned,
-    dispatch: TaskDispatch<DualTaskDesc>,
+    scheduler: *const Scheduler<S>,
+    dispatch: TaskDispatch<DualTaskDesc<S>>,
 }
 
-impl HasDescOwned for DualOwned {
+impl<S: SchedulerSystem> HasDescOwned for DualOwned<S> {
     fn desc_owned(&self) -> &DescOwned { &self.desc_owned }
     fn desc_owned_mut(&mut self) -> &mut DescOwned { &mut self.desc_owned }
 }
 
-impl crate::resumable::stackful::desc::HasCtx for DualOwned {
+impl<S: SchedulerSystem> HasScheduler for DualOwned<S> {
+    type System = S;
+    fn scheduler(&self) -> *const Scheduler<S> { self.scheduler }
+    fn set_scheduler(&mut self, scheduler: *const Scheduler<S>) { self.scheduler = scheduler; }
+}
+
+impl<S: SchedulerSystem> crate::resumable::stackful::desc::HasCtx for DualOwned<S> {
     fn ctx(&self) -> *mut u8 {
         match self.dispatch {
             TaskDispatch::Ctx(ctx) => ctx,
@@ -70,8 +79,8 @@ impl crate::resumable::stackful::desc::HasCtx for DualOwned {
     }
 }
 
-impl crate::resumable::stackless::desc::HasPollFn<DualTaskDesc> for DualOwned {
-    fn poll_fn(&self) -> Option<TaskPollFn<DualTaskDesc>> {
+impl<S: SchedulerSystem> crate::resumable::stackless::desc::HasPollFn<DualTaskDesc<S>> for DualOwned<S> {
+    fn poll_fn(&self) -> Option<TaskPollFn<DualTaskDesc<S>>> {
         match self.dispatch {
             TaskDispatch::PollFn(poll_fn) => poll_fn,
             TaskDispatch::Ctx(_) => {
@@ -81,7 +90,7 @@ impl crate::resumable::stackless::desc::HasPollFn<DualTaskDesc> for DualOwned {
         }
     }
 
-    fn set_poll_fn(&mut self, f: Option<TaskPollFn<DualTaskDesc>>) {
+    fn set_poll_fn(&mut self, f: Option<TaskPollFn<DualTaskDesc<S>>>) {
         match &mut self.dispatch {
             TaskDispatch::PollFn(poll_fn) => *poll_fn = f,
             TaskDispatch::Ctx(_) => {
@@ -104,23 +113,23 @@ impl crate::resumable::stackless::desc::HasPollFn<DualTaskDesc> for DualOwned {
 /// implements every trait at once, since a stackful sync joiner and a
 /// stackless async waker can race to register on the *same* task
 /// regardless of which one the task itself turns out to be.
-pub struct DualTaskDesc {
-    owned: UnsafeCell<DualOwned>,
+pub struct DualTaskDesc<S: SchedulerSystem> {
+    owned: UnsafeCell<DualOwned<S>>,
     join_state: AtomicUsize,
     is_root: bool,
     waker_refs: AtomicUsize,
     stack: crate::resumable::common::stack::StackMem,
 }
 
-unsafe impl Send for DualTaskDesc {}
-unsafe impl Sync for DualTaskDesc {}
+unsafe impl<S: SchedulerSystem> Send for DualTaskDesc<S> {}
+unsafe impl<S: SchedulerSystem> Sync for DualTaskDesc<S> {}
 
-impl TaskDescCore for DualTaskDesc {
+impl<S: SchedulerSystem> TaskDescCore for DualTaskDesc<S> {
     fn join_state(&self) -> &AtomicUsize { &self.join_state }
     fn is_root(&self) -> bool { self.is_root }
     fn stack_top(&self) -> *mut u8 { self.stack.top() }
-    type Owned = DualOwned;
-    fn owned_cell(&self) -> &UnsafeCell<DualOwned> { &self.owned }
+    type Owned = DualOwned<S>;
+    fn owned_cell(&self) -> &UnsafeCell<DualOwned<S>> { &self.owned }
 
     /// A dual descriptor has both stackful and async capability, so its
     /// join protocol can genuinely produce any of the 6 states — the full
@@ -129,11 +138,11 @@ impl TaskDescCore for DualTaskDesc {
     fn decode_join(word: usize) -> JoinState<Self> { decode_join_state(word) }
 }
 
-impl WakerTaskDescCore for DualTaskDesc {
+impl<S: SchedulerSystem> WakerTaskDescCore for DualTaskDesc<S> {
     fn waker_refs(&self) -> &AtomicUsize { &self.waker_refs }
 }
 
-impl TaskDescAlloc for DualTaskDesc {
+impl<S: SchedulerSystem> TaskDescAlloc for DualTaskDesc<S> {
     fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> Self {
         DualTaskDesc::alloc_with(stack, has_handle)
     }
@@ -151,7 +160,7 @@ impl TaskDescAlloc for DualTaskDesc {
     }
 }
 
-impl DualTaskDesc {
+impl<S: SchedulerSystem> DualTaskDesc<S> {
     /// Construct a descriptor value with a heap stack. Used (among other
     /// things) by `spawn_async` (whose "stack" only stores the future — no
     /// code runs on it, but it's allocated the same way regardless).
@@ -162,7 +171,7 @@ impl DualTaskDesc {
     /// call site is responsible for calling `commit_as_ctx`/
     /// `commit_as_poll_fn` immediately afterward, before anything else
     /// touches the descriptor. See `HasCtx::commit_as_ctx`'s doc comment.
-    pub(crate) fn alloc(stack_size: usize, has_handle: bool) -> DualTaskDesc {
+    pub(crate) fn alloc(stack_size: usize, has_handle: bool) -> DualTaskDesc<S> {
         use crate::resumable::common::stack::{HeapStack, StackAlloc as _};
         Self::alloc_with(HeapStack::alloc_stack(stack_size).into(), has_handle)
     }
@@ -170,10 +179,10 @@ impl DualTaskDesc {
     /// Construct a descriptor value with a policy-allocated stack. See
     /// [`DualTaskDesc::alloc`]'s doc comment for the `dispatch`
     /// placeholder-then-commit protocol this also follows.
-    pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> DualTaskDesc {
+    pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> DualTaskDesc<S> {
         let desc_owned = DescOwned::new();
         DualTaskDesc {
-            owned: UnsafeCell::new(DualOwned { desc_owned, dispatch: TaskDispatch::Ctx(std::ptr::null_mut()) }),
+            owned: UnsafeCell::new(DualOwned { desc_owned, scheduler: std::ptr::null(), dispatch: TaskDispatch::Ctx(std::ptr::null_mut()) }),
             is_root: false,
             join_state: AtomicUsize::new(if has_handle { JS_RUNNING } else { JS_DETACHED }),
             waker_refs: AtomicUsize::new(0),
@@ -186,9 +195,9 @@ impl DualTaskDesc {
     /// itself, resumed via a real context switch back into it — never a
     /// `spawn_async` future — so unlike `alloc`/`alloc_with` there is no
     /// per-call-site ambiguity to resolve here.
-    pub(crate) fn new_root() -> DualTaskDesc {
+    pub(crate) fn new_root() -> DualTaskDesc<S> {
         DualTaskDesc {
-            owned: UnsafeCell::new(DualOwned { desc_owned: DescOwned::new(), dispatch: TaskDispatch::Ctx(std::ptr::null_mut()) }),
+            owned: UnsafeCell::new(DualOwned { desc_owned: DescOwned::new(), scheduler: std::ptr::null(), dispatch: TaskDispatch::Ctx(std::ptr::null_mut()) }),
             is_root: true,
             join_state: AtomicUsize::new(JS_DETACHED),
             waker_refs: AtomicUsize::new(0),

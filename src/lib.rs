@@ -53,7 +53,7 @@ pub use resumable::common::sync::{DualBarrier as UltDualBarrier, DualMutex as Ul
 pub use resumable::stackful::sync::{delegator, Producer as DelegatorProducer};
 pub use resumable::common::system::SchedulerSystem;
 pub use resumable::stackful::system::{StackfulSchedulerSystem, StackfulTaskSystem, UltIdentity};
-pub use resumable::stackless::system::{StacklessTaskSystem, UltAsyncIdentity, UltAsyncSystem};
+pub use resumable::stackless::system::{StacklessSchedulerSystem, StacklessTaskSystem, UltAsyncIdentity, UltAsyncSystem};
 pub use resumable::stackful::tls::UltTls;
 pub use resumable::common::worker::{LocalQueue, TaskPool, UltWorker, Worker, current_worker};
 pub use resumable::stackful::worker::ContextSwitcher;
@@ -83,11 +83,11 @@ pub struct DefaultDualTaskSystem;
 
 impl resumable::common::system::SchedulerSystem for DefaultDualTaskSystem {
     type Base  = OsSystem;
-    type Desc  = resumable::dual::desc::DualTaskDesc;
-    type Deque = CrossbeamDeque<resumable::dual::desc::DualTaskDesc>;
-    type ExternalQueue   = resumable::common::external_queue::StealPathQueue<resumable::dual::desc::DualTaskDesc>;
-    type Pool            = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc, resumable::common::stack::HeapStack>;
-    type AsyncPool       = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc, resumable::common::stack::HeapStack>;
+    type Desc  = resumable::dual::desc::DualTaskDesc<Self>;
+    type Deque = CrossbeamDeque<resumable::dual::desc::DualTaskDesc<Self>>;
+    type ExternalQueue   = resumable::common::external_queue::StealPathQueue<resumable::dual::desc::DualTaskDesc<Self>>;
+    type Pool            = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc<Self>, resumable::common::stack::HeapStack>;
+    type AsyncPool       = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc<Self>, resumable::common::stack::HeapStack>;
     const ASYNC_POOL_SIZE: usize = 512;
     type RecursionPool   = resumable::common::pool::ThresholdPool<resumable::common::pool::BlockPool>;
     type Lookup          = resumable::common::lookup::TlsCurrent;
@@ -101,15 +101,15 @@ impl resumable::common::system::SchedulerSystem for DefaultDualTaskSystem {
     // async task, so dispatch needs the poll_fn check (see execute_dual's
     // doc comment / StackfulSchedulerSystem::pop_or_root below for why this
     // can't just be the stackful-only default).
-    fn execute(wk: &UltWorker<Self>, cont: SuspendedTaskToken<resumable::dual::desc::DualTaskDesc>) {
+    fn execute(wk: &UltWorker<Self>, cont: SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>) {
         resumable::dual::worker::execute_dual(wk, cont)
     }
 
-    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut resumable::dual::desc::DualTaskDesc) {
+    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut resumable::dual::desc::DualTaskDesc<Self>) {
         unsafe { resumable::dual::worker::free_finished_desc_dual(wk, desc) }
     }
 
-    fn wake_async_joiner(desc: *mut resumable::dual::desc::DualTaskDesc) {
+    fn wake_async_joiner(desc: *mut resumable::dual::desc::DualTaskDesc<Self>) {
         unsafe { resumable::stackless::waker::try_wake_async::<Self>(desc) };
     }
 }
@@ -121,7 +121,7 @@ impl resumable::stackful::system::StackfulSchedulerSystem for DefaultDualTaskSys
 
     type SuspendedThread = resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>;
 
-    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedTaskToken<resumable::dual::desc::DualTaskDesc> {
+    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>> {
         resumable::dual::worker::pop_or_root_dual(wk)
     }
 }
@@ -159,11 +159,11 @@ pub struct DefaultNestedDualTaskSystem;
 
 impl resumable::common::system::SchedulerSystem for DefaultNestedDualTaskSystem {
     type Base  = DefaultDualTaskSystem;
-    type Desc  = resumable::dual::desc::DualTaskDesc;
-    type Deque = CrossbeamDeque<resumable::dual::desc::DualTaskDesc>;
-    type ExternalQueue   = resumable::common::external_queue::StealPathQueue<resumable::dual::desc::DualTaskDesc>;
-    type Pool            = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc, resumable::common::stack::HeapStack>;
-    type AsyncPool       = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc, resumable::common::stack::HeapStack>;
+    type Desc  = resumable::dual::desc::DualTaskDesc<Self>;
+    type Deque = CrossbeamDeque<resumable::dual::desc::DualTaskDesc<Self>>;
+    type ExternalQueue   = resumable::common::external_queue::StealPathQueue<resumable::dual::desc::DualTaskDesc<Self>>;
+    type Pool            = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc<Self>, resumable::common::stack::HeapStack>;
+    type AsyncPool       = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc<Self>, resumable::common::stack::HeapStack>;
     const ASYNC_POOL_SIZE: usize = 512;
     type RecursionPool   = resumable::common::pool::ThresholdPool<resumable::common::pool::BlockPool>;
     type Lookup          = resumable::common::lookup::TlsCurrent;
@@ -173,15 +173,15 @@ impl resumable::common::system::SchedulerSystem for DefaultNestedDualTaskSystem 
         TlsSlot::from_anchor(&A)
     }
 
-    fn execute(wk: &UltWorker<Self>, cont: SuspendedTaskToken<resumable::dual::desc::DualTaskDesc>) {
+    fn execute(wk: &UltWorker<Self>, cont: SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>) {
         resumable::dual::worker::execute_dual(wk, cont)
     }
 
-    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut resumable::dual::desc::DualTaskDesc) {
+    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut resumable::dual::desc::DualTaskDesc<Self>) {
         unsafe { resumable::dual::worker::free_finished_desc_dual(wk, desc) }
     }
 
-    fn wake_async_joiner(desc: *mut resumable::dual::desc::DualTaskDesc) {
+    fn wake_async_joiner(desc: *mut resumable::dual::desc::DualTaskDesc<Self>) {
         unsafe { resumable::stackless::waker::try_wake_async::<Self>(desc) };
     }
 }
@@ -193,7 +193,7 @@ impl resumable::stackful::system::StackfulSchedulerSystem for DefaultNestedDualT
 
     type SuspendedThread = resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>;
 
-    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedTaskToken<resumable::dual::desc::DualTaskDesc> {
+    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>> {
         resumable::dual::worker::pop_or_root_dual(wk)
     }
 }
@@ -245,8 +245,8 @@ pub struct DefaultStackfulOnlyTaskSystem;
 impl UltIdentity for DefaultStackfulOnlyTaskSystem {
     type Base = OsSystem;
     type Ctx = NativeContext;
-    type Desc = resumable::stackful::desc::StackfulOnlyTaskDesc;
-    type Deque = CrossbeamDeque<resumable::stackful::desc::StackfulOnlyTaskDesc>;
+    type Desc = resumable::stackful::desc::StackfulOnlyTaskDesc<Self>;
+    type Deque = CrossbeamDeque<resumable::stackful::desc::StackfulOnlyTaskDesc<Self>>;
     type Alloc = HeapStack;
     type Lookup = TlsCurrent;
 
@@ -265,8 +265,8 @@ pub struct DefaultStacklessOnlyMarker;
 
 impl resumable::stackless::system::UltAsyncIdentity for DefaultStacklessOnlyMarker {
     type Base = OsSystem;
-    type Desc = resumable::stackless::desc::StacklessOnlyTaskDesc;
-    type Deque = CrossbeamDeque<resumable::stackless::desc::StacklessOnlyTaskDesc>;
+    type Desc = resumable::stackless::desc::StacklessOnlyTaskDesc<UltAsyncSystem<Self>>;
+    type Deque = CrossbeamDeque<resumable::stackless::desc::StacklessOnlyTaskDesc<UltAsyncSystem<Self>>>;
     type Lookup = InlineTlsCurrent;
 
     fn worker_tls_anchor()

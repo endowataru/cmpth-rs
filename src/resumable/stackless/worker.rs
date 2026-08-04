@@ -8,9 +8,10 @@ use std::task::{RawWaker, Waker};
 
 use crate::resumable::common::worker::{LocalQueue, UltWorker};
 use crate::resumable::common::system::SchedulerSystem;
+use crate::resumable::stackless::system::StacklessSchedulerSystem;
 use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken};
 use crate::resumable::stackless::desc::WakerTaskDesc;
-use crate::resumable::stackless::desc::{AsyncTaskDesc, TaskPollFn, TaskPollResult};
+use crate::resumable::stackless::desc::{TaskPollFn, TaskPollResult};
 use crate::resumable::common::pool::DescPool;
 
 /// Drive one async task's poll to completion or a suspend point. Called
@@ -40,8 +41,7 @@ pub(crate) fn run_async_poll<S>(
     mut desc: *mut S::Desc,
     mut poll_fn: TaskPollFn<S::Desc>,
 ) where
-    S: SchedulerSystem,
-    S::Desc: AsyncTaskDesc,
+    S: StacklessSchedulerSystem,
 {
     // Whatever this worker was polling (if anything) before this call —
     // restored once the chain below is done. Unlike the pre-2026-07-30
@@ -121,8 +121,7 @@ pub(crate) fn run_async_poll<S>(
 /// there is nothing else it could be.
 pub fn execute_async<S>(wk: &UltWorker<S>, cont: SuspendedTaskToken<S::Desc>)
 where
-    S: SchedulerSystem,
-    S::Desc: AsyncTaskDesc,
+    S: StacklessSchedulerSystem,
 {
     let desc = cont.desc();
     let poll_fn = cont.poll_fn()

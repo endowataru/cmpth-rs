@@ -26,11 +26,7 @@ pub trait SchedulerSystem: Sized + Send + Sync + 'static {
     /// The threading system this scheduler runs on.
     type Base: ThreadSystem;
 
-    /// Task descriptor type for this system. Every concrete system today
-    /// sets this to `DualTaskDesc`; the associated type exists so
-    /// `SuspendedTaskToken`/`WorkerDeque`/`DescPool`/the worker traits never
-    /// hardcode a concrete descriptor, in preparation for narrower
-    /// stackful-only/stackless-only descriptor types later.
+    /// Task descriptor type for this system.
     type Desc: TaskDescAlloc;
 
     /// Work-stealing deque implementation.

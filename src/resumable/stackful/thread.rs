@@ -13,7 +13,7 @@ use crate::traits::stackful::{ContextPolicy, JoinHandleLike, SyncJoinerTaskDesc,
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::desc::{HasDescOwned, JoinState, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskDescAlloc, publish_finished_raw, read_join_state_raw};
+use crate::resumable::common::desc::{HasDescOwned, HasScheduler, JoinState, SuspendedTaskToken, TaskDesc, TaskDescAlloc, TaskDescCore, publish_finished_raw, read_join_state_raw};
 use crate::resumable::stackful::desc::{HasCtx, StackfulTaskDesc};
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, Worker};
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulWorker};
@@ -45,7 +45,7 @@ where
         // never been wrapped in a token before — trivially exclusive.
         let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
         token.commit_as_ctx();
-        token.desc_owned_mut().scheduler = wk.shared.get() as *const ();
+        token.set_scheduler(wk.shared.get());
         let stack_top = token.as_desc().stack_top() as usize;
         let _ = token.into_raw();
         stack_top
@@ -98,9 +98,11 @@ where
 /// Parent-first fork: package `body` as a ready continuation without running
 /// it.  Used for the root task of `run` and by [`PollerUltQueue::on_start`].
 ///
-/// `scheduler` is a type-erased `*const Scheduler<S>` stored on the
-/// descriptor for external-thread wake support.
-pub(crate) fn fork_parent_first<S: StackfulSchedulerSystem>(body: ErasedBody, scheduler: *const ()) -> SuspendedTaskToken<S::Desc> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+/// `scheduler` is stored on the descriptor for external-thread wake support.
+pub(crate) fn fork_parent_first<S: StackfulSchedulerSystem>(body: ErasedBody, scheduler: *const crate::resumable::common::scheduler::Scheduler<S>) -> SuspendedTaskToken<S::Desc>
+where
+    <S as SchedulerSystem>::Desc: StackfulTaskDesc,
+{
     use crate::resumable::common::stack::StackAlloc as _;
     // Allocated directly (not through S::Pool), like `fork_async_parent_first`'s
     // one-off root async descriptor: this runs once per `run`/`PollerUltQueue::on_start`
@@ -114,7 +116,7 @@ pub(crate) fn fork_parent_first<S: StackfulSchedulerSystem>(body: ErasedBody, sc
     // wrapped in a token before — trivially exclusive.
     let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
     token.commit_as_ctx();
-    token.desc_owned_mut().scheduler = scheduler;
+    token.set_scheduler(scheduler);
     let arg = Box::into_raw(Box::new(body));
     let ctx = unsafe {
         S::Ctx::make_context(token.as_desc().stack_top(), task_entry::<S>, arg as *mut ())

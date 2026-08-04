@@ -22,7 +22,7 @@ use crate::traits::stackful::{ContextPolicy, ThreadSystem};
 use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::system::SchedulerSystem;
-use crate::resumable::common::desc::SuspendedTaskToken;
+use crate::resumable::common::desc::{HasScheduler, SuspendedTaskToken, TaskDescCore};
 use crate::resumable::common::stack::StackAlloc;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::stackful::suspended::StackfulOnlyResumableCore;
@@ -41,9 +41,19 @@ pub use crate::traits::stackful::StackfulTaskSystem;
 /// descriptor type (no saved context to switch into) cannot satisfy this
 /// trait at all, which is exactly the point: it makes "this system can run
 /// real ULTs" a checkable, compile-time fact instead of a convention.
-pub trait StackfulSchedulerSystem: SchedulerSystem
-where
-    Self::Desc: StackfulTaskDesc,
+///
+/// Both `Desc: StackfulTaskDesc` and `Owned: HasScheduler<System = Self>`
+/// are nested directly in the supertrait bound list (`SchedulerSystem<Desc:
+/// ...>`), not a separate `where`-clause — that's what lets every function
+/// merely bounded `S: StackfulSchedulerSystem` get both for free, with no
+/// need to restate either. A `where`-clause form (`SchedulerSystem where
+/// Self::Desc: ...`) does *not* propagate this way (verified empirically,
+/// both for a `where`-clause on this trait's own declaration and for one on
+/// `SchedulerSystem::Desc`'s declaration in a different trait) — only
+/// associated-type bounds nested in a supertrait's own bound list are
+/// treated as real implied bounds.
+pub trait StackfulSchedulerSystem:
+    SchedulerSystem<Desc: StackfulTaskDesc + TaskDescCore<Owned: HasScheduler<System = Self>>>
 {
     /// Context-switch implementation.
     type Ctx: ContextPolicy;
@@ -157,8 +167,8 @@ impl<S: crate::traits::scoped::ScopedStackfulTaskSystem + ThreadSystem> crate::t
 /// impl cmpth::UltIdentity for MySystem {
 ///     type Base = cmpth::OsSystem;
 ///     type Ctx = cmpth::NativeContext;
-///     type Desc = cmpth::StackfulOnlyTaskDesc;
-///     type Deque = cmpth::CrossbeamDeque<cmpth::StackfulOnlyTaskDesc>;
+///     type Desc = cmpth::StackfulOnlyTaskDesc<Self>;
+///     type Deque = cmpth::CrossbeamDeque<cmpth::StackfulOnlyTaskDesc<Self>>;
 ///     type Alloc = cmpth::HeapStack;
 ///     type Lookup = cmpth::TlsCurrent;
 ///
@@ -184,12 +194,21 @@ pub trait UltIdentity: Sized + Send + Sync + 'static {
     type Ctx: ContextPolicy;
 
     /// Task descriptor type. Most implementors want
-    /// [`StackfulOnlyTaskDesc`](crate::resumable::stackful::desc::StackfulOnlyTaskDesc)
+    /// [`StackfulOnlyTaskDesc<Self>`](crate::resumable::stackful::desc::StackfulOnlyTaskDesc)
     /// (no unused `poll_fn` slot); a system that also needs `spawn_async`/
     /// dual capability on the same tasks wants
-    /// [`DualTaskDesc`](crate::resumable::dual::desc::DualTaskDesc)
-    /// instead.
-    type Desc: crate::resumable::common::desc::TaskDescAlloc + StackfulTaskDesc;
+    /// [`DualTaskDesc<Self>`](crate::resumable::dual::desc::DualTaskDesc)
+    /// instead. `where Self: SchedulerSystem` for the same reason `Lookup`/
+    /// `worker_tls_anchor` need it (see this trait's own doc comment) —
+    /// `StackfulOnlyTaskDesc<Self>`'s `Owned: HasCtx + HasScheduler` bound
+    /// would otherwise require `Self: SchedulerSystem` to typecheck the
+    /// associated type itself, before the blanket impl proving it is done
+    /// being checked.
+    type Desc: crate::resumable::common::desc::TaskDescAlloc
+        + StackfulTaskDesc
+        + TaskDescCore<Owned: HasScheduler<System = Self>>
+    where
+        Self: SchedulerSystem;
 
     /// Work-stealing deque implementation.
     type Deque: WorkerDeque<Self::Desc>;
@@ -248,6 +267,7 @@ impl<M: UltIdentity> SchedulerSystem for M {
 impl<M: UltIdentity> StackfulSchedulerSystem for M
 where
     <M as SchedulerSystem>::Desc: StackfulTaskDesc,
+    <<M as SchedulerSystem>::Desc as TaskDescCore>::Owned: HasScheduler<System = M>,
 {
     type Ctx = M::Ctx;
     type StackAlloc = M::Alloc;

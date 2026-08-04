@@ -24,10 +24,7 @@ use crate::traits::scoped::ScopedStacklessTaskSystem;
 // `resumable::stackless::system::StacklessTaskSystem`.
 pub use crate::traits::stackless::StacklessTaskSystem;
 
-impl<S: SchedulerSystem> StacklessTaskSystem for S
-where
-    S::Desc: AsyncTaskDesc,
-{
+impl<S: StacklessSchedulerSystem> StacklessTaskSystem for S {
     type SpawnHandle<T: Send + 'static> = crate::resumable::common::thread::JoinHandle<S, T>;
 
     fn spawn<T, F, Mk>(mk: Mk) -> impl Future<Output = Self::SpawnHandle<T>> + Send
@@ -57,10 +54,7 @@ where
 /// impl doesn't need a `StacklessTaskSystem` bound of its own — the two
 /// blankets are independent, both satisfied by the same `SchedulerSystem +
 /// AsyncTaskDesc` condition.
-impl<S: SchedulerSystem> ScopedStacklessTaskSystem for S
-where
-    S::Desc: AsyncTaskDesc,
-{
+impl<S: StacklessSchedulerSystem> ScopedStacklessTaskSystem for S {
     fn run_async<F>(num_workers: usize, root: F)
     where
         F: Future<Output = ()> + Send + 'static,
@@ -81,6 +75,35 @@ where
         let rb = mk_b().await;
         (h.await, rb)
     }
+}
+
+/// Capability trait mirroring
+/// [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem)'s
+/// role on the stackless side: blanket-derived for any `SchedulerSystem`
+/// whose descriptor is `AsyncTaskDesc`, purely so that
+/// `HasScheduler<System = Self>` (see that trait's doc comment for why this
+/// specific nested-supertrait-bound shape is needed) reaches every
+/// stackless leaf function (`spawn_now`, `fork_async_parent_first`,
+/// `try_wake_async`) merely bounded `S: StacklessSchedulerSystem`, with no
+/// need to restate it. Unlike `StackfulSchedulerSystem`, this trait has no
+/// associated types of its own to assemble — it exists solely as a fold
+/// point for this bound.
+pub trait StacklessSchedulerSystem:
+    SchedulerSystem<
+        Desc: AsyncTaskDesc
+                  + crate::resumable::common::desc::TaskDescCore<
+                      Owned: crate::resumable::common::desc::HasScheduler<System = Self>,
+                  >,
+    >
+{
+}
+
+impl<S: SchedulerSystem> StacklessSchedulerSystem for S
+where
+    S::Desc: AsyncTaskDesc,
+    <S::Desc as crate::resumable::common::desc::TaskDescCore>::Owned:
+        crate::resumable::common::desc::HasScheduler<System = S>,
+{
 }
 
 // ---------------------------------------------------------------------------
@@ -137,8 +160,8 @@ where
 ///
 /// impl cmpth::UltAsyncIdentity for MyAsyncMarker {
 ///     type Base = cmpth::OsSystem;
-///     type Desc = cmpth::StacklessOnlyTaskDesc;
-///     type Deque = cmpth::CrossbeamDeque<cmpth::StacklessOnlyTaskDesc>;
+///     type Desc = cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>;
+///     type Deque = cmpth::CrossbeamDeque<cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>>;
 ///     type Lookup = cmpth::InlineTlsCurrent;
 ///
 ///     fn worker_tls_anchor() -> &'static <cmpth::OsSystem as ThreadSystem>::ThreadSpecific<cmpth::UltWorker<cmpth::UltAsyncSystem<Self>>> {
@@ -159,12 +182,20 @@ pub trait UltAsyncIdentity: Sized + Send + Sync + 'static {
     type Base: ThreadSystem;
 
     /// Task descriptor type. Most implementors want
-    /// [`StacklessOnlyTaskDesc`](crate::resumable::stackless::desc::StacklessOnlyTaskDesc)
+    /// [`StacklessOnlyTaskDesc<UltAsyncSystem<Self>>`](crate::resumable::stackless::desc::StacklessOnlyTaskDesc)
     /// (no unused `ctx` slot); a system that also needs stackful `spawn`/
     /// dual capability on the same tasks wants
-    /// [`DualTaskDesc`](crate::resumable::dual::desc::DualTaskDesc)
-    /// instead.
-    type Desc: crate::resumable::common::desc::TaskDescAlloc + AsyncTaskDesc;
+    /// [`DualTaskDesc<UltAsyncSystem<Self>>`](crate::resumable::dual::desc::DualTaskDesc)
+    /// instead. `where UltAsyncSystem<Self>: SchedulerSystem` for the same
+    /// reason `Lookup`/`worker_tls_anchor` need it (see this trait's own
+    /// doc comment).
+    type Desc: crate::resumable::common::desc::TaskDescAlloc
+        + AsyncTaskDesc
+        + crate::resumable::common::desc::TaskDescCore<
+            Owned: crate::resumable::common::desc::HasScheduler<System = UltAsyncSystem<Self>>,
+        >
+    where
+        UltAsyncSystem<Self>: SchedulerSystem;
 
     /// Work-stealing deque implementation.
     type Deque: WorkerDeque<Self::Desc>;
