@@ -13,7 +13,7 @@ use crate::traits::stackful::{ContextPolicy, JoinHandleLike, SyncJoinerTaskDesc,
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::desc::{HasDescOwned, HasScheduler, JoinState, SuspendedTaskToken, TaskDesc, TaskDescAlloc, TaskDescCore, publish_finished_raw, read_join_state_raw};
+use crate::resumable::common::desc::{HasScheduler, JoinState, SuspendedTaskToken, TaskDesc, TaskDescAlloc, TaskDescCore, publish_finished_raw, read_join_state_raw};
 use crate::resumable::stackful::desc::{HasCtx, StackfulTaskDesc};
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, Worker};
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulWorker};
@@ -134,7 +134,13 @@ unsafe extern "C" fn task_entry<S: StackfulSchedulerSystem>(transfer: Transfer, 
     // worker, so re-derive which one we're on now.
     let wk = UltWorker::<S>::current().expect("cmpth: worker vanished");
     debug_assert!(std::ptr::eq(wk.cur_task(), desc));
-    wk.cur_task_token_mut().desc_owned_mut().result = Some(result);
+    // `task_entry` only ever runs a `fork_parent_first` body (`run`'s root
+    // task, `PollerUltQueue`'s poller ULT) — both always detached (no
+    // `JoinHandle`, see `fork_parent_first`'s `has_handle: false`), so
+    // nobody is ever positioned to collect this result. Drop it here rather
+    // than storing it on the descriptor only to have `reinit`/`free_task`
+    // drop it later unread.
+    drop(result);
     exit(wk, wk.cur_task_ref())
 }
 
@@ -205,8 +211,12 @@ fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
     }
 }
 
-/// Exit for parent-first tasks (`fork_parent_first`): the result, if kept,
-/// is already in `desc.result`.  Same state machine as `exit_with_result`.
+/// Exit for parent-first tasks (`fork_parent_first`): `task_entry` already
+/// dropped the result before calling this (see its own comment) — every
+/// `fork_parent_first` task starts, and stays, `Detached`, so the
+/// `SyncJoiner`/running-with-a-handle arms below are unreachable in
+/// practice for this caller, kept only because this shares the same state
+/// machine as `exit_with_result`.
 fn exit<S: StackfulSchedulerSystem>(wk: &UltWorker<S>, desc: &S::Desc) -> ! where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
     let desc_ptr = desc as *const S::Desc as *mut S::Desc;
     match read_join_state_raw(desc) {
@@ -219,7 +229,6 @@ fn exit<S: StackfulSchedulerSystem>(wk: &UltWorker<S>, desc: &S::Desc) -> ! wher
                 desc.commit_finished();
             })
         }
-        // Root tasks start in this state; desc.result drops with the desc.
         JoinState::Detached => wk.exit_to_sched(move |wk| unsafe { wk.free_task(desc_ptr) }),
         _ => wk.exit_to_sched(move |wk| {
             match publish_finished_raw(desc) {

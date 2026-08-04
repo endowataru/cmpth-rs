@@ -242,7 +242,6 @@ impl<S: SchedulerSystem> StackfulOnlyTaskDesc<S> {
         debug_assert!(!self.is_root);
         let owned = self.owned.get_mut();
         owned.ctx = std::ptr::null_mut();
-        owned.desc_owned.result = None;
         owned.desc_owned.tls = None;
         *self.join_state.get_mut() = if has_handle { JS_RUNNING } else { JS_DETACHED };
     }

@@ -226,7 +226,6 @@ impl<S: SchedulerSystem> DualTaskDesc<S> {
             TaskDispatch::Ctx(ctx) => *ctx = std::ptr::null_mut(),
             TaskDispatch::PollFn(poll_fn) => *poll_fn = None,
         }
-        owned.desc_owned.result = None;
         owned.desc_owned.tls = None;
         *self.join_state.get_mut() = if has_handle { JS_RUNNING } else { JS_DETACHED };
         *self.waker_refs.get_mut() = 0;
