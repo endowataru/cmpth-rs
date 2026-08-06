@@ -7,11 +7,10 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::AtomicUsize;
 
-use crate::resumable::common::desc::{DescOwned, HasDescOwned, HasScheduler, TaskDescCore, TaskDescAlloc, decode_join_state, JS_DETACHED, JS_RUNNING};
+use crate::resumable::common::desc::{DescOwned, HasDescOwned, HasScheduler, SuspendedTaskToken, TaskDescCore, TaskDescAlloc, JS_DETACHED, JS_RUNNING};
 use crate::resumable::common::scheduler::Scheduler;
 use crate::resumable::common::system::SchedulerSystem;
-use crate::traits::common::JoinState;
-use crate::resumable::stackless::desc::{TaskPollFn, WakerTaskDescCore};
+use crate::resumable::stackless::desc::{TaskPollFn, WakerTaskDesc, WakerTaskDescCore};
 
 /// A dual task is never both a real ULT and a `spawn_async` future — this
 /// enum makes that exclusivity a type-level fact instead of an implicit
@@ -131,11 +130,14 @@ impl<S: SchedulerSystem> TaskDescCore for DualTaskDesc<S> {
     type Owned = DualOwned<S>;
     fn owned_cell(&self) -> &UnsafeCell<DualOwned<S>> { &self.owned }
 
-    /// A dual descriptor has both stackful and async capability, so its
-    /// join protocol can genuinely produce any of the 6 states — the full
-    /// union, unchanged.
-    type JoinOutcome = JoinState<Self>;
-    fn decode_join(word: usize) -> JoinState<Self> { decode_join_state(word) }
+    // A dual descriptor has both stackful and async capability, so
+    // `finish_and_settle`'s `AsyncJoiner` arm is genuinely reachable here —
+    // override `TaskDescCore`'s no-op default with the real claim,
+    // delegating to `WakerTaskDesc::try_claim_parked`.
+    fn try_claim_async_joiner(joiner: *mut Self) -> Option<SuspendedTaskToken<Self>> {
+        let j_ref: &Self = unsafe { &*joiner };
+        j_ref.try_claim_parked()
+    }
 }
 
 impl<S: SchedulerSystem> WakerTaskDescCore for DualTaskDesc<S> {

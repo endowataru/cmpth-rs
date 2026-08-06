@@ -6,7 +6,7 @@ use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::stackful::worker::StackfulWorker;
 use crate::traits::ThreadSystem;
-use crate::resumable::common::worker::Worker;
+use crate::resumable::common::worker::WorkerOps;
 
 use super::delegator::{Delegator, DelegatorNode, SyncQueue};
 

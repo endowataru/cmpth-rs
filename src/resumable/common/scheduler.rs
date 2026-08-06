@@ -9,8 +9,8 @@ use std::sync::atomic::Ordering;
 use crate::traits::common::TlsSlot;
 use crate::traits::stackful::ThreadSystem;
 use crate::resumable::common::external_queue::ExternalQueue;
-use crate::resumable::common::system::SchedulerSystem;
-use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
+use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
+use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
 
 /// State shared by all workers of one scheduler instance. Base-level
 /// (`S: SchedulerSystem`): shared by stackful-only, dual, and (eventually)
@@ -45,7 +45,10 @@ pub(crate) fn recursion_pool_threshold<S: SchedulerSystem>() -> Layout {
 unsafe impl<S: SchedulerSystem> Send for Scheduler<S> {}
 unsafe impl<S: SchedulerSystem> Sync for Scheduler<S> {}
 
-pub(crate) fn worker_loop<S: SchedulerSystem>(wk: &UltWorker<S>) {
+pub(crate) fn worker_loop<S>(wk: &UltWorker<S>)
+where
+    S: DescScheduler,
+{
     S::worker_tls().set(wk as *const UltWorker<S> as *mut UltWorker<S>);
     // SAFETY: `root_desc` is embedded by value in `UltWorker` and only ever
     // reachable through `wk.root_desc() -> &S::Desc` (never a token) until

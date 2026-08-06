@@ -9,7 +9,7 @@ use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::common::desc::SuspendedTaskToken;
 use crate::interchange::AtomicSlot;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
-use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
+use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulWorker};
 
 /// Raw parked-continuation storage: a single atomic slot, the publication

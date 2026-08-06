@@ -61,7 +61,7 @@ impl<S: StackfulSchedulerSystem, T: Send> Drop for McsMutexGuard<'_, S, T> where
         while next.is_null() {
             spins = spins.wrapping_add(1);
             if spins & 0x3F == 0 {
-                use crate::resumable::common::worker::Worker as _;
+                use crate::resumable::common::worker::WorkerOps as _;
                 if let Some(wk) = crate::resumable::common::worker::UltWorker::<S>::current() {
                     wk.yield_now();
                 }

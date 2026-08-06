@@ -170,7 +170,7 @@ impl cmpth::UltIdentity for MySystem {
     type Base = cmpth::OsSystem;                          // what the workers run on
     type Ctx = cmpth::NativeContext;                       // context-switch implementation
     type Desc = cmpth::StackfulOnlyTaskDesc<Self>;               // task descriptor
-    type Deque = cmpth::CrossbeamDeque<cmpth::StackfulOnlyTaskDesc<Self>>; // work-stealing deque
+    type Deque = cmpth::CrossbeamDeque<cmpth::SuspendedTaskToken<cmpth::StackfulOnlyTaskDesc<Self>>>; // work-stealing deque
     type Alloc = cmpth::HeapStack;                         // stack allocator
     type Lookup = cmpth::TlsCurrent;                       // current-worker lookup
 

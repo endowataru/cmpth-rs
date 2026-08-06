@@ -4,21 +4,21 @@
 //! see `common::thread` for the handle type itself).
 
 use std::alloc::Layout;
+use std::cell::Cell;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use crate::resumable::common::system::SchedulerSystem;
+use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
 use crate::resumable::stackless::system::StacklessSchedulerSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
-use crate::resumable::common::desc::{HasScheduler, JoinState, SuspendedTaskToken, TaskDescAlloc, TaskDescCore, publish_finished_raw};
-use crate::resumable::common::waker::WakeOutcome;
+use crate::resumable::common::desc::{HasScheduler, SuspendedTaskToken, TaskDesc, TaskDescAlloc, TaskDescCore, TaskExitSink};
 use crate::resumable::stackless::desc::WakerTaskDesc;
 use crate::resumable::stackless::desc::{AsyncTaskDesc, HasPollFn, TaskPollResult};
 use crate::resumable::common::pool::{DescPool, DynamicPool};
-use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
+use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
 
 // ---------------------------------------------------------------------------
 // .await-ing a JoinHandle
@@ -62,7 +62,14 @@ impl<S: StacklessSchedulerSystem, T: Send + 'static> Future for JoinHandle<S, T>
             Some(wk) => {
                 let joiner = wk.polling_async.get();
                 if !joiner.is_null() {
-                    unsafe { this.desc_ref().try_register_async_joiner(joiner) }
+                    // SAFETY: `joiner` is the descriptor this worker is
+                    // currently, synchronously, driving via
+                    // `run_async_poll` — exclusively ours to hand off
+                    // through this registration for as long as that poll
+                    // is in progress (same contract the old raw-pointer
+                    // signature spelled out at this call site).
+                    let token = unsafe { SuspendedTaskToken::from_raw(joiner) };
+                    this.desc_ref().try_register_async_joiner(token).is_ok()
                 } else {
                     this.desc_ref().try_register_waker(cx.waker().clone())
                 }
@@ -248,13 +255,16 @@ where
 /// inside `poll`. Kept as a crate-owned type (not `std::future::ready`, whose
 /// `poll` is fixed and can never be changed to return `Poll::Pending`) so a
 /// future work-first rewrite still has a `poll` body of its own to modify.
-pub struct SpawnAction<S: SchedulerSystem, T> {
+// Bound carried on the struct itself (not just the impls) because it holds
+// a `JoinHandle<S, T>` field, and `JoinHandle` itself now requires
+// `DescScheduler` -- see that struct's own comment.
+pub struct SpawnAction<S: DescScheduler, T> {
     handle: Option<JoinHandle<S, T>>,
 }
 
-impl<S: SchedulerSystem, T> Unpin for SpawnAction<S, T> {}
+impl<S: DescScheduler, T> Unpin for SpawnAction<S, T> {}
 
-impl<S: SchedulerSystem, T> Future for SpawnAction<S, T> {
+impl<S: DescScheduler, T> Future for SpawnAction<S, T> {
     type Output = JoinHandle<S, T>;
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<JoinHandle<S, T>> {
@@ -263,22 +273,69 @@ impl<S: SchedulerSystem, T> Future for SpawnAction<S, T> {
     }
 }
 
+/// [`TaskExitSink`] for [`poll_spawned_task`]'s completion: capture the
+/// continuation to resume (if any) rather than acting on it immediately, so
+/// the caller can still take the symmetric-transfer fast path
+/// ([`TaskPollResult::ReadyAndContinue`]) for a same-system async joiner
+/// instead of an unconditional deque round trip. Dispatched purely on
+/// `cont.is_poll_fn_dispatch()`, not on which join-state arm produced
+/// `cont` (that distinction is exactly what [`TaskExitSink`] hides): a real
+/// ULT continuation (a stackful sync joiner racing to register on the same
+/// dual-flavor task) is never poll_fn-dispatchable, so it always falls back
+/// to a plain deque push; a same-system async joiner always is, by
+/// construction (see [`WakerTaskDesc::try_register_async_joiner`]'s docs),
+/// so it always takes the symmetric-transfer path.
+struct PollSpawnedSink<S: SchedulerSystem, T> {
+    desc_ptr: *mut S::Desc,
+    result_ptr: *mut StackResult<T>,
+    continue_with: Cell<Option<<S::Desc as TaskDesc>::Suspended>>,
+}
+
+impl<S, T: Send + 'static> TaskExitSink<S::Desc> for PollSpawnedSink<S, T>
+where
+    S: DescScheduler,
+    S::Desc: AsyncTaskDesc,
+{
+    fn resume(&self, cont: <S::Desc as TaskDesc>::Suspended) {
+        if cont.is_poll_fn_dispatch() {
+            self.continue_with.set(Some(cont));
+        } else {
+            // A real ULT continuation — push it back to the deque like any
+            // other requeued task. Always called from within a worker
+            // (execute → run_async_poll → poll_fn).
+            let wk = UltWorker::<S>::current()
+                .expect("cmpth: poll_spawned_task called outside a worker");
+            wk.push_local_top(cont);
+        }
+    }
+
+    fn reclaim(&self) {
+        // Detached task: drop result and return desc to the async pool
+        // now. Always called from within a worker (execute →
+        // run_async_poll → poll_fn), so a pool-relative wk_num is
+        // available.
+        unsafe { std::ptr::drop_in_place(self.result_ptr) };
+        let wk = UltWorker::<S>::current()
+            .expect("cmpth: poll_spawned_task called outside a worker");
+        unsafe { wk.shared().async_task_pool.dealloc(wk.num(), self.desc_ptr) };
+    }
+}
+
 /// Type-erased poll function stored in `DualTaskDesc::poll_fn` for async tasks.
 ///
 /// Polls `F` once and reports what the caller's poll loop
 /// ([`crate::resumable::stackless::worker::run_async_poll`]) should do next — see
-/// [`TaskPollResult`]. When this completion claims a waiting
-/// `AsyncJoiner` outright (`try_wake_state` returns `ClaimedParked`),
-/// reports `ReadyAndContinue` with that descriptor instead of pushing it
-/// to a deque: the caller's loop polls it directly next (symmetric
-/// transfer), skipping a push/pop round trip for the common
-/// parent-was-waiting-on-us case.
+/// [`TaskPollResult`]. When this completion claims a waiting same-system
+/// async joiner outright, reports `ReadyAndContinue` with that descriptor
+/// instead of pushing it to a deque: the caller's loop polls it directly
+/// next (symmetric transfer), skipping a push/pop round trip for the
+/// common parent-was-waiting-on-us case — see [`PollSpawnedSink`].
 unsafe fn poll_spawned_task<S, T, F>(
     desc: *mut S::Desc,
     cx: &mut Context<'_>,
 ) -> TaskPollResult<S::Desc>
 where
-    S: SchedulerSystem,
+    S: DescScheduler,
     T: Send + 'static,
     F: Future<Output = T> + Send + 'static,
     S::Desc: AsyncTaskDesc,
@@ -322,41 +379,17 @@ where
 
     // Publish FINISHED and settle whoever the old state names.  Runs on the
     // scheduler stack (no context-switch-target decision needed).
-    match publish_finished_raw(desc_ref) {
-        JoinState::SyncJoiner(j_desc) => {
-            // Push the waiting ULT back to the deque.  This is always called
-            // from within a worker (execute → run_async_poll → poll_fn).
-            let wk = UltWorker::<S>::current()
-                .expect("cmpth: poll_spawned_task called outside a worker");
-            // SAFETY: `j_desc` was published via a real token's `into_raw()`
-            // by `try_register_sync_joiner`'s caller — same provenance as
-            // `stackful/thread.rs`'s matching arms.
-            wk.push_local_top(unsafe { SuspendedTaskToken::from_raw(j_desc) });
-        }
-        JoinState::AsyncWaker(w) => unsafe { Box::from_raw(w) }.wake(),
-        JoinState::AsyncJoiner(j) => {
-            // Claim j's next poll directly if nobody else can be driving it
-            // (it was genuinely PARKED, not concurrently POLLING/NOTIFIED
-            // elsewhere) — see TaskPollResult::ReadyAndContinue.
-            let j_ref: &S::Desc = unsafe { &*j };
-            match j_ref.try_wake_state() {
-                WakeOutcome::ClaimedParked => return TaskPollResult::ReadyAndContinue(j),
-                WakeOutcome::SetNotified | WakeOutcome::NoOp => {}
-            }
-        }
-        // JoinHandle still exists; it will read the result and free desc.
-        JoinState::Running => {}
-        JoinState::Detached => {
-            // Detached task: drop result and return desc to the async pool
-            // now. Always called from within a worker (execute →
-            // run_async_poll → poll_fn), so a pool-relative wk_num is
-            // available.
-            unsafe { std::ptr::drop_in_place(result_ptr) };
-            let wk = UltWorker::<S>::current()
-                .expect("cmpth: poll_spawned_task called outside a worker");
-            unsafe { wk.shared().async_task_pool.dealloc(wk.num(), desc) };
-        }
-        JoinState::Finished => unreachable!("cmpth: double async task completion"),
+    let sink = PollSpawnedSink::<S, T> {
+        desc_ptr: desc,
+        result_ptr,
+        continue_with: Cell::new(None),
+    };
+    desc_ref.finish_and_settle(&sink);
+
+    if let Some(cont) = sink.continue_with.take() {
+        // Claimed a same-system async joiner directly — continue polling
+        // it next instead of a deque round trip.
+        return TaskPollResult::ReadyAndContinue(cont.into_raw());
     }
 
     TaskPollResult::Ready
@@ -409,7 +442,7 @@ where
 /// ```
 pub fn recurse<S, F, Mk>(mk: Mk) -> RecursionFrame<S, F>
 where
-    S: SchedulerSystem,
+    S: DescScheduler,
     F: Future,
     Mk: FnOnce() -> F,
 {
@@ -428,18 +461,22 @@ where
 
 /// See [`recurse`]. Holds a pool-backed `F`, polled in place; never a
 /// schedulable task.
-pub struct RecursionFrame<S: SchedulerSystem, F> {
+// `DescScheduler` is carried directly on the struct (not just `Drop`,
+// below): `Drop` impls must restate exactly the bounds the type definition
+// has, so the bound has to live here regardless, and every real system
+// satisfies it anyway (see `DescScheduler`'s doc comment).
+pub struct RecursionFrame<S: DescScheduler, F> {
     ptr: std::ptr::NonNull<F>,
     _marker: PhantomData<S>,
 }
 
-unsafe impl<S: SchedulerSystem, F: Send> Send for RecursionFrame<S, F> {}
+unsafe impl<S: DescScheduler, F: Send> Send for RecursionFrame<S, F> {}
 // The pointee is never moved (only ever touched through the stable
 // pointer, exactly like `Pin<Box<F>>`), so the wrapper itself is Unpin
 // regardless of whether `F` is.
-impl<S: SchedulerSystem, F> Unpin for RecursionFrame<S, F> {}
+impl<S: DescScheduler, F> Unpin for RecursionFrame<S, F> {}
 
-impl<S: SchedulerSystem, F: Future> Future for RecursionFrame<S, F> {
+impl<S: DescScheduler, F: Future> Future for RecursionFrame<S, F> {
     type Output = F::Output;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
@@ -448,7 +485,7 @@ impl<S: SchedulerSystem, F: Future> Future for RecursionFrame<S, F> {
     }
 }
 
-impl<S: SchedulerSystem, F> Drop for RecursionFrame<S, F> {
+impl<S: DescScheduler, F> Drop for RecursionFrame<S, F> {
     fn drop(&mut self) {
         unsafe { std::ptr::drop_in_place(self.ptr.as_ptr()) };
         let layout = Layout::new::<F>();
@@ -475,7 +512,7 @@ impl<S: SchedulerSystem, F> Drop for RecursionFrame<S, F> {
 /// `run_async`; the caller pushes the returned continuation directly into
 /// `workers[0]`'s deque, exactly like `fork_parent_first` does for the
 /// stackful root. `has_handle = false` (no `JoinHandle` is produced), so
-/// completion runs the same `JoinState::Detached` path as the stackful
+/// completion runs the same abandoned/`reclaim` path as the stackful
 /// root's `exit()` — reuses [`poll_spawned_task`] directly with `T = ()`.
 pub(crate) fn fork_async_parent_first<S, F>(f: F, scheduler: *const crate::resumable::common::scheduler::Scheduler<S>) -> SuspendedTaskToken<S::Desc>
 where

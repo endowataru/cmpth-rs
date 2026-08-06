@@ -12,7 +12,7 @@ use crate::interchange::{AtomicTaggedSlot, TaggedPtr};
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::stackless::desc::AsyncTaskDesc;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
+use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
 use crate::resumable::stackful::worker::ContextSwitcher;
 
 const ASYNC_TAG: usize = 1;

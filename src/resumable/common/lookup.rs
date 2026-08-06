@@ -5,14 +5,13 @@
 
 use crate::traits::common::TlsSlot;
 use crate::resumable::common::system::SchedulerSystem;
-use crate::resumable::common::worker::UltWorker;
 
-/// Policy for [`Worker::current`](crate::resumable::common::worker::Worker::current).
+/// Policy for [`WorkerOps::current`](crate::resumable::common::worker::WorkerOps::current).
 /// Selected per system via [`SchedulerSystem::Lookup`]. Base-level
 /// (`S: SchedulerSystem`): every flavor, stackful or stackless, needs to
 /// locate its current worker through this trait.
 pub trait CurrentLookup<S: SchedulerSystem>: Send + Sync + 'static {
-    fn current() -> Option<&'static UltWorker<S>>;
+    fn current() -> Option<&'static S::Worker>;
 }
 
 // ---------------------------------------------------------------------------
@@ -24,7 +23,7 @@ pub struct TlsCurrent;
 
 impl<S: SchedulerSystem> CurrentLookup<S> for TlsCurrent {
     #[inline]
-    fn current() -> Option<&'static UltWorker<S>> {
+    fn current() -> Option<&'static S::Worker> {
         let p = TlsSlot::get(S::worker_tls());
         if p.is_null() { None } else { Some(unsafe { &*p }) }
     }

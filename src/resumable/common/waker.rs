@@ -16,12 +16,32 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::resumable::common::system::SchedulerSystem;
-use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
+use crate::resumable::common::system::DescScheduler;
+use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
 use crate::resumable::common::desc::{HasScheduler, SuspendedTaskToken};
 use crate::resumable::common::external_queue::ExternalQueue;
 
-pub use crate::traits::stackless::WakeOutcome;
+/// Outcome of a wake attempt against a POLLING/PARKED/NOTIFIED state
+/// machine — the return type of [`try_wake_state`]. Crate-private: the only
+/// public-facing trait that used to expose this
+/// ([`WakerTaskDesc`](crate::traits::stackless::WakerTaskDesc)) now returns
+/// `Option<Self::Suspended>` directly instead (`try_claim_parked`), so
+/// nothing outside this crate needs to name the three-state shape itself —
+/// but [`stackful::waker::ResumablePoller`](crate::resumable::stackful::waker::ResumablePoller)
+/// still drives this exact state machine against a stack-local slot that is
+/// not a descriptor, so the type stays alive here as this module's own
+/// implementation detail.
+pub(crate) enum WakeOutcome {
+    /// Was POLLING; now NOTIFIED. The task will notice on its next state
+    /// check and re-poll; there is no continuation to push.
+    SetNotified,
+    /// Was PARKED; now POLLING. The caller owns delivering the
+    /// continuation (push to a worker deque or the external queue).
+    ClaimedParked,
+    /// Was already NOTIFIED, or IDLE (a stale wake after the poll session
+    /// ended). Nothing to do.
+    NoOp,
+}
 
 // ---------------------------------------------------------------------------
 // waker state encoding
@@ -151,7 +171,7 @@ pub(crate) fn try_wake_state(state: &AtomicUsize) -> WakeOutcome {
 /// exclusive ownership at their call site don't have to hand off a raw
 /// pointer just to have this function immediately reconstruct a token from
 /// it — one `from_raw` per genuine ownership transfer, not two.
-pub(crate) fn push_continuation<S: SchedulerSystem>(token: SuspendedTaskToken<S::Desc>)
+pub(crate) fn push_continuation<S: DescScheduler>(token: SuspendedTaskToken<S::Desc>)
 where
     <S::Desc as crate::resumable::common::desc::TaskDescCore>::Owned: HasScheduler<System = S>,
 {

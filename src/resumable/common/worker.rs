@@ -1,9 +1,9 @@
-//! Base worker traits ([`TaskPool`]/[`LocalQueue`]/[`Worker`]) and the
+//! Base worker traits ([`TaskPool`]/[`LocalQueue`]/[`WorkerOps`]) and the
 //! concrete [`UltWorker<S>`] implementation — usable by a stackful-only,
 //! stackless-only, or dual system alike, no context-switch machinery named
 //! anywhere here.
 //!
-//! [`Worker::execute`] forwards to [`SchedulerSystem::execute`] — see that
+//! [`WorkerOps::execute`] forwards to [`SchedulerSystem::execute`] — see that
 //! method's doc comment for why the dispatch body lives on the system
 //! trait rather than here (a required hook, monomorphized per concrete
 //! system, not runtime dispatch). The stackful extension traits
@@ -18,7 +18,7 @@ use std::ptr;
 use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::pool::DescPool;
 use crate::resumable::common::scheduler::Scheduler;
-use crate::resumable::common::system::SchedulerSystem;
+use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
 use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, TaskDescAlloc};
 
 // ---------------------------------------------------------------------------
@@ -67,12 +67,14 @@ pub trait LocalQueue<S: SchedulerSystem> {
 }
 
 // ---------------------------------------------------------------------------
-// Worker (base)
+// WorkerOps (base)
 // ---------------------------------------------------------------------------
 
 /// Base worker interface: locating the current worker, and running one
-/// popped continuation.
-pub trait Worker<S: SchedulerSystem>: TaskPool<S> + LocalQueue<S> + Send + Sync + 'static {
+/// popped continuation. Named `WorkerOps` (not `Worker`) to keep the name
+/// free for [`SchedulerSystem::Worker`] — the associated type naming which
+/// concrete struct implements this trait for a given system.
+pub trait WorkerOps<S: SchedulerSystem>: TaskPool<S> + LocalQueue<S> + Send + Sync + 'static {
     /// The worker currently running on this base thread, if any.
     fn current() -> Option<&'static Self>
     where
@@ -196,16 +198,6 @@ impl<S: SchedulerSystem> UltWorker<S> {
     /// `&self` signature alone (it would need proof "no second live
     /// `&mut`/`&` from this same `&self` exists," which the single-caller
     /// discipline above provides but the type system doesn't express).
-    #[allow(clippy::mut_from_ref)]
-    pub(crate) fn cur_task_token_mut(&self) -> &mut RunningTaskToken<S::Desc> {
-        debug_assert!(
-            Self::current().is_some_and(|cur| std::ptr::eq(cur, self)),
-            "cmpth: cur_task_token_mut called from a thread not currently running as this worker"
-        );
-        let opt: &mut Option<RunningTaskToken<S::Desc>> = unsafe { &mut *self.cur_task_cell.as_ptr() };
-        opt.as_mut().expect("cmpth: no current task on worker")
-    }
-
     /// Take exclusive ownership of the currently-running task out of this
     /// worker's slot, leaving it empty. Panics if nothing is running —
     /// every real call site only calls this while a task is known to be
@@ -237,6 +229,41 @@ impl<S: SchedulerSystem> UltWorker<S> {
     }
 }
 
+// Split from the main inherent `impl` block above: `cur_task_token_mut`
+// calls `Self::current()` (`Worker::current`), which needs the same
+// `DescScheduler` bound `Worker`'s own impl for `UltWorker<S>` needs (see
+// that impl's comment) -- keeping it out of the main block lets everything
+// else there (in particular `UltWorker::new`, called from base-level
+// scheduler setup with no such bound available) keep working for any bare
+// `S: SchedulerSystem`.
+impl<S: DescScheduler> UltWorker<S> {
+    /// Mutable peek at the currently-running task's token, for callers with
+    /// no explicit `RunningTaskToken` in scope (e.g. `UltTls::get`/`set`,
+    /// reached through the generic `TlsSlot` trait) that still need
+    /// `Owned`-field access. `D::Owned` is reached only through a token
+    /// (never a separate direct path — see `TaskDesc::owned_cell`'s doc
+    /// comment), so this is the one place besides an explicit token value
+    /// that can produce one.
+    ///
+    /// Sound for the same reason as [`cur_task`](Self::cur_task)'s peek:
+    /// only the OS thread currently running as this worker's current task
+    /// ever calls this, so there is no concurrent access to guard against —
+    /// checked by the `debug_assert` below rather than merely assumed. That
+    /// invariant is exactly what clippy's `mut_from_ref` can't see from the
+    /// `&self` signature alone (it would need proof "no second live
+    /// `&mut`/`&` from this same `&self` exists," which the single-caller
+    /// discipline above provides but the type system doesn't express).
+    #[allow(clippy::mut_from_ref)]
+    pub(crate) fn cur_task_token_mut(&self) -> &mut RunningTaskToken<S::Desc> {
+        debug_assert!(
+            Self::current().is_some_and(|cur| std::ptr::eq(cur, self)),
+            "cmpth: cur_task_token_mut called from a thread not currently running as this worker"
+        );
+        let opt: &mut Option<RunningTaskToken<S::Desc>> = unsafe { &mut *self.cur_task_cell.as_ptr() };
+        opt.as_mut().expect("cmpth: no current task on worker")
+    }
+}
+
 // --- TaskPool ---
 
 impl<S: SchedulerSystem> TaskPool<S> for UltWorker<S> {
@@ -251,7 +278,18 @@ impl<S: SchedulerSystem> TaskPool<S> for UltWorker<S> {
 
 // --- LocalQueue ---
 
-impl<S: SchedulerSystem> LocalQueue<S> for UltWorker<S> {
+// `S::Deque: WorkerDeque<S::Item>` alone doesn't let this impl call
+// `self.deque.push_top(c)` with `c: SuspendedTaskToken<S::Desc>` -- `Item`
+// is a genuinely independent associated type (see `SchedulerSystem::Item`'s
+// doc comment for why), so the equality has to be spelled out here (via
+// `DescScheduler`). True for every concrete system today. Making this impl
+// conditional forces the same restatement onto every other generic fn/impl
+// that both calls `Worker::current`/`LocalQueue`'s methods *and* is bounded
+// by nothing stronger than base `SchedulerSystem` (the stackful/stackless
+// subtraits nest this bound into their own declarations, so code merely
+// bounded by `StackfulSchedulerSystem`/`StacklessSchedulerSystem` gets it
+// for free).
+impl<S: DescScheduler> LocalQueue<S> for UltWorker<S> {
     fn push_local_top(&self, c: SuspendedTaskToken<S::Desc>) {
         self.deque.push_top(c);
     }
@@ -293,9 +331,9 @@ impl<S: SchedulerSystem> LocalQueue<S> for UltWorker<S> {
     }
 }
 
-// --- Worker ---
+// --- WorkerOps ---
 
-impl<S: SchedulerSystem> Worker<S> for UltWorker<S> {
+impl<S: DescScheduler> WorkerOps<S> for UltWorker<S> {
     fn current() -> Option<&'static Self> {
         <S::Lookup as crate::resumable::common::lookup::CurrentLookup<S>>::current()
     }
@@ -309,6 +347,9 @@ impl<S: SchedulerSystem> Worker<S> for UltWorker<S> {
 // Free function kept for call-site compatibility
 // ---------------------------------------------------------------------------
 
-pub fn current_worker<S: SchedulerSystem>() -> Option<&'static UltWorker<S>> {
+pub fn current_worker<S>() -> Option<&'static UltWorker<S>>
+where
+    S: DescScheduler,
+{
     UltWorker::<S>::current()
 }

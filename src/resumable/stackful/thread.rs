@@ -9,13 +9,13 @@ use std::any::Any;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use crate::traits::stackful::{ContextPolicy, JoinHandleLike, SyncJoinerTaskDesc, Transfer};
+use crate::traits::stackful::{ContextPolicy, HandoffTaskDesc, JoinHandleLike, Transfer};
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::desc::{HasScheduler, JoinState, SuspendedTaskToken, TaskDesc, TaskDescAlloc, TaskDescCore, publish_finished_raw, read_join_state_raw};
+use crate::resumable::common::desc::{HasScheduler, SuspendedTaskToken, TaskDesc, TaskDescAlloc, TaskDescCore, TaskExitSink};
 use crate::resumable::stackful::desc::{HasCtx, StackfulTaskDesc};
-use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, Worker};
+use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, WorkerOps};
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulWorker};
 
 // Still needed for fork_parent_first (root task entry).
@@ -148,15 +148,69 @@ unsafe extern "C" fn task_entry<S: StackfulSchedulerSystem>(transfer: Transfer, 
 // exit helpers
 // ---------------------------------------------------------------------------
 
+/// [`TaskExitSink`] for [`exit_with_result`]: a dropped `JoinHandle`'s
+/// result lives on the exiting task's own (still-allocated) stack, so
+/// `reclaim` must drop it in place before freeing the descriptor — unlike
+/// [`ExitSink`] (used by [`exit`], whose task never had a result anyone
+/// could observe).
+struct ExitWithResultSink<'a, S: StackfulSchedulerSystem, T> {
+    wk: &'a UltWorker<S>,
+    desc_ptr: *mut S::Desc,
+    result_ptr: *mut StackResult<T>,
+}
+
+impl<'a, S: StackfulSchedulerSystem, T: Send + 'static> TaskExitSink<S::Desc>
+    for ExitWithResultSink<'a, S, T>
+where
+    <S as SchedulerSystem>::Desc: StackfulTaskDesc,
+{
+    fn resume(&self, cont: <S::Desc as TaskDesc>::Suspended) {
+        self.wk.push_local_top(cont);
+    }
+
+    fn reclaim(&self) {
+        // The handle was dropped while we were exiting: the result already
+        // sits on our (still-allocated) stack.
+        unsafe {
+            self.result_ptr.drop_in_place();
+            self.wk.free_task(self.desc_ptr);
+        }
+    }
+}
+
+/// [`TaskExitSink`] for [`exit`] (parent-first/detached-only tasks): no
+/// result was ever written for anyone to observe (`task_entry` already
+/// dropped it before calling this), so `reclaim` only needs to free the
+/// descriptor.
+struct ExitSink<'a, S: StackfulSchedulerSystem> {
+    wk: &'a UltWorker<S>,
+    desc_ptr: *mut S::Desc,
+}
+
+impl<'a, S: StackfulSchedulerSystem> TaskExitSink<S::Desc> for ExitSink<'a, S>
+where
+    <S as SchedulerSystem>::Desc: StackfulTaskDesc,
+{
+    fn resume(&self, cont: <S::Desc as TaskDesc>::Suspended) {
+        self.wk.push_local_top(cont);
+    }
+
+    fn reclaim(&self) {
+        unsafe { self.wk.free_task(self.desc_ptr) };
+    }
+}
+
 /// Exit a spawned task.
 ///
-/// One atomic decides everything.  A parked sync joiner and the detached
-/// state are both *stable* (the joiner cannot act until resumed; a dropped
-/// handle never comes back), so a plain Acquire read selects those paths.
-/// Anything else (`RUNNING` or a registered async waker) can still change
-/// concurrently — late joiner registration, waker replacement, detach — so
-/// the exit callback publishes `FINISHED` with a `swap` *after* the context
-/// switch and settles whichever party it finds in the old value.
+/// A parked sync joiner and the abandoned (detached) state are both
+/// *stable* (the joiner cannot act until resumed; a dropped handle never
+/// comes back), so a plain Acquire read selects those paths —
+/// `try_take_handoff_target`/`is_abandoned`. Anything else (`RUNNING` or a
+/// registered async waker) can still change concurrently — late joiner
+/// registration, waker replacement, detach — so the exit callback publishes
+/// `FINISHED` with a `swap` *after* the context switch
+/// (`finish_and_settle`) and settles whichever party it finds in the old
+/// value.
 fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
     wk: &UltWorker<S>,
     desc: &S::Desc,
@@ -164,83 +218,47 @@ fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
     val: Result<T, Box<dyn Any + Send>>,
 ) -> ! where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
     let desc_ptr = desc as *const S::Desc as *mut S::Desc;
-    match read_join_state_raw(desc) {
-        JoinState::SyncJoiner(j_desc) => {
-            // Direct handoff: switch straight to the parked joiner.
-            let sr = match val { Ok(v) => StackResult::Ok(v), Err(e) => StackResult::Err(e) };
-            unsafe { result_ptr.write(sr) };
-            // SAFETY: `j_desc` was published by `try_register_sync_joiner`'s
-            // caller (`JoinHandle::join`'s slow path), which only commits
-            // it after `into_raw()`ing a real token it exclusively held —
-            // this decode is the sole consumer of that publish.
-            let j_token = unsafe { SuspendedTaskToken::from_raw(j_desc) };
-            wk.exit_to_cont(j_token, move |_wk| {
-                desc.commit_finished();
-            })
-        }
-        JoinState::Detached => {
-            // No handle: drop val on the task's own stack before the context
-            // switch so destructors run correctly.
-            drop(val);
-            wk.exit_to_sched(move |wk| unsafe { wk.free_task(desc_ptr) })
-        }
-        _ => {
-            let sr = match val { Ok(v) => StackResult::Ok(v), Err(e) => StackResult::Err(e) };
-            unsafe { result_ptr.write(sr) };
-            wk.exit_to_sched(move |wk| {
-                match publish_finished_raw(desc) {
-                    // No joiner appeared: the JoinHandle collects the result.
-                    JoinState::Running => {}
-                    // A joiner registered while we were exiting.
-                    // SAFETY: same provenance as the other SyncJoiner arm
-                    // above — `j` was published via a real token's
-                    // `into_raw()` by `try_register_sync_joiner`'s caller.
-                    JoinState::SyncJoiner(j) => wk.push_local_top(unsafe { SuspendedTaskToken::from_raw(j) }),
-                    JoinState::AsyncWaker(w) => unsafe { Box::from_raw(w) }.wake(),
-                    JoinState::AsyncJoiner(j) => S::wake_async_joiner(j),
-                    // The handle was dropped while we were exiting: the
-                    // result already sits on our (still-allocated) stack.
-                    JoinState::Detached => unsafe {
-                        result_ptr.drop_in_place();
-                        wk.free_task(desc_ptr);
-                    },
-                    JoinState::Finished => unreachable!("cmpth: double task exit"),
-                }
-            })
-        }
+    if let Some(j_token) = desc.try_take_handoff_target() {
+        // Direct handoff: switch straight to the parked joiner.
+        let sr = match val { Ok(v) => StackResult::Ok(v), Err(e) => StackResult::Err(e) };
+        unsafe { result_ptr.write(sr) };
+        wk.exit_to_cont(j_token, move |_wk| {
+            desc.commit_finished();
+        })
+    } else if desc.is_abandoned() {
+        // No handle: drop val on the task's own stack before the context
+        // switch so destructors run correctly.
+        drop(val);
+        wk.exit_to_sched(move |wk| unsafe { wk.free_task(desc_ptr) })
+    } else {
+        let sr = match val { Ok(v) => StackResult::Ok(v), Err(e) => StackResult::Err(e) };
+        unsafe { result_ptr.write(sr) };
+        wk.exit_to_sched(move |wk| {
+            let sink = ExitWithResultSink { wk, desc_ptr, result_ptr };
+            desc.finish_and_settle(&sink);
+        })
     }
 }
 
 /// Exit for parent-first tasks (`fork_parent_first`): `task_entry` already
 /// dropped the result before calling this (see its own comment) — every
-/// `fork_parent_first` task starts, and stays, `Detached`, so the
-/// `SyncJoiner`/running-with-a-handle arms below are unreachable in
+/// `fork_parent_first` task starts, and stays, abandoned, so the
+/// handoff-target/running-with-a-handle paths below are unreachable in
 /// practice for this caller, kept only because this shares the same state
 /// machine as `exit_with_result`.
 fn exit<S: StackfulSchedulerSystem>(wk: &UltWorker<S>, desc: &S::Desc) -> ! where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
     let desc_ptr = desc as *const S::Desc as *mut S::Desc;
-    match read_join_state_raw(desc) {
-        JoinState::SyncJoiner(j_desc) => {
-            // SAFETY: same provenance as `exit_with_result`'s matching arm
-            // — `j_desc` was published via a real token's `into_raw()` by
-            // `try_register_sync_joiner`'s caller.
-            let j_token = unsafe { SuspendedTaskToken::from_raw(j_desc) };
-            wk.exit_to_cont(j_token, move |_wk| {
-                desc.commit_finished();
-            })
-        }
-        JoinState::Detached => wk.exit_to_sched(move |wk| unsafe { wk.free_task(desc_ptr) }),
-        _ => wk.exit_to_sched(move |wk| {
-            match publish_finished_raw(desc) {
-                JoinState::Running => {}
-                // SAFETY: same provenance as above.
-                JoinState::SyncJoiner(j) => wk.push_local_top(unsafe { SuspendedTaskToken::from_raw(j) }),
-                JoinState::AsyncWaker(w) => unsafe { Box::from_raw(w) }.wake(),
-                JoinState::AsyncJoiner(j) => S::wake_async_joiner(j),
-                JoinState::Detached => unsafe { wk.free_task(desc_ptr) },
-                JoinState::Finished => unreachable!("cmpth: double task exit"),
-            }
-        }),
+    if let Some(j_token) = desc.try_take_handoff_target() {
+        wk.exit_to_cont(j_token, move |_wk| {
+            desc.commit_finished();
+        })
+    } else if desc.is_abandoned() {
+        wk.exit_to_sched(move |wk| unsafe { wk.free_task(desc_ptr) })
+    } else {
+        wk.exit_to_sched(move |wk| {
+            let sink = ExitSink { wk, desc_ptr };
+            desc.finish_and_settle(&sink);
+        })
     }
 }
 
@@ -275,11 +293,13 @@ where
         // The returned worker is the one we resumed on — no TLS re-read.
         let desc = self.desc_ref();
         let wk = wk.cond_suspend_to_sched(move |_wk, prev| {
-            let joiner = prev.as_ref().expect("cond_suspend contract").desc();
-            if unsafe { desc.try_register_sync_joiner(joiner) } {
-                let _ = prev.take().expect("cond_suspend contract").into_raw();
+            let joiner = prev.take().expect("cond_suspend contract");
+            match desc.try_register_joiner(joiner) {
+                Ok(()) => {}
+                // Cancel: hand the token straight back so `cond_suspend_to_sched`
+                // sees `prev` still holding it and resumes at once.
+                Err(joiner) => *prev = Some(joiner),
             }
-            // else: leave `prev` in place -> cancel, resume at once
         });
 
         debug_assert!(desc.is_finished());

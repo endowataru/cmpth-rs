@@ -12,7 +12,7 @@ use crate::resumable::common::external_queue::ExternalQueue;
 use crate::resumable::common::desc::{SuspendedTaskToken, TaskDescAlloc};
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::pool::{DescPool, DynamicPool};
-use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
+use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
 
 /// Base system interface required by [`UltWorker`] and
 /// [`Scheduler`](crate::resumable::common::scheduler::Scheduler), independent of whether
@@ -29,8 +29,16 @@ pub trait SchedulerSystem: Sized + Send + Sync + 'static {
     /// Task descriptor type for this system.
     type Desc: TaskDescAlloc;
 
+    /// The unit that goes on a worker deque / the external queue. Every
+    /// concrete system sets this to `SuspendedTaskToken<Self::Desc>` — kept
+    /// as its own associated type (rather than folding it into `Deque`'s
+    /// bound directly) so [`WorkerDeque`] and [`ExternalQueue`] stay generic
+    /// over "whatever this system moves through them," with no need to name
+    /// `SuspendedTaskToken`/`Self::Desc` themselves.
+    type Item: Send;
+
     /// Work-stealing deque implementation.
-    type Deque: WorkerDeque<Self::Desc>;
+    type Deque: WorkerDeque<Self::Item>;
 
     /// Descriptor pool implementation for this system, used by the stackful
     /// `spawn` path (fixed-size ULT stacks, `STACK_SIZE` on
@@ -70,10 +78,18 @@ pub trait SchedulerSystem: Sized + Send + Sync + 'static {
     /// Queue for continuations pushed by external (non-worker) OS threads.
     type ExternalQueue: ExternalQueue<Self>;
 
+    /// The concrete worker type driving this scheduler. Every system today
+    /// sets this to [`UltWorker<Self>`] — kept as its own associated type
+    /// (rather than [`worker_tls`](Self::worker_tls)/[`CurrentLookup`]
+    /// naming `UltWorker<Self>` directly) so those interfaces stay generic
+    /// over "whatever struct implements [`WorkerOps`] for this system,"
+    /// with no need to name `UltWorker` itself.
+    type Worker: WorkerOps<Self>;
+
     /// The one TLS slot that stores the worker pointer for this scheduler
     /// level.  Each concrete system gets its own `static`, anchored by the
     /// function body of this implementation.
-    fn worker_tls() -> &'static <Self::Base as ThreadSystem>::ThreadSpecific<UltWorker<Self>>;
+    fn worker_tls() -> &'static <Self::Base as ThreadSystem>::ThreadSpecific<Self::Worker>;
 
     /// Run one continuation popped off a deque/root/external-queue.
     ///
@@ -106,28 +122,28 @@ pub trait SchedulerSystem: Sized + Send + Sync + 'static {
     ///
     /// [`execute`]: Self::execute
     fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut Self::Desc);
-
-    /// Wake an `AsyncJoiner` found in `join_state` by `exit`/`exit_with_result`
-    /// (`resumable::stackful::thread`) — the completing task hands off
-    /// directly to the polling task's own descriptor, without a boxed
-    /// `Waker`, whenever the joiner is itself driven by this same system's
-    /// `run_async_poll`.
-    ///
-    /// Default: unreachable. `JoinState::AsyncJoiner` can only ever be
-    /// written by `TaskDesc::try_register_async_joiner`, and that is only
-    /// ever called from `JoinHandle::poll`, which itself requires
-    /// `Self::Desc: AsyncTaskDesc` — so a system whose `Desc` has no async
-    /// capability (stackful-only) can never actually observe this state;
-    /// the default keeps `exit`/`exit_with_result` generic over such
-    /// systems without forcing `Self::Desc: WakerTaskDesc` on them just to
-    /// type-check a branch they can never reach. Dual (and any future
-    /// stackful+async combination) overrides this to call
-    /// `stackless::waker::try_wake_async::<Self>(desc)`.
-    fn wake_async_joiner(desc: *mut Self::Desc) {
-        let _ = desc;
-        unreachable!("cmpth: AsyncJoiner join state on a system with no async capability")
-    }
 }
+
+// ---------------------------------------------------------------------------
+// DescScheduler — the "engine's own token/worker" assumption, named once
+// ---------------------------------------------------------------------------
+
+/// A [`SchedulerSystem`] whose scheduling unit is this crate's own task
+/// descriptor token and whose worker is this crate's own [`UltWorker`] —
+/// i.e. every system built on the `resumable` engine (as opposed to a
+/// future `scoped`-style system, which will put a stack-resident job
+/// reference in `Item` instead).
+///
+/// Exists so the engine's internals can state that assumption **once**
+/// rather than repeating `Item = SuspendedTaskToken<..>, Worker =
+/// UltWorker<..>` on every generic function that touches both the abstract
+/// associated types and the concrete ones.
+pub trait DescScheduler:
+    SchedulerSystem<Item = SuspendedTaskToken<<Self as SchedulerSystem>::Desc>, Worker = UltWorker<Self>>
+{
+}
+
+impl<S: SchedulerSystem<Item = SuspendedTaskToken<<S as SchedulerSystem>::Desc>, Worker = UltWorker<S>>> DescScheduler for S {}
 
 // ---------------------------------------------------------------------------
 // Blanket TaskSystem for every SchedulerSystem
@@ -138,11 +154,11 @@ pub trait SchedulerSystem: Sized + Send + Sync + 'static {
 /// blanket-derived here rather than implemented per flavor — one impl
 /// covers `ThreadSystem`'s (stackful) and `StacklessTaskSystem`'s
 /// (stackless) supertrait requirement alike, since
-/// [`UltWorker::current`](crate::resumable::common::worker::Worker::current)
+/// [`UltWorker::current`](crate::resumable::common::worker::WorkerOps::current)
 /// needs no bound beyond `SchedulerSystem` itself. Only the true base case
 /// (`OsSystem`, which isn't a `SchedulerSystem` at all — no managed worker
 /// pool) needs its own hand-written impl, in `os.rs`.
-impl<S: SchedulerSystem> TaskSystem for S {
+impl<S: DescScheduler> TaskSystem for S {
     fn worker_num() -> usize {
         match UltWorker::<S>::current() {
             Some(wk) => wk.num(),

@@ -14,7 +14,7 @@ use std::marker::PhantomData;
 use crate::traits::stackful::ThreadSystem;
 use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::lookup::CurrentLookup;
-use crate::resumable::common::system::SchedulerSystem;
+use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
 use crate::resumable::common::worker::UltWorker;
 use crate::resumable::stackless::desc::AsyncTaskDesc;
 use crate::traits::scoped::ScopedStacklessTaskSystem;
@@ -89,7 +89,7 @@ impl<S: StacklessSchedulerSystem> ScopedStacklessTaskSystem for S {
 /// associated types of its own to assemble — it exists solely as a fold
 /// point for this bound.
 pub trait StacklessSchedulerSystem:
-    SchedulerSystem<
+    DescScheduler<
         Desc: AsyncTaskDesc
                   + crate::resumable::common::desc::TaskDescCore<
                       Owned: crate::resumable::common::desc::HasScheduler<System = Self>,
@@ -98,7 +98,7 @@ pub trait StacklessSchedulerSystem:
 {
 }
 
-impl<S: SchedulerSystem> StacklessSchedulerSystem for S
+impl<S: DescScheduler> StacklessSchedulerSystem for S
 where
     S::Desc: AsyncTaskDesc,
     <S::Desc as crate::resumable::common::desc::TaskDescCore>::Owned:
@@ -161,7 +161,7 @@ where
 /// impl cmpth::UltAsyncIdentity for MyAsyncMarker {
 ///     type Base = cmpth::OsSystem;
 ///     type Desc = cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>;
-///     type Deque = cmpth::CrossbeamDeque<cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>>;
+///     type Deque = cmpth::CrossbeamDeque<cmpth::SuspendedTaskToken<cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>>>;
 ///     type Lookup = cmpth::InlineTlsCurrent;
 ///
 ///     fn worker_tls_anchor() -> &'static <cmpth::OsSystem as ThreadSystem>::ThreadSpecific<cmpth::UltWorker<cmpth::UltAsyncSystem<Self>>> {
@@ -198,7 +198,7 @@ pub trait UltAsyncIdentity: Sized + Send + Sync + 'static {
         UltAsyncSystem<Self>: SchedulerSystem;
 
     /// Work-stealing deque implementation.
-    type Deque: WorkerDeque<Self::Desc>;
+    type Deque: WorkerDeque<crate::resumable::common::desc::SuspendedTaskToken<Self::Desc>>;
 
     /// Fixed slot size for the `spawn_async` descriptor pool.
     const ASYNC_POOL_SIZE: usize = 512;
@@ -227,6 +227,8 @@ pub struct UltAsyncSystem<M: UltAsyncIdentity> {
 impl<M: UltAsyncIdentity> SchedulerSystem for UltAsyncSystem<M> {
     type Base  = M::Base;
     type Desc  = M::Desc;
+    type Item  = crate::resumable::common::desc::SuspendedTaskToken<M::Desc>;
+    type Worker = UltWorker<Self>;
     type Deque = M::Deque;
     type ExternalQueue = crate::resumable::common::external_queue::StealPathQueue<M::Desc>;
     // Never actually allocated through: this flavor has no `spawn`, only

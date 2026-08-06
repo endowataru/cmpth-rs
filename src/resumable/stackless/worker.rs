@@ -7,7 +7,7 @@
 use std::task::{RawWaker, Waker};
 
 use crate::resumable::common::worker::{LocalQueue, UltWorker};
-use crate::resumable::common::system::SchedulerSystem;
+use crate::resumable::common::system::DescScheduler;
 use crate::resumable::stackless::system::StacklessSchedulerSystem;
 use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken};
 use crate::resumable::stackless::desc::WakerTaskDesc;
@@ -140,7 +140,7 @@ where
 /// as [`DescPool::dealloc`]).
 pub unsafe fn free_finished_desc_async<S>(wk: &UltWorker<S>, desc: *mut S::Desc)
 where
-    S: SchedulerSystem,
+    S: DescScheduler,
 {
     unsafe { wk.shared().async_task_pool.dealloc(wk.num(), desc) };
 }
