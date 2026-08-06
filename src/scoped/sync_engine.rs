@@ -160,6 +160,102 @@ where
 // run — bring up the worker pool, run the root closure, tear down
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// init — standalone counterpart to `run`, backing
+// `StackfulInitSystem`/`StackfulBuilder` for `ScopedTaskSystem`.
+//
+// This engine has no ULT/context-switch concept at all (see this module's
+// own doc comment: a `parallel_call` branch is a stack-resident closure, run
+// inline or executed directly by whichever thread steals its `JobRef` — no
+// continuation is ever reified the way a stackful ULT's stack is), so there
+// is no "the caller's own continuation becomes stealable" property to
+// mirror here the way `resumable::stackful::init` mirrors it for real ULTs.
+// What standalone init *does* mean for this engine: bring the pool up, then
+// return — the calling OS thread permanently stays this pool's worker 0 (it
+// never migrates, same as it never did under the old `run`), and ordinary
+// code after `init()` can call `parallel_call` immediately. Teardown
+// (`Drop`) mirrors `run`'s own teardown: signal shutdown, join the other
+// worker threads.
+// ---------------------------------------------------------------------------
+
+/// RAII guard returned by `init`. Dropping it drains any work left on
+/// worker 0's own deque, signals shutdown, and joins the other worker OS
+/// threads.
+///
+/// `pub`, not `pub(crate)`: this is [`ScopedTaskSystem`](super::ScopedTaskSystem)'s
+/// [`StackfulInitSystem::Init`](crate::traits::stackful::StackfulInitSystem::Init)
+/// — a public associated type needs an at-least-as-public backing type,
+/// even though every field here (and the `init` function itself) stays
+/// crate-private; same opaque-struct shape as
+/// [`resumable::stackful::init::StackfulInit`](crate::resumable::stackful::init::StackfulInit).
+pub struct SyncInit {
+    // Heap-allocated so `CURRENT` (a raw pointer) stays valid no matter how
+    // this guard itself gets moved around by its caller after `init`
+    // returns it.
+    ctx0: Box<WorkerContext>,
+    registry: Arc<Registry>,
+    handles: Vec<std::thread::JoinHandle<()>>,
+}
+
+pub(crate) fn init(num_workers: usize) -> SyncInit {
+    assert!(num_workers >= 1, "need at least one worker");
+    assert!(
+        try_current_context().is_none(),
+        "cmpth: nested scoped::init() of the same engine on one thread"
+    );
+
+    let deques: Vec<Deque<JobRef>> = (0..num_workers).map(|_| Deque::new_lifo()).collect();
+    let stealers: Vec<Stealer<JobRef>> = deques.iter().map(|d| d.stealer()).collect();
+    let registry = Arc::new(Registry { stealers, injector: Injector::new(), shutdown: AtomicBool::new(false) });
+
+    let mut deques = deques.into_iter();
+    let worker0_deque = deques.next().unwrap();
+
+    let handles: Vec<_> = deques
+        .enumerate()
+        .map(|(i, deque)| {
+            let idx = i + 1;
+            let registry = Arc::clone(&registry);
+            std::thread::spawn(move || {
+                let ctx = WorkerContext { index: idx, deque, registry };
+                CURRENT.with(|c| c.set(&ctx as *const _));
+                loop {
+                    if try_execute_one(&ctx) {
+                        continue;
+                    }
+                    if ctx.registry.shutdown.load(Ordering::Acquire) {
+                        break;
+                    }
+                    std::hint::spin_loop();
+                }
+                while try_execute_one(&ctx) {}
+            })
+        })
+        .collect();
+
+    let ctx0 = Box::new(WorkerContext { index: 0, deque: worker0_deque, registry: Arc::clone(&registry) });
+    CURRENT.with(|c| c.set(ctx0.as_ref() as *const _));
+
+    SyncInit { ctx0, registry, handles }
+}
+
+impl Drop for SyncInit {
+    fn drop(&mut self) {
+        // No context switch happens anywhere in this engine (every
+        // `parallel_call` branch either runs as an ordinary nested call or
+        // gets executed directly by whichever thread steals it — there is
+        // no suspended continuation to resume), so unlike the stackful ULT
+        // initializer this has no panic-across-switch hazard: an ordinary
+        // `Drop` while unwinding is perfectly sound here.
+        while try_execute_one(&self.ctx0) {}
+        self.registry.shutdown.store(true, Ordering::Release);
+        for h in self.handles.drain(..) {
+            h.join().expect("cmpth: parallel_call worker thread panicked");
+        }
+        CURRENT.with(|c| c.set(std::ptr::null()));
+    }
+}
+
 /// Start `num_workers` OS threads (the calling thread becomes worker 0),
 /// run `f` as the root job, and block until it (and everything it
 /// transitively `parallel_call`s) completes.

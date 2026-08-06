@@ -390,6 +390,15 @@ where
 // run_async — bring up the worker pool, drive the root future, tear down
 // ---------------------------------------------------------------------------
 
+// No longer reachable from any public API path: `ScopedTaskSystem` only
+// implements `StackfulInitSystem` (via `sync_engine`'s own `init`/`run`),
+// not `StacklessInitSystem` — this engine's `run_async` never got a
+// standalone-init counterpart added alongside it (unlike `sync_engine`,
+// which did), so it currently exists purely for this module's own tests
+// below. Kept `pub(crate)` (not deleted) since it's real, working
+// infrastructure a future `StacklessInitSystem` impl for `ScopedTaskSystem`
+// could reuse directly.
+#[allow(dead_code)]
 pub(crate) fn run_async<F>(num_workers: usize, root: F)
 where
     F: Future<Output = ()> + Send + 'static,

@@ -9,11 +9,11 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use cmpth::{DefaultStacklessOnlyTaskSystem, ScopedStacklessTaskSystem, StacklessTaskSystem};
+use cmpth::{DefaultStacklessOnlyTaskSystem, StacklessBuilder, StacklessInitSystem, StacklessTaskSystem};
 
 #[test]
 fn spawn_async_await_basic() {
-    DefaultStacklessOnlyTaskSystem::run_async(2, async {
+    DefaultStacklessOnlyTaskSystem::builder().workers(2).run_async(async {
         let h = DefaultStacklessOnlyTaskSystem::spawn(|| async { 6 * 7 }).await;
         assert_eq!(h.await, 42);
     });
@@ -22,7 +22,7 @@ fn spawn_async_await_basic() {
 #[test]
 fn spawn_async_many_parallel() {
     let counter = Arc::new(AtomicU64::new(0));
-    DefaultStacklessOnlyTaskSystem::run_async(4, async move {
+    DefaultStacklessOnlyTaskSystem::builder().workers(4).run_async(async move {
         let counter = Arc::clone(&counter);
         let mut handles = Vec::with_capacity(200);
         for i in 0..200u64 {
@@ -45,7 +45,7 @@ fn spawn_async_many_parallel() {
 
 #[test]
 fn spawn_async_nested() {
-    DefaultStacklessOnlyTaskSystem::run_async(2, async {
+    DefaultStacklessOnlyTaskSystem::builder().workers(2).run_async(async {
         let h = DefaultStacklessOnlyTaskSystem::spawn(|| async {
             let inner = DefaultStacklessOnlyTaskSystem::spawn(|| async { 10 }).await;
             inner.await + 5
@@ -57,7 +57,7 @@ fn spawn_async_nested() {
 
 #[test]
 fn spawn_async_panic_propagates_via_await() {
-    DefaultStacklessOnlyTaskSystem::run_async(1, async {
+    DefaultStacklessOnlyTaskSystem::builder().workers(1).run_async(async {
         let h = DefaultStacklessOnlyTaskSystem::spawn::<(), _, _>(|| async { panic!("boom") }).await;
         let result = std::panic::AssertUnwindSafe(h.await_catch())
             .0
@@ -78,7 +78,7 @@ fn spawn_async_detach_before_finish() {
     let done = Arc::new(AtomicBool::new(false));
     let done2 = Arc::clone(&done);
 
-    DefaultStacklessOnlyTaskSystem::run_async(2, async move {
+    DefaultStacklessOnlyTaskSystem::builder().workers(2).run_async(async move {
         let h = DefaultStacklessOnlyTaskSystem::spawn(move || async move {
             // Yield once so the parent can drop the handle while we are pending.
             let mut yielded = false;
@@ -108,7 +108,7 @@ fn spawn_async_detach_after_finish() {
     let done = Arc::new(AtomicBool::new(false));
     let done2 = Arc::clone(&done);
 
-    DefaultStacklessOnlyTaskSystem::run_async(2, async move {
+    DefaultStacklessOnlyTaskSystem::builder().workers(2).run_async(async move {
         let h = DefaultStacklessOnlyTaskSystem::spawn(move || async move {
             done2.store(true, Ordering::Release);
             99u32
@@ -154,7 +154,7 @@ impl<F: std::future::Future> std::future::Future for AwaitCatchFuture<F> {
 fn run_async_root_future_runs_to_completion() {
     let done = Arc::new(AtomicU64::new(0));
     let done2 = Arc::clone(&done);
-    DefaultStacklessOnlyTaskSystem::run_async(3, async move {
+    DefaultStacklessOnlyTaskSystem::builder().workers(3).run_async(async move {
         done2.store(1, Ordering::Release);
     });
     assert_eq!(done.load(Ordering::Acquire), 1);
@@ -164,7 +164,7 @@ fn run_async_root_future_runs_to_completion() {
 fn async_task_system_yield_now() {
     let flag = Arc::new(AtomicU64::new(0));
     let flag2 = Arc::clone(&flag);
-    DefaultStacklessOnlyTaskSystem::run_async(2, async move {
+    DefaultStacklessOnlyTaskSystem::builder().workers(2).run_async(async move {
         let h = DefaultStacklessOnlyTaskSystem::spawn(move || async move {
             flag2.store(1, Ordering::Release);
         })

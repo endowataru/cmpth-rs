@@ -17,8 +17,13 @@ use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
 
 /// Start `num_workers` workers on the base system and run `root` (a
 /// `Future`) as the first task, entirely without stackful ULT machinery —
-/// the stackless-only counterpart to
-/// [`stackful::scheduler::run`](crate::resumable::stackful::scheduler::run).
+/// the stackless-only counterpart to the old bracketing
+/// `stackful::scheduler::run` (now
+/// [`stackful::init::init`](crate::resumable::stackful::init::init) +
+/// [`StackfulBuilder::run`](crate::traits::system::stackful::StackfulBuilder::run)).
+/// Stackless has no standalone-init counterpart — see
+/// [`StacklessInitSystem`](crate::traits::system::stackless::StacklessInitSystem)'s
+/// doc comment for why.
 ///
 /// `root` is pushed via `fork_async_parent_first` rather than
 /// `fork_parent_first`: there is no `Ctx`/`StackAlloc` to build a real

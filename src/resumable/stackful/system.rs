@@ -100,14 +100,6 @@ impl<S: ThreadSystem + StackfulSchedulerSystem> crate::traits::scoped::ScopedSta
 where
     S::Desc: StackfulTaskDesc,
 {
-    fn run<F, R>(num_workers: usize, f: F) -> R
-    where
-        F: FnOnce() -> R + Send + 'static,
-        R: Send + 'static,
-    {
-        crate::resumable::stackful::scheduler::run_with_result::<S, F, R>(num_workers, f)
-    }
-
     fn parallel_call<Fa, Fb, Ra, Rb>(a: Fa, b: Fb) -> (Ra, Rb)
     where
         Fa: FnOnce() -> Ra + Send + 'static,
@@ -118,6 +110,22 @@ where
         let h = <S as ThreadSystem>::spawn(a);
         let rb = b();
         (crate::traits::stackful::JoinHandleLike::join(h), rb)
+    }
+}
+
+/// The bracketing/standalone-init entry point (`Builder::run`/`Builder::init`),
+/// replacing what used to be `ScopedStackfulTaskSystem::run` — same blanket
+/// condition as that trait's own impl just above, since both ultimately
+/// need the same "real ULTs on a real stack" capability.
+impl<S: ThreadSystem + StackfulSchedulerSystem> crate::traits::stackful::StackfulInitSystem for S
+where
+    S::Desc: StackfulTaskDesc,
+{
+    type Builder = crate::resumable::stackful::init::StackfulBuilderImpl<Self>;
+    type Init = crate::resumable::stackful::init::StackfulInit<Self>;
+
+    fn builder() -> Self::Builder {
+        crate::resumable::stackful::init::StackfulBuilderImpl::new()
     }
 }
 
@@ -166,7 +174,7 @@ impl<
 /// body.
 ///
 /// ```
-/// use cmpth::{ThreadSystem, NestableSystem, ScopedStackfulTaskSystem, JoinHandleLike};
+/// use cmpth::{ThreadSystem, NestableSystem, StackfulBuilder, StackfulInitSystem, JoinHandleLike};
 ///
 /// pub struct MySystem;
 ///
@@ -184,7 +192,7 @@ impl<
 ///     }
 /// }
 ///
-/// MySystem::run(2, || {
+/// MySystem::builder().workers(2).run(|| {
 ///     let h = MySystem::spawn(|| 42);
 ///     assert_eq!(JoinHandleLike::join(h), 42);
 /// });

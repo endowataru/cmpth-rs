@@ -20,6 +20,8 @@ pub use crate::traits::system::bundle::StackfulTaskSystem;
 pub use crate::traits::system::delegation::{Delegator, DelegationSystem};
 pub use crate::traits::system::nesting::NestableSystem;
 pub use crate::traits::system::scoped::ScopedStackfulTaskSystem;
-pub use crate::traits::system::stackful::{JoinHandleLike, ThreadSystem};
+pub use crate::traits::system::stackful::{
+    JoinHandleLike, StackfulBuilder, StackfulInitSystem, ThreadSystem,
+};
 pub use crate::traits::system::suspend::SuspendableSystem;
 pub use crate::traits::system::sync::{StackfulBarrier, StackfulMutex, StackfulSyncSystem};

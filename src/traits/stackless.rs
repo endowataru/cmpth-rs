@@ -11,5 +11,5 @@ pub use crate::traits::component::stackless::{StacklessResumable, WakerTaskDesc}
 pub use crate::traits::component::wait::Resumable;
 pub use crate::traits::system::TaskSystem;
 pub use crate::traits::system::scoped::ScopedStacklessTaskSystem;
-pub use crate::traits::system::stackless::StacklessTaskSystem;
+pub use crate::traits::system::stackless::{StacklessBuilder, StacklessInitSystem, StacklessTaskSystem};
 pub use crate::traits::system::sync::{StacklessBarrier, StacklessMutex, StacklessSyncSystem};

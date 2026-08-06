@@ -78,8 +78,11 @@ impl BenchSystem for CmpthBench {
         <cmpth::DefaultDualTaskSystem as cmpth::ThreadSystem>::JoinHandle<T>;
 
     fn run(num_workers: usize, f: impl FnOnce() + Send + 'static) {
-        use cmpth::ScopedStackfulTaskSystem as _;
-        cmpth::DefaultDualTaskSystem::run(num_workers, f);
+        use cmpth::{StackfulBuilder as _, StackfulInitSystem};
+        // `DefaultDualTaskSystem` is dual (implements both
+        // `StackfulInitSystem`/`StacklessInitSystem`), so `::builder()`
+        // alone is ambiguous.
+        <cmpth::DefaultDualTaskSystem as StackfulInitSystem>::builder().workers(num_workers).run(f);
     }
 
     fn spawn<T: Send + 'static>(
@@ -98,14 +101,15 @@ impl BenchSystem for CmpthBench {
 // ---------------------------------------------------------------------------
 
 pub mod dual {
-    use cmpth::{BlockOnSystem, DefaultDualTaskSystem, ScopedStackfulTaskSystem, ThreadSystem};
+    use cmpth::{BlockOnSystem, DefaultDualTaskSystem, StackfulBuilder, StackfulInitSystem, ThreadSystem};
 
     pub fn run<F, R>(num_workers: usize, root: F) -> R
     where
         F: FnOnce() -> R + Send + 'static,
         R: Send + 'static,
     {
-        DefaultDualTaskSystem::run(num_workers, root)
+        // Dual system: disambiguate from `StacklessInitSystem::builder`.
+        <DefaultDualTaskSystem as StackfulInitSystem>::builder().workers(num_workers).run(root)
     }
 
     pub fn spawn<T, F>(f: F) -> <DefaultDualTaskSystem as ThreadSystem>::JoinHandle<T>
@@ -143,8 +147,8 @@ impl BenchSystem for StackfulOnlyBench {
         <cmpth::DefaultStackfulOnlyTaskSystem as cmpth::ThreadSystem>::JoinHandle<T>;
 
     fn run(num_workers: usize, f: impl FnOnce() + Send + 'static) {
-        use cmpth::ScopedStackfulTaskSystem as _;
-        cmpth::DefaultStackfulOnlyTaskSystem::run(num_workers, f);
+        use cmpth::{StackfulBuilder as _, StackfulInitSystem as _};
+        cmpth::DefaultStackfulOnlyTaskSystem::builder().workers(num_workers).run(f);
     }
 
     fn spawn<T: Send + 'static>(
@@ -365,8 +369,8 @@ where
 
     let result = Arc::new(AtomicU64::new(0));
     let result2 = Arc::clone(&result);
-    use cmpth::ScopedStacklessTaskSystem;
-    S::run_async(num_workers, async move {
+    use cmpth::{StacklessBuilder, StacklessInitSystem};
+    S::builder().workers(num_workers).run_async(async move {
         result2.store(fib_async::<S>(n).await, Ordering::Release);
     });
     result.load(Ordering::Acquire)
@@ -400,8 +404,20 @@ pub fn fib_parallel_invoke<S: cmpth::ScopedStackfulTaskSystem>(n: u64) -> u64 {
 
 /// Run [`fib_parallel_invoke`] to completion on `num_workers` and return the
 /// result.
-pub fn run_fib_parallel_invoke<S: cmpth::ScopedStackfulTaskSystem>(num_workers: usize, n: u64) -> u64 {
-    S::run(num_workers, move || fib_parallel_invoke::<S>(n))
+///
+/// Bounded on `StackfulInitSystem` too (not just `ScopedStackfulTaskSystem`,
+/// which lost `run` when it moved to `StackfulInitSystem`/`StackfulBuilder`
+/// — see that trait's doc comment): `cmpth::ScopedTaskSystem` (this
+/// function's only real caller today) implements both, via its own
+/// `sync_engine`-backed `StackfulBuilder`, so genericity over "any system
+/// that can both `parallel_call` and bracket a `run`" is preserved rather
+/// than hardcoding `ScopedTaskSystem` here.
+pub fn run_fib_parallel_invoke<S: cmpth::ScopedStackfulTaskSystem + cmpth::StackfulInitSystem>(
+    num_workers: usize,
+    n: u64,
+) -> u64 {
+    use cmpth::StackfulBuilder as _;
+    S::builder().workers(num_workers).run(move || fib_parallel_invoke::<S>(n))
 }
 
 /// Count N-Queens solutions for an n×n board.

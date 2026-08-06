@@ -2,7 +2,7 @@
 
 pub mod context;
 pub mod desc;
-pub mod scheduler;
+pub mod init;
 pub mod suspended;
 pub mod sync;
 pub mod system;
