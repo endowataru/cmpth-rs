@@ -56,7 +56,7 @@ impl ScopedStackfulTaskSystem for ScopedTaskSystem {
 /// (see [`SyncInit`]'s own doc comment), so there is nothing the default's
 /// `catch_unwind` wrapping buys here that a plain `std::thread::spawn`-style
 /// panic-propagates-through-`join` doesn't already give for free — and
-/// going direct also lets the un-stolen root job stay exactly the
+/// going direct also lets the un-stolen root task stay exactly the
 /// single-call shape it always was, with no extra `Arc<Mutex<Option<R>>>`
 /// result side-channel.
 pub struct ScopedBuilder {

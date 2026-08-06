@@ -12,7 +12,7 @@
 //!
 //! Deliberately *not* built on [`crate::resumable`]'s `SchedulerSystem`/
 //! `UltWorker` machinery: a `parallel_call` branch is represented as a
-//! plain value on the caller's own native stack frame (`job::JobRef`),
+//! plain value on the caller's own native stack frame (`task::TaskRef`),
 //! with a single-purpose completion latch, not a separately allocated,
 //! pooled task descriptor with a general join-protocol. That's what makes
 //! the common (unstolen) path cheap — see
@@ -22,8 +22,8 @@
 //! actually get stolen ever pay for deque/latch/help-first machinery at
 //! all).
 //!
-//! Two independent engines share `job::JobRef`'s stack-resident,
-//! type-erased job representation:
+//! Two independent engines share `task::TaskRef`'s stack-resident,
+//! type-erased task representation:
 //! - `sync_engine` — OS threads, blocking `parallel_call`, mirrors the
 //!   original `fork_join.rs` almost exactly.
 //! - `async_engine` — OS threads that poll [`Future`]
@@ -34,9 +34,9 @@
 //!   registers a waker instead of busy-spinning.
 
 mod async_engine;
-mod job;
 mod sync_engine;
 mod system;
+mod task;
 
 pub use system::ScopedTaskSystem;
 // `SyncInit` is `ScopedTaskSystem`'s `StackfulInitSystem::Init` — a public

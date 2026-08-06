@@ -1,8 +1,8 @@
 //! OS-thread-pool engine backing [`ScopedStackfulTaskSystem`](crate::traits::ScopedStackfulTaskSystem).
 //!
-//! Mirrors `rayon::join`: push the second branch as a stealable [`JobRef`],
+//! Mirrors `rayon::join`: push the second branch as a stealable [`TaskRef`],
 //! run the first branch as an ordinary nested call, then either pop our own
-//! job back off (not stolen — finish it with one more ordinary call) or
+//! task back off (not stolen — finish it with one more ordinary call) or
 //! help execute other stealable work while waiting on the latch (stolen).
 //! The un-stolen path never touches the latch, the deque's steal side, or
 //! any heap allocation at all.
@@ -25,21 +25,21 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use super::job::{JobRef, StackJob};
+use super::task::{StackTask, TaskRef};
 
 // ---------------------------------------------------------------------------
 // Registry / worker context
 // ---------------------------------------------------------------------------
 
 struct Registry {
-    stealers: Vec<Stealer<JobRef>>,
-    injector: Injector<JobRef>,
+    stealers: Vec<Stealer<TaskRef>>,
+    injector: Injector<TaskRef>,
     shutdown: AtomicBool,
 }
 
 struct WorkerContext {
     index: usize,
-    deque: Deque<JobRef>,
+    deque: Deque<TaskRef>,
     registry: Arc<Registry>,
 }
 
@@ -69,14 +69,14 @@ pub(crate) fn current_num_workers() -> Option<usize> {
     try_current_context().map(|wk| wk.registry.stealers.len())
 }
 
-/// Try to make progress once: pop our own local job, else steal from
+/// Try to make progress once: pop our own local task, else steal from
 /// another worker, else check the global injector. Returns `false` if
 /// nothing was found anywhere right now. Shared by the idle worker loop
 /// and `parallel_call`'s help-while-waiting loop — the same "what do I do
 /// when I have nothing of my own to run" logic either way.
 fn try_execute_one(wk: &WorkerContext) -> bool {
-    if let Some(job) = wk.deque.pop() {
-        unsafe { job.execute() };
+    if let Some(task) = wk.deque.pop() {
+        unsafe { task.execute() };
         return true;
     }
     let n = wk.registry.stealers.len();
@@ -84,8 +84,8 @@ fn try_execute_one(wk: &WorkerContext) -> bool {
         let i = (wk.index + off) % n;
         loop {
             match wk.registry.stealers[i].steal() {
-                Steal::Success(job) => {
-                    unsafe { job.execute() };
+                Steal::Success(task) => {
+                    unsafe { task.execute() };
                     return true;
                 }
                 Steal::Empty => break,
@@ -95,8 +95,8 @@ fn try_execute_one(wk: &WorkerContext) -> bool {
     }
     loop {
         match wk.registry.injector.steal() {
-            Steal::Success(job) => {
-                unsafe { job.execute() };
+            Steal::Success(task) => {
+                unsafe { task.execute() };
                 return true;
             }
             Steal::Empty => return false,
@@ -124,33 +124,33 @@ where
     Rb: Send,
 {
     let wk = current_context();
-    let job_b = StackJob::new(b);
-    let job_ref = job_b.as_job_ref();
-    wk.deque.push(job_ref);
+    let task_b = StackTask::new(b);
+    let task_ref = task_b.as_task_ref();
+    wk.deque.push(task_ref);
 
     let ra = a();
 
     let rb = match wk.deque.pop() {
-        Some(popped) if std::ptr::eq(popped.data, job_ref.data) => {
+        Some(popped) if std::ptr::eq(popped.data, task_ref.data) => {
             // Not stolen: finish it ourselves, one plain call — the whole
             // point. No latch, no steal-side traffic at all.
-            job_b.run_inline()
+            task_b.run_inline()
         }
         popped => {
             // `popped` should only ever be `None` here (properly nested
             // calls always leave the deque exactly as they found it, aside
-            // from `job_b` itself) — but if something else somehow came
+            // from `task_b` itself) — but if something else somehow came
             // back, put it back rather than dropping work.
             if let Some(other) = popped {
                 wk.deque.push(other);
             }
             // Stolen: help execute other stealable work while waiting.
-            while !job_b.latch.probe() {
+            while !task_b.latch.probe() {
                 if !try_execute_one(wk) {
                     std::hint::spin_loop();
                 }
             }
-            job_b.take_result()
+            task_b.take_result()
         }
     };
     (ra, rb)
@@ -166,7 +166,7 @@ where
 //
 // This engine has no ULT/context-switch concept at all (see this module's
 // own doc comment: a `parallel_call` branch is a stack-resident closure, run
-// inline or executed directly by whichever thread steals its `JobRef` — no
+// inline or executed directly by whichever thread steals its `TaskRef` — no
 // continuation is ever reified the way a stackful ULT's stack is), so there
 // is no "the caller's own continuation becomes stealable" property to
 // mirror here the way `resumable::stackful::init` mirrors it for real ULTs.
@@ -204,8 +204,8 @@ pub(crate) fn init(num_workers: usize) -> SyncInit {
         "cmpth: nested scoped::init() of the same engine on one thread"
     );
 
-    let deques: Vec<Deque<JobRef>> = (0..num_workers).map(|_| Deque::new_lifo()).collect();
-    let stealers: Vec<Stealer<JobRef>> = deques.iter().map(|d| d.stealer()).collect();
+    let deques: Vec<Deque<TaskRef>> = (0..num_workers).map(|_| Deque::new_lifo()).collect();
+    let stealers: Vec<Stealer<TaskRef>> = deques.iter().map(|d| d.stealer()).collect();
     let registry = Arc::new(Registry { stealers, injector: Injector::new(), shutdown: AtomicBool::new(false) });
 
     let mut deques = deques.into_iter();
@@ -257,7 +257,7 @@ impl Drop for SyncInit {
 }
 
 /// Start `num_workers` OS threads (the calling thread becomes worker 0),
-/// run `f` as the root job, and block until it (and everything it
+/// run `f` as the root task, and block until it (and everything it
 /// transitively `parallel_call`s) completes.
 pub(crate) fn run<F, R>(num_workers: usize, f: F) -> R
 where
@@ -265,8 +265,8 @@ where
     R: Send,
 {
     assert!(num_workers >= 1, "need at least one worker");
-    let deques: Vec<Deque<JobRef>> = (0..num_workers).map(|_| Deque::new_lifo()).collect();
-    let stealers: Vec<Stealer<JobRef>> = deques.iter().map(|d| d.stealer()).collect();
+    let deques: Vec<Deque<TaskRef>> = (0..num_workers).map(|_| Deque::new_lifo()).collect();
+    let stealers: Vec<Stealer<TaskRef>> = deques.iter().map(|d| d.stealer()).collect();
     let registry = Arc::new(Registry { stealers, injector: Injector::new(), shutdown: AtomicBool::new(false) });
 
     let mut deques = deques.into_iter();
@@ -296,11 +296,11 @@ where
         })
         .collect();
 
-    let root = StackJob::new(f);
-    let root_ref = root.as_job_ref();
+    let root = StackTask::new(f);
+    let root_ref = root.as_task_ref();
     let ctx0 = WorkerContext { index: 0, deque: worker0_deque, registry: Arc::clone(&registry) };
     CURRENT.with(|c| c.set(&ctx0 as *const _));
-    // Run the root job directly — no steal-check needed for the very first
+    // Run the root task directly — no steal-check needed for the very first
     // one, nobody else has had a chance to touch it yet.
     unsafe { root_ref.execute() };
 

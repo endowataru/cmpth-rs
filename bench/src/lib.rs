@@ -382,7 +382,7 @@ where
 // ---------------------------------------------------------------------------
 
 /// Parallel Fibonacci via [`ScopedStackfulTaskSystem::parallel_call`] —
-/// cmpth's independent, rayon-`join`-like scheduler (stack-resident jobs, a
+/// cmpth's independent, rayon-`join`-like scheduler (stack-resident tasks, a
 /// single-purpose latch, no `DualTaskDesc`/pool/`Future` involved at all).
 /// Doesn't fit `BenchSystem` (no `spawn`/`JoinHandle` concept, only scoped
 /// `parallel_call`) — used directly with [`run_fib_parallel_invoke`], same
