@@ -140,7 +140,7 @@ where
 /// Standalone init: bring up `num_workers` workers, then return with the
 /// calling OS thread's own continuation already running as an ordinary,
 /// stealable task on worker 0's deque. See the module doc comment.
-pub fn init<S>(num_workers: usize) -> StackfulInit<S>
+pub fn init<S>(num_workers: usize, stack_size: usize) -> StackfulInit<S>
 where
     S: StackfulSchedulerSystem,
     S::Desc: StackfulTaskDesc,
@@ -162,7 +162,8 @@ where
         stealers,
         finished: std::sync::atomic::AtomicBool::new(false),
         external_queue: S::ExternalQueue::default(),
-        task_pool: S::Pool::new_pool(num_workers, S::STACK_SIZE),
+        stack_size,
+        task_pool: S::Pool::new_pool(num_workers, stack_size),
         async_task_pool: S::AsyncPool::new_pool(num_workers, S::ASYNC_POOL_SIZE),
         recursion_pool: S::RecursionPool::new(num_workers, recursion_pool_threshold::<S>()),
     });
@@ -217,7 +218,7 @@ where
     // `root_desc()`) never owns real stack storage of its own. Freed by
     // `Drop`ping it from the `exit_to_cont` callback below, once the loop
     // has switched off of it for good.
-    let sched_stack = S::StackAlloc::alloc_stack(S::STACK_SIZE);
+    let sched_stack = S::StackAlloc::alloc_stack(stack_size);
     let exec_top = align_down(sched_stack.stack_top() as usize, 16) as *mut u8;
     let root_desc_ptr = wk0.root_desc() as *const S::Desc as *mut S::Desc;
 
@@ -343,12 +344,13 @@ where
 /// StackfulSchedulerSystem`).
 pub struct StackfulBuilderImpl<S> {
     num_workers: Option<usize>,
+    stack_size: Option<usize>,
     _marker: PhantomData<fn() -> S>,
 }
 
 impl<S> StackfulBuilderImpl<S> {
     pub(crate) fn new() -> Self {
-        StackfulBuilderImpl { num_workers: None, _marker: PhantomData }
+        StackfulBuilderImpl { num_workers: None, stack_size: None, _marker: PhantomData }
     }
 }
 
@@ -362,7 +364,15 @@ where
         self
     }
 
+    fn stack_size(mut self, bytes: usize) -> Self {
+        self.stack_size = Some(bytes);
+        self
+    }
+
     fn init(self) -> S::Init {
-        init::<S>(self.num_workers.unwrap_or_else(crate::os::available_parallelism))
+        init::<S>(
+            self.num_workers.unwrap_or_else(crate::os::available_parallelism),
+            self.stack_size.unwrap_or(S::STACK_SIZE),
+        )
     }
 }

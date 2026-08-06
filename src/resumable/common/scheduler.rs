@@ -33,6 +33,15 @@ pub struct Scheduler<S: SchedulerSystem> {
     pub(crate) stealers: Box<[<S::RunQueue as WorkerRunQueue<S::Item>>::Stealer]>,
     pub(crate) finished: std::sync::atomic::AtomicBool,
     pub(crate) external_queue: S::ExternalQueue,
+    /// Per-task ULT stack size for the stackful `spawn`/`fork_parent_first`
+    /// paths and the scheduler loop's own stack, in bytes — set from
+    /// [`StackfulBuilder::stack_size`](crate::traits::system::stackful::StackfulBuilder::stack_size)
+    /// (default: `S::STACK_SIZE`) by [`init`](crate::resumable::stackful::init::init).
+    /// `0` on a stackless-only system (`run_async`'s construction site),
+    /// which has no real stacks to size — mirrors the existing precedent on
+    /// [`SchedulerSystem::AsyncPool`], where a stackful-only system must
+    /// name an async pool it never allocates from.
+    pub(crate) stack_size: usize,
     pub(crate) task_pool: S::Pool,
     /// Separate from `task_pool`: `spawn_async` needs a much smaller fixed
     /// slot size than a ULT stack, and a dual system needs both live at once

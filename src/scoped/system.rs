@@ -69,6 +69,14 @@ impl StackfulBuilder<ScopedTaskSystem> for ScopedBuilder {
         self
     }
 
+    /// No-op: `ScopedTaskSystem` has no ULT/context-switch concept at all
+    /// (see this module's doc comment) — every task runs directly on an OS
+    /// worker thread, so there is no per-task stack to size. Accepted only
+    /// to satisfy [`StackfulBuilder`]'s uniform interface.
+    fn stack_size(self, _bytes: usize) -> Self {
+        self
+    }
+
     fn init(self) -> SyncInit {
         sync_engine::init(self.num_workers.unwrap_or_else(crate::os::available_parallelism))
     }

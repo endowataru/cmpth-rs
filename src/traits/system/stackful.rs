@@ -70,6 +70,10 @@ pub trait StackfulBuilder<S: StackfulInitSystem>: Sized {
     /// called.
     fn workers(self, n: usize) -> Self;
 
+    /// Set the per-task ULT stack size in bytes. Defaults to the system's
+    /// `STACK_SIZE` associated const if never called.
+    fn stack_size(self, bytes: usize) -> Self;
+
     /// Standalone init: start the worker pool, then return. Everything the
     /// caller does *after* this call — including the call's own return —
     /// keeps running as an ordinary, stealable task on the pool: `spawn`,

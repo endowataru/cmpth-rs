@@ -58,6 +58,12 @@ where
         stealers,
         finished: std::sync::atomic::AtomicBool::new(false),
         external_queue: S::ExternalQueue::default(),
+        // Meaningless-but-harmless here, same as the `task_pool` line right
+        // below: a pure stackless-only system has no real stacks (no
+        // `spawn`), so there is no `STACK_SIZE` const to read and no
+        // configured value to thread through — see `Scheduler::stack_size`'s
+        // own doc comment.
+        stack_size: 0,
         // task_pool is never touched on a pure stackless-only system (no
         // `spawn`), so its configured size is irrelevant.
         task_pool: S::Pool::new_pool(num_workers, 0),

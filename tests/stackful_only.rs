@@ -165,6 +165,41 @@ fn block_on_cross_ult_wake() {
 }
 
 // ---------------------------------------------------------------------------
+// stack_size — StackfulBuilder::stack_size
+// ---------------------------------------------------------------------------
+
+/// Touches a 200 KiB on-stack array — well above the system's default 64
+/// KiB `STACK_SIZE` (a stack that size couldn't even fit this array's own
+/// storage) but comfortably under the 512 KiB this test configures via
+/// `StackfulBuilder::stack_size`. `black_box` on the mutable reference (to
+/// stop the write from being proven dead) and on the final sum (to stop the
+/// read from being proven constant) keep the optimizer from eliding the
+/// array altogether — without them there would be no real stack use to
+/// exercise, even at `opt-level=0`. If `stack_size` were silently ignored
+/// (falling back to the 64 KiB default), spawning this task would overrun
+/// the ULT's guard page and abort/crash rather than pass.
+#[inline(never)]
+fn consume_stack() -> u64 {
+    let mut buf = [0u8; 200 * 1024];
+    std::hint::black_box(&mut buf);
+    buf[0] = 1;
+    buf[buf.len() - 1] = 41;
+    std::hint::black_box(buf[0] as u64 + buf[buf.len() - 1] as u64)
+}
+
+#[test]
+fn stack_size_configurable_via_builder() {
+    const CONFIGURED_STACK_SIZE: usize = 512 * 1024;
+    DefaultStackfulOnlyTaskSystem::builder()
+        .workers(2)
+        .stack_size(CONFIGURED_STACK_SIZE)
+        .run(|| {
+            let h = DefaultStackfulOnlyTaskSystem::spawn(consume_stack);
+            assert_eq!(JoinHandleLike::join(h), 42);
+        });
+}
+
+// ---------------------------------------------------------------------------
 // Standalone init — StackfulBuilder::init, replacing bracketing `run`
 // ---------------------------------------------------------------------------
 

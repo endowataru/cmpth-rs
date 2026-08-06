@@ -39,7 +39,7 @@ where
     <S as SchedulerSystem>::Desc: StackfulTaskDesc,
 {
     let wk = UltWorker::<S>::current().expect("cmpth: spawn called outside a worker");
-    let desc = wk.alloc_task(true, S::STACK_SIZE);
+    let desc = wk.alloc_task(true, wk.shared().stack_size);
     let stack_top = {
         // SAFETY: `desc` was just freshly allocated by `alloc_task` and has
         // never been wrapped in a token before — trivially exclusive.
@@ -110,7 +110,13 @@ where
     // (not a bare `Box::new`) and marked `oversized` unconditionally, so its
     // eventual dealloc (through the pool, like any other finished task) can
     // recover the node via `Node::node_of` and always raw-frees it.
-    let payload = S::Desc::alloc_with(S::StackAlloc::alloc_stack(S::STACK_SIZE).into(), false);
+    //
+    // SAFETY: `scheduler` points at a `Scheduler<S>` kept alive by the caller
+    // (an `Arc` it holds or derives from) for at least as long as this call —
+    // same precondition `set_scheduler` below already relies on for this
+    // exact pointer.
+    let stack_size = unsafe { (*scheduler).stack_size };
+    let payload = S::Desc::alloc_with(S::StackAlloc::alloc_stack(stack_size).into(), false);
     let desc = crate::resumable::common::pool::Node::wrap_fresh(0, true, payload);
     // SAFETY: `desc` was just freshly allocated above and has never been
     // wrapped in a token before — trivially exclusive.
