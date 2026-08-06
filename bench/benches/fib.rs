@@ -39,7 +39,7 @@ fn bench_fib_async(group: &mut criterion::BenchmarkGroup<criterion::measurement:
 /// doesn't fit `BenchSystem` either (no `spawn`/`JoinHandle`, only scoped
 /// `parallel_call`). Generic over `S: ScopedStackfulTaskSystem`, not
 /// hardcoded to `cmpth::ScopedTaskSystem` — see [`run_fib_parallel_invoke`].
-fn bench_fib_parallel_invoke<S: cmpth::ScopedStackfulTaskSystem>(
+fn bench_fib_parallel_invoke<S: cmpth::ScopedStackfulTaskSystem + cmpth::StackfulInitSystem>(
     group: &mut criterion::BenchmarkGroup<criterion::measurement::WallTime>,
     label: &str,
 ) {

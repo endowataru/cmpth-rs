@@ -7,14 +7,17 @@
 
 #![allow(dead_code)]
 
-use cmpth::{BlockOnSystem, DefaultDualTaskSystem, ScopedStackfulTaskSystem, ThreadSystem};
+use cmpth::{BlockOnSystem, DefaultDualTaskSystem, StackfulBuilder, StackfulInitSystem, ThreadSystem};
 
 pub fn run<F, R>(num_workers: usize, root: F) -> R
 where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
 {
-    DefaultDualTaskSystem::run(num_workers, root)
+    // `DefaultDualTaskSystem` implements both `StackfulInitSystem` and
+    // `StacklessInitSystem` (it's a dual system), so plain `::builder()`
+    // is ambiguous — disambiguate to the stackful one explicitly.
+    <DefaultDualTaskSystem as StackfulInitSystem>::builder().workers(num_workers).run(root)
 }
 
 pub fn spawn<T, F>(f: F) -> <DefaultDualTaskSystem as ThreadSystem>::JoinHandle<T>

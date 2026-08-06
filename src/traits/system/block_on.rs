@@ -19,9 +19,9 @@ pub trait BlockOnSystem: TaskSystem {
     /// underneath keeps running other tasks.
     ///
     /// ```
-    /// use cmpth::{BlockOnSystem, DefaultStackfulOnlyTaskSystem, ScopedStackfulTaskSystem};
+    /// use cmpth::{BlockOnSystem, DefaultStackfulOnlyTaskSystem, StackfulBuilder, StackfulInitSystem};
     ///
-    /// DefaultStackfulOnlyTaskSystem::run(2, || {
+    /// DefaultStackfulOnlyTaskSystem::builder().workers(2).run(|| {
     ///     let x = DefaultStackfulOnlyTaskSystem::block_on(async { 6 * 7 });
     ///     assert_eq!(x, 42);
     /// });

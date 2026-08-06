@@ -40,7 +40,8 @@ pub trait ExternalQueue<S: SchedulerSystem>: Default + Send + Sync + 'static {
     /// delivery.
     fn try_pop(&self) -> Option<SuspendedTaskToken<S::Desc>>;
 
-    /// Called once by [`crate::resumable::stackful::scheduler::run`] before workers start.
+    /// Called once by [`crate::resumable::stackful::init::init`]/
+    /// [`crate::resumable::stackless::scheduler::run_async`] before workers start.
     ///
     /// May push setup tasks to worker 0's deque (e.g., a poller ULT).
     /// The default implementation is a no-op.

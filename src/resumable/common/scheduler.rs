@@ -1,6 +1,6 @@
 //! [`Scheduler`]: worker set shared by every flavor, plus the worker idle
 //! loop. Flavor-specific entry points live in
-//! [`stackful::scheduler::run`](crate::resumable::stackful::scheduler::run) and
+//! [`stackful::init::init`](crate::resumable::stackful::init::init) and
 //! [`stackless::scheduler::run_async`](crate::resumable::stackless::scheduler::run_async).
 
 use std::alloc::Layout;
@@ -14,8 +14,9 @@ use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
 
 /// State shared by all workers of one scheduler instance. Base-level
 /// (`S: SchedulerSystem`): shared by stackful-only, dual, and (eventually)
-/// stackless-only systems alike — only [`run`](crate::resumable::stackful::scheduler::run)
-/// (the stackful entry point) needs the stackful extension.
+/// stackless-only systems alike — only
+/// [`init`](crate::resumable::stackful::init::init) (the stackful entry
+/// point) needs the stackful extension.
 pub struct Scheduler<S: SchedulerSystem> {
     pub(crate) workers: Box<[UltWorker<S>]>,
     pub(crate) finished: std::sync::atomic::AtomicBool,
@@ -61,6 +62,23 @@ where
     };
     wk.set_cur_task(root_task);
 
+    worker_idle_loop(wk);
+
+    S::worker_tls().set(std::ptr::null_mut());
+}
+
+/// The idle/dispatch loop itself, factored out of [`worker_loop`] so the
+/// stackful initializer (`resumable::stackful::init`) can drive it on a
+/// bootstrap it sets up differently: TLS is already pointed at `wk` and
+/// `cur_task` is already populated (by the child-first fork's switch shim,
+/// not by the two lines above) before that caller ever reaches this
+/// function, and TLS teardown happens later too (on whichever OS thread
+/// ends up running the initializer's `Drop`, not necessarily this one) — so
+/// neither belongs inside this shared core.
+pub(crate) fn worker_idle_loop<S>(wk: &UltWorker<S>)
+where
+    S: DescScheduler,
+{
     let shared = wk.shared();
     let mut idle_rounds = 0u32;
     while !shared.finished.load(Ordering::Acquire) {
@@ -78,6 +96,4 @@ where
             S::Base::yield_now();
         }
     }
-
-    S::worker_tls().set(std::ptr::null_mut());
 }

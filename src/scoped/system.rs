@@ -8,14 +8,18 @@
 
 use std::future::Future;
 
-use crate::traits::{ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, TaskSystem};
+use crate::traits::{
+    ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, StackfulBuilder, StackfulInitSystem,
+    TaskSystem,
+};
 
+use super::sync_engine::SyncInit;
 use super::{async_engine, sync_engine};
 
 /// The concrete [`ScopedStackfulTaskSystem`]/[`ScopedStacklessTaskSystem`]
 /// implementation. Zero-sized — all state lives in the worker pool spun up
-/// by [`run`](ScopedStackfulTaskSystem::run)/[`run_async`](ScopedStacklessTaskSystem::run_async)
-/// for the duration of that call.
+/// by [`StackfulBuilder::run`]/[`StackfulBuilder::init`] (backed by
+/// `sync_engine`) for the duration of that call/guard.
 pub struct ScopedTaskSystem;
 
 impl TaskSystem for ScopedTaskSystem {
@@ -34,14 +38,6 @@ impl TaskSystem for ScopedTaskSystem {
 }
 
 impl ScopedStackfulTaskSystem for ScopedTaskSystem {
-    fn run<F, R>(num_workers: usize, f: F) -> R
-    where
-        F: FnOnce() -> R + Send + 'static,
-        R: Send + 'static,
-    {
-        sync_engine::run(num_workers, f)
-    }
-
     fn parallel_call<Fa, Fb, Ra, Rb>(a: Fa, b: Fb) -> (Ra, Rb)
     where
         Fa: FnOnce() -> Ra + Send + 'static,
@@ -53,14 +49,49 @@ impl ScopedStackfulTaskSystem for ScopedTaskSystem {
     }
 }
 
-impl ScopedStacklessTaskSystem for ScopedTaskSystem {
-    fn run_async<F>(num_workers: usize, root: F)
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        async_engine::run_async(num_workers, root)
+/// Builder for [`ScopedTaskSystem`]'s [`StackfulInitSystem`]. Overrides the
+/// default [`StackfulBuilder::run`] with a direct call into
+/// [`sync_engine::run`] rather than going through `init`/`Drop`: this
+/// engine has no context-switch/panic-across-`Drop` hazard to guard against
+/// (see [`SyncInit`]'s own doc comment), so there is nothing the default's
+/// `catch_unwind` wrapping buys here that a plain `std::thread::spawn`-style
+/// panic-propagates-through-`join` doesn't already give for free — and
+/// going direct also lets the un-stolen root job stay exactly the
+/// single-call shape it always was, with no extra `Arc<Mutex<Option<R>>>`
+/// result side-channel.
+pub struct ScopedBuilder {
+    num_workers: Option<usize>,
+}
+
+impl StackfulBuilder<ScopedTaskSystem> for ScopedBuilder {
+    fn workers(mut self, n: usize) -> Self {
+        self.num_workers = Some(n);
+        self
     }
 
+    fn init(self) -> SyncInit {
+        sync_engine::init(self.num_workers.unwrap_or_else(crate::os::available_parallelism))
+    }
+
+    fn run<F, R>(self, f: F) -> R
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        sync_engine::run(self.num_workers.unwrap_or_else(crate::os::available_parallelism), f)
+    }
+}
+
+impl StackfulInitSystem for ScopedTaskSystem {
+    type Builder = ScopedBuilder;
+    type Init = SyncInit;
+
+    fn builder() -> Self::Builder {
+        ScopedBuilder { num_workers: None }
+    }
+}
+
+impl ScopedStacklessTaskSystem for ScopedTaskSystem {
     fn parallel_call<Fa, Fb, Ra, Rb, MkA, MkB>(mk_a: MkA, mk_b: MkB) -> impl Future<Output = (Ra, Rb)> + Send
     where
         MkA: FnOnce() -> Fa,

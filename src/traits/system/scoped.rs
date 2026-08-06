@@ -5,33 +5,23 @@ use crate::traits::system::TaskSystem;
 /// Stackful (blocking) flavor: `a`/`b` are plain closures, run to
 /// completion synchronously before [`parallel_call`](Self::parallel_call)
 /// returns.
+///
+/// The bracketing/standalone-init entry points that used to live here
+/// (`run`) moved to
+/// [`StackfulInitSystem`](crate::traits::system::stackful::StackfulInitSystem)/
+/// [`StackfulBuilder`](crate::traits::system::stackful::StackfulBuilder) —
+/// this trait now carries `parallel_call` only, so code that wants
+/// *just* this capability (no `spawn`/`join`, no standalone `init`) isn't
+/// forced to also implement those.
 pub trait ScopedStackfulTaskSystem: TaskSystem {
-    /// Start `num_workers` worker threads and run `f` as the root job.
-    /// Blocks until `f` (and everything it transitively
-    /// [`parallel_call`](Self::parallel_call)s) completes.
-    ///
-    /// `F`/`R` need `'static` here (the standalone engine's internal `run`
-    /// free function doesn't — `f`/its result never actually outlive this
-    /// blocking call — but a system blanket-derived from
-    /// [`ThreadSystem`](crate::ThreadSystem) satisfies this by spawning and
-    /// joining internally, which does need it: spawned/stolen tasks there
-    /// can genuinely run for an unbounded time after this call starts).
-    /// Same "opaque trait bound can't conditionally relax" shape as
-    /// [`ScopedStacklessTaskSystem::parallel_call`]'s
-    /// `MkA`/`MkB`. The non-`'static` capability is only exercised inside
-    /// the crate today (`scoped::sync_engine`'s own tests) — its free
-    /// functions aren't `pub`, so there's currently no way to reach the
-    /// relaxed version from outside `cmpth` itself.
-    fn run<F, R>(num_workers: usize, f: F) -> R
-    where
-        F: FnOnce() -> R + Send + 'static,
-        R: Send + 'static;
-
     /// Run `a` and `b`, potentially in parallel, and return both results.
-    /// Must be called from within [`run`](Self::run) (on one of its worker
-    /// threads, possibly nested inside another `parallel_call`'s `a`/`b`).
+    /// Must be called from within an active worker pool for this system —
+    /// e.g. a [`StackfulBuilder::run`](crate::traits::system::stackful::StackfulBuilder::run)/
+    /// [`StackfulBuilder::init`](crate::traits::system::stackful::StackfulBuilder::init)
+    /// call, possibly nested inside another `parallel_call`'s `a`/`b`.
     ///
-    /// `Fa`/`Fb` need `'static` here for the same reason [`run`](Self::run)
+    /// `Fa`/`Fb` need `'static` here for the same reason
+    /// [`StackfulBuilder::run`](crate::traits::system::stackful::StackfulBuilder::run)
     /// does: the standalone engine's own internal `parallel_call` free
     /// function doesn't need it (`a`/`b` are provably both finished before
     /// this returns, so borrowing the caller's own stack data is sound —
@@ -74,16 +64,15 @@ pub trait ScopedStackfulTaskSystem: TaskSystem {
 /// are called eagerly, synchronously, inside `parallel_call` itself (not
 /// deferred to a `poll`), exactly like `recurse`.
 pub trait ScopedStacklessTaskSystem: TaskSystem {
-    /// Start `num_workers` worker threads and run `root` as the first async
-    /// job. Returns once `root` (and everything it transitively
-    /// [`parallel_call`](Self::parallel_call)s) completes.
-    fn run_async<F>(num_workers: usize, root: F)
-    where
-        F: Future<Output = ()> + Send + 'static;
-
     /// Run `mk_a()`/`mk_b()`'s futures, potentially in parallel, and
     /// resolve to both results once both complete. Must be polled from
-    /// within [`run_async`](Self::run_async).
+    /// within a
+    /// [`StacklessBuilder::run_async`](crate::traits::system::stackless::StacklessBuilder::run_async)
+    /// call (see that trait's doc comment — `run_async` moved off this
+    /// trait to [`StacklessInitSystem`](crate::traits::system::stackless::StacklessInitSystem)/
+    /// [`StacklessBuilder`](crate::traits::system::stackless::StacklessBuilder),
+    /// leaving `parallel_call` as the only member here, mirroring
+    /// [`ScopedStackfulTaskSystem`]).
     ///
     /// `MkA`/`MkB` need `Send + 'static` here (the standalone engine calls
     /// both eagerly and never actually needs it, but a system blanket-

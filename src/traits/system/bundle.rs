@@ -4,9 +4,10 @@ use crate::traits::system::stackful::ThreadSystem;
 use crate::traits::system::sync::StackfulSyncSystem;
 
 /// Everything a "complete" stackful system offers: `spawn`/`join` (via
-/// `ThreadSystem`), `run`/`parallel_call` (via `ScopedStackfulTaskSystem`),
-/// a `Mutex`/`Barrier` (via `StackfulSyncSystem`), and `block_on` (via
-/// `BlockOnSystem`). An empty bundle — no methods of its own —
+/// `ThreadSystem`), `parallel_call` (via `ScopedStackfulTaskSystem`; see
+/// also `StackfulInitSystem`/`StackfulBuilder` for `run`/standalone
+/// `init`), a `Mutex`/`Barrier` (via `StackfulSyncSystem`), and `block_on`
+/// (via `BlockOnSystem`). An empty bundle — no methods of its own —
 /// blanket-derived for any `S: ScopedStackfulTaskSystem + ThreadSystem +
 /// StackfulSyncSystem + BlockOnSystem` (see
 /// [`resumable::stackful::system`](crate::resumable::stackful::system) for

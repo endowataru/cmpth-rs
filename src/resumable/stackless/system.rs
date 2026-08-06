@@ -55,13 +55,6 @@ impl<S: StacklessSchedulerSystem> StacklessTaskSystem for S {
 /// blankets are independent, both satisfied by the same `SchedulerSystem +
 /// AsyncTaskDesc` condition.
 impl<S: StacklessSchedulerSystem> ScopedStacklessTaskSystem for S {
-    fn run_async<F>(num_workers: usize, root: F)
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        crate::resumable::stackless::scheduler::run_async::<Self, F>(num_workers, root)
-    }
-
     async fn parallel_call<Fa, Fb, Ra, Rb, MkA, MkB>(mk_a: MkA, mk_b: MkB) -> (Ra, Rb)
     where
         MkA: FnOnce() -> Fa + Send + 'static,
@@ -74,6 +67,45 @@ impl<S: StacklessSchedulerSystem> ScopedStacklessTaskSystem for S {
         let h = crate::resumable::stackless::thread::spawn_async::<Self, Ra, Fa, MkA>(mk_a).await;
         let rb = mk_b().await;
         (h.await, rb)
+    }
+}
+
+/// [`StacklessBuilder`](crate::traits::stackless::StacklessBuilder)
+/// implementation shared by every `resumable`-backed stackless system
+/// (blanket-derived just below, for any `S: StacklessSchedulerSystem`).
+pub struct StacklessBuilderImpl<S> {
+    num_workers: Option<usize>,
+    _marker: PhantomData<fn() -> S>,
+}
+
+impl<S> StacklessBuilderImpl<S> {
+    fn new() -> Self {
+        StacklessBuilderImpl { num_workers: None, _marker: PhantomData }
+    }
+}
+
+impl<S: StacklessSchedulerSystem> crate::traits::stackless::StacklessBuilder<S> for StacklessBuilderImpl<S> {
+    fn workers(mut self, n: usize) -> Self {
+        self.num_workers = Some(n);
+        self
+    }
+
+    fn run_async<F>(self, root: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let num_workers = self.num_workers.unwrap_or_else(crate::os::available_parallelism);
+        crate::resumable::stackless::scheduler::run_async::<S, F>(num_workers, root)
+    }
+}
+
+/// Replaces the old `ScopedStacklessTaskSystem::run_async` — same blanket
+/// condition as `ScopedStacklessTaskSystem` itself just above.
+impl<S: StacklessSchedulerSystem> crate::traits::stackless::StacklessInitSystem for S {
+    type Builder = StacklessBuilderImpl<Self>;
+
+    fn builder() -> Self::Builder {
+        StacklessBuilderImpl::new()
     }
 }
 
@@ -154,7 +186,7 @@ where
 ///
 /// ```
 /// use cmpth::SuspendedTaskToken;
-/// use cmpth::{NestableSystem, ScopedStacklessTaskSystem, StacklessTaskSystem, ThreadSystem};
+/// use cmpth::{NestableSystem, StacklessBuilder, StacklessInitSystem, StacklessTaskSystem, ThreadSystem};
 ///
 /// pub struct MyAsyncMarker;
 ///
@@ -172,7 +204,7 @@ where
 ///
 /// type MyAsyncSystem = cmpth::UltAsyncSystem<MyAsyncMarker>;
 ///
-/// MyAsyncSystem::run_async(2, async {
+/// MyAsyncSystem::builder().workers(2).run_async(async {
 ///     let h = MyAsyncSystem::spawn(|| async { 6 * 7 }).await;
 ///     assert_eq!(h.await, 42);
 /// });

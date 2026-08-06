@@ -43,7 +43,7 @@ fn fib<S: ThreadSystem>(n: u64) -> u64 {
 }
 
 fn main() {
-    DefaultStackfulOnlyTaskSystem::run(4, || {
+    DefaultStackfulOnlyTaskSystem::builder().workers(4).run(|| {
         assert_eq!(fib::<DefaultStackfulOnlyTaskSystem>(34), 5_702_887);
     });
 }
@@ -80,7 +80,7 @@ fn sum_concurrently<S: ThreadSystem + StackfulSyncSystem>(n: u64) -> u64 {
 }
 
 fn main() {
-    DefaultStackfulOnlyTaskSystem::run(4, || {
+    DefaultStackfulOnlyTaskSystem::builder().workers(4).run(|| {
         assert_eq!(sum_concurrently::<DefaultStackfulOnlyTaskSystem>(100), (0..100).sum());
     });
 }
@@ -91,6 +91,34 @@ same tasks (e.g. a `Mutex` contended from both stackful and stackless
 callers)? `DefaultDualTaskSystem` provides both calling conventions on one
 system — the tradeoff, covered next, is a small per-task dispatch cost
 neither single-flavor default pays.
+
+#### Standalone init
+
+`Builder::run` above is a *bracketing* entry point: it blocks until `f`
+returns, then tears the pool down. `Builder::init` is the standalone
+alternative — it starts the pool and returns immediately, with the calling
+thread's own continuation already running as an ordinary, stealable ULT on
+the pool. Dropping the returned guard tears the pool down, so `main` itself
+can look like this instead of being wrapped in a closure:
+
+```rust
+use cmpth::DefaultStackfulOnlyTaskSystem;
+use cmpth::traits::stackful::*;
+
+fn main() {
+    let _guard = DefaultStackfulOnlyTaskSystem::builder().workers(4).init();
+    // Everything from here on runs as a ULT: `spawn`/`join` and
+    // `parallel_call` both work with no enclosing `run` needed.
+    let h = DefaultStackfulOnlyTaskSystem::spawn(|| 6 * 7);
+    assert_eq!(JoinHandleLike::join(h), 42);
+    // `_guard` drops at the end of `main`, tearing the pool down.
+}
+```
+
+A panic that unwinds across the guard's `Drop` is unsupported (see
+`StackfulBuilder::init`'s doc comment for why) and aborts the process with a
+clear message — use `Builder::run` instead whenever the panic needs to
+propagate to the caller.
 
 ### Stackless — `S::spawn` / `.await`
 
@@ -115,7 +143,7 @@ fn fib<S: StacklessTaskSystem>(n: u64) -> impl std::future::Future<Output = u64>
 }
 
 fn main() {
-    DefaultStacklessOnlyTaskSystem::run_async(4, async {
+    DefaultStacklessOnlyTaskSystem::builder().workers(4).run_async(async {
         assert_eq!(fib::<DefaultStacklessOnlyTaskSystem>(34).await, 5_702_887);
     });
 }
@@ -134,7 +162,7 @@ call), so there's no task descriptor, no pool, and no heap allocation on
 the un-stolen path — the cheapest of the three models.
 
 ```rust
-use cmpth::ScopedStackfulTaskSystem;
+use cmpth::{ScopedStackfulTaskSystem, StackfulBuilder, StackfulInitSystem};
 
 fn fib<S: ScopedStackfulTaskSystem>(n: u64) -> u64 {
     if n <= 1 { return n; }
@@ -143,7 +171,7 @@ fn fib<S: ScopedStackfulTaskSystem>(n: u64) -> u64 {
 }
 
 fn main() {
-    let r = cmpth::ScopedTaskSystem::run(4, move || fib::<cmpth::ScopedTaskSystem>(34));
+    let r = cmpth::ScopedTaskSystem::builder().workers(4).run(move || fib::<cmpth::ScopedTaskSystem>(34));
     assert_eq!(r, 5_702_887);
 }
 ```
@@ -198,6 +226,9 @@ boundaries — the same code must work at every level.
 All three models' traits share one root, `TaskSystem` — the declaration
 that a system provides an efficient (work-stealing) scheduler as its
 execution model. `ThreadSystem` (stackful spawn/join),
+`StackfulInitSystem`/`StacklessInitSystem` (bracketing `run`/`run_async`
+via a `Builder`, plus standalone `init` on the stackful side — see
+[Standalone init](#standalone-init) below),
 `ScopedStackfulTaskSystem`/`ScopedStacklessTaskSystem` (`parallel_call`),
 and `StacklessTaskSystem` (`spawn`/`recurse`) each build on it with
 their own capability. `StackfulTaskSystem`/`StacklessTaskSystem` are
@@ -218,7 +249,7 @@ is generic over a trait (`S: ThreadSystem`, `S: StacklessTaskSystem`, `S:
 ScopedStackfulTaskSystem`), and the concrete system
 (`DefaultStackfulOnlyTaskSystem`, `DefaultStacklessOnlyTaskSystem`,
 `ScopedTaskSystem`) only ever appears at the single "pick a system" call
-site (`main`), e.g. `S::run(4, move || fib::<S>(34))` invoked with `S =
+site (`main`), e.g. `S::builder().workers(4).run(move || fib::<S>(34))` invoked with `S =
 MySystem`. Naming a concrete system inside code that isn't itself that
 call site — e.g. calling `cmpth::ScopedTaskSystem::parallel_call(...)`
 directly from inside `fib`'s own body instead of `S::parallel_call(...)`

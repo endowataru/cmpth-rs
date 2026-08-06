@@ -39,3 +39,8 @@ mod sync_engine;
 mod system;
 
 pub use system::ScopedTaskSystem;
+// `SyncInit` is `ScopedTaskSystem`'s `StackfulInitSystem::Init` — a public
+// associated type needs an at-least-as-public backing type, so it needs a
+// fully public path even though the `sync_engine` module itself (and
+// everything else in it) stays crate-private.
+pub use sync_engine::SyncInit;

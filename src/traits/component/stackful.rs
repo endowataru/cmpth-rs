@@ -46,10 +46,30 @@ pub trait HandoffTaskDesc: TaskDesc {
 /// poll loop itself as a generic default on [`ThreadSystem`](crate::traits::system::stackful::ThreadSystem).
 ///
 /// Implementations are always stack-local inside `block_on`.  They are `!Send`
-/// by convention — bound to the same ULT, not to a specific OS thread.  In
-/// cmpth, `!Send` means "bound to the same ULT", not "bound to the same OS
-/// thread": work-stealing moves the entire ULT stack atomically, so a `!Send`
-/// value is safe across `yield_now` even when the ULT migrates.
+/// by convention — bound to the same ULT, not to a specific OS thread.
+///
+/// In cmpth, `!Send` because of a **data-race** hazard (`Rc`, a non-atomic
+/// refcount, anything whose invariant is "no two threads touch this
+/// concurrently") means "bound to the same ULT", not "bound to the same OS
+/// thread": work-stealing moves the entire ULT stack atomically, and the
+/// deque's own atomics supply the happens-before a migration needs, so such
+/// a value is safe across `yield_now` even when the ULT migrates to a
+/// different OS thread.
+///
+/// That does **not** extend to a value that's `!Send` because its invariant
+/// is tied to *OS-thread identity* itself — the canonical case is
+/// [`std::sync::MutexGuard`] (some platforms require the same OS thread
+/// that locked a mutex to be the one that unlocks it). Migrating a ULT
+/// holding one of those across a suspension point is unsound: the unlock
+/// may run on a different OS thread than the lock did. This is a user
+/// obligation this crate cannot check for you, in the same spirit as the
+/// TLS-caching hazard documented on [`crate::traits::common::TlsSlot`] —
+/// **do not hold a `std::sync::MutexGuard` (or anything else OS-thread-
+/// bound) across a suspension point; use this crate's own ULT `Mutex`
+/// instead**, whose guard has no such requirement. See also
+/// [`StackfulBuilder::init`](crate::traits::system::stackful::StackfulBuilder::init)'s
+/// doc comment, which restates this for `main`'s own stack once a
+/// standalone initializer is in play.
 ///
 /// [`Drop`] performs cleanup (e.g. resetting `waker_refs` to `IDLE`).
 pub trait Poller {

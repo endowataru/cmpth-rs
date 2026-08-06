@@ -1,10 +1,11 @@
 use std::future::Future;
 use std::task::Poll;
 
+use crate::traits::system::TaskSystem;
 use crate::traits::system::scoped::ScopedStacklessTaskSystem;
 
-/// `S::spawn(...)`/`S::recurse(...)`/`S::run_async(...)` — the stackless
-/// counterpart of [`ThreadSystem`](crate::traits::system::stackful::ThreadSystem): a
+/// `S::spawn(...)`/`S::recurse(...)` — the stackless counterpart of
+/// [`ThreadSystem`](crate::traits::system::stackful::ThreadSystem): a
 /// capability every [`SchedulerSystem`](crate::resumable::common::system::SchedulerSystem)
 /// with an async-capable descriptor gets automatically (see the blanket
 /// impl in [`resumable::stackless::system`](crate::resumable::stackless::system)),
@@ -14,10 +15,9 @@ use crate::traits::system::scoped::ScopedStacklessTaskSystem;
 /// outlives this call" constraint is strictly stricter than `spawn`'s (a
 /// spawned task may outlive the caller) — anything with `spawn` capability
 /// trivially satisfies the more restricted one too (spawn one branch,
-/// await the other inline). `run_async` therefore lives on
-/// `ScopedStacklessTaskSystem` only, not redeclared here — redeclaring an
-/// identical signature in a subtrait would make `S::run_async(...)`
-/// ambiguous between the two traits for any `S: StacklessTaskSystem`.
+/// await the other inline). `run_async` itself lives on
+/// [`StacklessBuilder`] (reached via [`StacklessInitSystem::builder`]),
+/// not on either trait here — see that trait's doc comment.
 pub trait StacklessTaskSystem: ScopedStacklessTaskSystem {
     /// Handle returned once a spawned task has started: `.await` it again
     /// to get the task's result. (Two-step — `S::spawn(mk).await.await` —
@@ -93,4 +93,44 @@ pub trait StacklessTaskSystem: ScopedStacklessTaskSystem {
             }
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// StacklessInitSystem / StacklessBuilder — replaces the old
+// `ScopedStacklessTaskSystem::run_async(num_workers, root)`.
+// ---------------------------------------------------------------------------
+
+/// A stackless system that can bring up its worker pool through a
+/// [`StacklessBuilder`].
+///
+/// **No standalone `init()`** here, deliberately — unlike
+/// [`StackfulInitSystem`](crate::traits::system::stackful::StackfulInitSystem)'s
+/// `init`, there is no caller continuation to save: a stackless task is a
+/// polled `Future`, not a real stack, so there is nothing for "everything
+/// after this call keeps running as a task" to mean. [`StacklessBuilder`]
+/// only ever offers the bracketing [`run_async`](StacklessBuilder::run_async).
+pub trait StacklessInitSystem: TaskSystem {
+    /// Builder type — accumulates configuration (`workers`, ...) before
+    /// `run_async`.
+    type Builder: StacklessBuilder<Self>;
+
+    /// Start building a configuration for this system.
+    fn builder() -> Self::Builder;
+}
+
+/// Accumulates configuration for a [`StacklessInitSystem`] before bringing
+/// up its worker pool.
+pub trait StacklessBuilder<S: StacklessInitSystem>: Sized {
+    /// Set the worker count. Defaults to
+    /// [`available_parallelism`](crate::available_parallelism) if never
+    /// called.
+    fn workers(self, n: usize) -> Self;
+
+    /// Start the worker pool, run `root` as the first async job, and block
+    /// until it (and everything it transitively
+    /// [`parallel_call`](crate::traits::scoped::ScopedStacklessTaskSystem::parallel_call)s)
+    /// completes.
+    fn run_async<F>(self, root: F)
+    where
+        F: Future<Output = ()> + Send + 'static;
 }

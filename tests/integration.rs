@@ -149,7 +149,7 @@ fn suspended_thread_cancel() {
 #[test]
 fn nested_spawn_join() {
     run(2, || {
-        DefaultNestedDualTaskSystem::run(2, || {
+        <DefaultNestedDualTaskSystem as StackfulInitSystem>::builder().workers(2).run(|| {
             let handles: Vec<_> = (0..50)
                 .map(|i| <DefaultNestedDualTaskSystem as ThreadSystem>::spawn(move || i * 3u64))
                 .collect();
@@ -165,7 +165,7 @@ fn nested_spawn_join() {
 #[test]
 fn nested_mutex() {
     run(2, || {
-        DefaultNestedDualTaskSystem::run(2, || {
+        <DefaultNestedDualTaskSystem as StackfulInitSystem>::builder().workers(2).run(|| {
             use std::sync::Arc;
             use cmpth::traits::StackfulMutex;
             type M = <DefaultNestedDualTaskSystem as StackfulSyncSystem>::Mutex<u64>;
@@ -213,9 +213,38 @@ fn generic_over_layers() {
     assert_eq!(generic_workload::<OsSystem>(), 80);
     run(2, || {
         assert_eq!(generic_workload::<DefaultDualTaskSystem>(), 80);
-        DefaultNestedDualTaskSystem::run(2, || {
+        <DefaultNestedDualTaskSystem as StackfulInitSystem>::builder().workers(2).run(|| {
             assert_eq!(generic_workload::<DefaultNestedDualTaskSystem>(), 80);
         });
+    });
+}
+
+/// Nested standalone init: a second system ([`DefaultNestedDualTaskSystem`],
+/// `Base = DefaultDualTaskSystem`) initialized *inside* the outer system's
+/// pool, mirroring the existing nesting tests above (`nested_spawn_join`/
+/// `nested_mutex`/`generic_over_layers`) but with `init()`/`Drop` instead of
+/// bracketing `run`. The outer ULT calling `init` (and later dropping the
+/// guard) is itself just an ordinary task on the *outer* pool, so this also
+/// exercises `init`'s fork/suspend machinery running one level down from
+/// the OS thread `run`'s own worker 0 would otherwise occupy.
+#[test]
+fn nested_standalone_init() {
+    run(2, || {
+        let guard = <DefaultNestedDualTaskSystem as StackfulInitSystem>::builder().workers(2).init();
+
+        let handles: Vec<_> = (0..30)
+            .map(|i| <DefaultNestedDualTaskSystem as ThreadSystem>::spawn(move || i * 3u64))
+            .collect();
+        let mut sum = 0u64;
+        for h in handles {
+            sum += JoinHandleLike::join(h);
+        }
+        assert_eq!(sum, (0..30u64).map(|i| i * 3).sum::<u64>());
+
+        drop(guard);
+
+        // The outer pool is unaffected by the inner one tearing down.
+        assert_eq!(JoinHandleLike::join(spawn(|| 6 * 7)), 42);
     });
 }
 
@@ -780,7 +809,7 @@ impl NestableSystem for ManualSystem {
 
 #[test]
 fn manual_impl_without_macro() {
-    ManualSystem::run(2, || {
+    <ManualSystem as StackfulInitSystem>::builder().workers(2).run(|| {
         let h = <ManualSystem as ThreadSystem>::spawn(|| 6 * 7u64);
         assert_eq!(JoinHandleLike::join(h), 42);
     });
