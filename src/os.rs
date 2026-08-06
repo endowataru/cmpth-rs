@@ -8,9 +8,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Context;
 
 use crate::traits::{BarrierWaitResult, Delegator, DelegatorConsumer, StackfulBarrier, StackfulMutex, Poller};
-use crate::traits::common::{TaskSystem, TlsSlot};
+use crate::traits::common::{Resumable, TaskSystem, TlsSlot};
 use crate::traits::component::stackful::noop_waker;
-use crate::traits::stackful::{JoinHandleLike, ThreadSystem};
+use crate::traits::stackful::{
+    BlockOnSystem, DelegationSystem, JoinHandleLike, NestableSystem, StackfulSyncSystem,
+    SuspendableSystem, ThreadSystem,
+};
 
 // ---------------------------------------------------------------------------
 // OsPoller — busy-polling Poller for OsSystem
@@ -62,8 +65,6 @@ impl TaskSystem for OsSystem {
 }
 
 impl ThreadSystem for OsSystem {
-    type Poller = OsPoller;
-
     fn yield_now() {
         std::thread::yield_now();
     }
@@ -77,11 +78,26 @@ impl ThreadSystem for OsSystem {
     {
         std::thread::spawn(f)
     }
+}
 
+impl BlockOnSystem for OsSystem {
+    type Poller = OsPoller;
+}
+
+impl StackfulSyncSystem for OsSystem {
     type Mutex<T: Send> = OsMutex<T>;
     type Barrier = OsBarrier;
+}
+
+impl SuspendableSystem for OsSystem {
     type SuspendedThread = OsSuspendedThread;
+}
+
+impl DelegationSystem for OsSystem {
     type Delegator<C: DelegatorConsumer<Self>> = OsDelegator<C>;
+}
+
+impl NestableSystem for OsSystem {
     type ThreadSpecific<T: 'static> = OsTls<T>;
 }
 
@@ -295,9 +311,16 @@ impl StackfulBarrier for OsBarrier {
 // OsSuspendedThread — OS-level parker for use in OsDelegator
 // ---------------------------------------------------------------------------
 
+// Interior mutability (rather than the plain `Option<Arc<OsParker>>` field
+// this used to be) is what lets this type implement `Resumable<OsSystem>`
+// with `&self`-based `notify`/`is_set`: a concurrent notifier needs to be
+// able to take the parked continuation through a shared reference, the same
+// way the ULT-side wait slots use an atomic slot for it. A plain
+// `std::sync::Mutex` is fine here (unlike on the ULT hot path) — this is
+// the OS-thread parking path, already paying for a real futex/condvar wait.
 #[derive(Default)]
 pub struct OsSuspendedThread {
-    inner: Option<std::sync::Arc<OsParker>>,
+    inner: std::sync::Mutex<Option<std::sync::Arc<OsParker>>>,
 }
 
 struct OsParker {
@@ -313,20 +336,49 @@ impl OsSuspendedThread {
         })
     }
 
-    /// Park the current OS thread; `f` runs before blocking.
-    pub fn wait_with<F: FnOnce()>(&mut self, f: F) {
+    /// Park the current OS thread; `f` runs before blocking (release any
+    /// lock protecting this slot inside it — same contract as
+    /// `StackfulResumable::wait_with`).
+    ///
+    /// Park/wake protocol, unchanged from before this type moved to
+    /// interior mutability: `ready` is set under `p.ready`'s lock and then
+    /// `notify_one()`d; the waiter loops on the condvar until `ready`, so a
+    /// `notify()` that lands anywhere between `self.inner` being published
+    /// here and the `cv.wait` loop starting is never lost.
+    pub fn wait_with<F: FnOnce()>(&self, f: F) {
         let p = Self::parker();
-        self.inner = Some(p.clone());
+        *self.inner.lock().unwrap() = Some(p.clone());
         f();
-        let mut ready = p.ready.lock().unwrap();
-        while !*ready {
-            ready = p.cv.wait(ready).unwrap();
+        {
+            let mut ready = p.ready.lock().unwrap();
+            while !*ready {
+                ready = p.cv.wait(ready).unwrap();
+            }
         }
-        self.inner = None;
+        // `p.ready`'s guard is dropped above *before* reacquiring
+        // `self.inner`: `notify` takes those two locks in the opposite order
+        // (`self.inner` then `p.ready`), so holding both here in this order
+        // would be a lock-order inversion. It is not reachable today — the
+        // only way out of the loop above is a `notify` that already
+        // `take()`d the parker, so a concurrent `notify` finds `None` and
+        // never reaches for `p.ready` — but that safety rests on an
+        // invariant two functions apart, which is not worth relying on for
+        // a reset that costs nothing to sequence correctly.
+        *self.inner.lock().unwrap() = None;
+    }
+}
+
+impl Resumable<OsSystem> for OsSuspendedThread {
+    fn is_set(&self) -> bool {
+        self.inner.lock().unwrap().is_some()
     }
 
-    pub fn notify(self) {
-        if let Some(p) = self.inner {
+    /// Take whatever parker is currently parked here (if any) and wake it.
+    /// `&self`, not consuming: a concurrent caller may race to `notify`
+    /// while another is still inside `wait_with`'s `f()`, same as the
+    /// ULT-side wait slots.
+    fn notify(&self) {
+        if let Some(p) = self.inner.lock().unwrap().take() {
             *p.ready.lock().unwrap() = true;
             p.cv.notify_one();
         }
@@ -439,7 +491,7 @@ impl<C: DelegatorConsumer<OsSystem>> Delegator<OsSystem, C> for OsDelegator<C> {
         } else {
             // Delegate: push work onto queue and block.
             let mut work = C::Work::default();
-            let mut sth = OsSuspendedThread::default();
+            let sth = OsSuspendedThread::default();
             del(&mut work);
             sth.wait_with(|| {
                 guard.queue.push_back((work, OsSuspendedThread::default()));

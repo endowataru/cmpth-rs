@@ -9,7 +9,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use cmpth::{DefaultStackfulOnlyTaskSystem, JoinHandleLike, ScopedStackfulTaskSystem, ThreadSystem};
+use cmpth::{BlockOnSystem, DefaultStackfulOnlyTaskSystem, JoinHandleLike, ScopedStackfulTaskSystem, ThreadSystem};
 
 #[test]
 fn spawn_join_basic() {

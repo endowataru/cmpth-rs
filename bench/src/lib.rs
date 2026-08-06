@@ -98,7 +98,7 @@ impl BenchSystem for CmpthBench {
 // ---------------------------------------------------------------------------
 
 pub mod dual {
-    use cmpth::{DefaultDualTaskSystem, ScopedStackfulTaskSystem, ThreadSystem};
+    use cmpth::{BlockOnSystem, DefaultDualTaskSystem, ScopedStackfulTaskSystem, ThreadSystem};
 
     pub fn run<F, R>(num_workers: usize, root: F) -> R
     where
@@ -169,7 +169,7 @@ impl cmpth::UltAsyncIdentity for AsyncOnlyMarker {
     type Deque = cmpth::CrossbeamDeque<cmpth::SuspendedTaskToken<cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>>>;
     type Lookup = cmpth::InlineTlsCurrent;
 
-    fn worker_tls_anchor() -> &'static <cmpth::OsSystem as cmpth::ThreadSystem>::ThreadSpecific<cmpth::UltWorker<cmpth::UltAsyncSystem<Self>>> {
+    fn worker_tls_anchor() -> &'static <cmpth::OsSystem as cmpth::NestableSystem>::ThreadSpecific<cmpth::UltWorker<cmpth::UltAsyncSystem<Self>>> {
         static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
         cmpth::TlsSlot::from_anchor(&A)
     }

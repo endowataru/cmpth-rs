@@ -12,4 +12,4 @@ pub use crate::traits::component::wait::Resumable;
 pub use crate::traits::system::TaskSystem;
 pub use crate::traits::system::scoped::ScopedStacklessTaskSystem;
 pub use crate::traits::system::stackless::StacklessTaskSystem;
-pub use crate::traits::system::sync::{StacklessBarrier, StacklessMutex};
+pub use crate::traits::system::sync::{StacklessBarrier, StacklessMutex, StacklessSyncSystem};

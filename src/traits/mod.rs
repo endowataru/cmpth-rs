@@ -32,10 +32,13 @@ pub use component::delegation::DelegatorConsumer;
 pub use component::stackful::{
     CondTransfer, Context, ContextPolicy, HandoffTaskDesc, Poller, StackfulResumable, Transfer,
 };
+pub use system::block_on::BlockOnSystem;
 pub use system::bundle::StackfulTaskSystem;
-pub use system::delegation::Delegator;
+pub use system::delegation::{Delegator, DelegationSystem};
+pub use system::nesting::NestableSystem;
 pub use system::stackful::{JoinHandleLike, ThreadSystem};
-pub use system::sync::{StackfulBarrier, StackfulMutex};
+pub use system::suspend::SuspendableSystem;
+pub use system::sync::{StackfulBarrier, StackfulMutex, StackfulSyncSystem};
 pub use system::stackless::StacklessTaskSystem;
-pub use system::sync::{StacklessBarrier, StacklessMutex};
+pub use system::sync::{StacklessBarrier, StacklessMutex, StacklessSyncSystem};
 pub use component::stackless::{StacklessResumable, WakerTaskDesc};

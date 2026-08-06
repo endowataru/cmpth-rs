@@ -1,8 +1,11 @@
+pub mod block_on;
 pub mod bundle;
 pub mod delegation;
+pub mod nesting;
 pub mod scoped;
 pub mod stackful;
 pub mod stackless;
+pub mod suspend;
 pub mod sync;
 
 /// Declares that a system provides an efficient (work-stealing) scheduler

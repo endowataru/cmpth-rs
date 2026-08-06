@@ -7,7 +7,7 @@
 
 #![allow(dead_code)]
 
-use cmpth::{DefaultDualTaskSystem, ScopedStackfulTaskSystem, ThreadSystem};
+use cmpth::{BlockOnSystem, DefaultDualTaskSystem, ScopedStackfulTaskSystem, ThreadSystem};
 
 pub fn run<F, R>(num_workers: usize, root: F) -> R
 where

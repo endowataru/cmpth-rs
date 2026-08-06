@@ -11,7 +11,7 @@
 use std::future::Future;
 use std::marker::PhantomData;
 
-use crate::traits::stackful::ThreadSystem;
+use crate::traits::stackful::{NestableSystem, ThreadSystem};
 use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
@@ -154,7 +154,7 @@ where
 ///
 /// ```
 /// use cmpth::SuspendedTaskToken;
-/// use cmpth::{ScopedStacklessTaskSystem, StacklessTaskSystem, ThreadSystem};
+/// use cmpth::{NestableSystem, ScopedStacklessTaskSystem, StacklessTaskSystem, ThreadSystem};
 ///
 /// pub struct MyAsyncMarker;
 ///
@@ -164,7 +164,7 @@ where
 ///     type Deque = cmpth::CrossbeamDeque<cmpth::SuspendedTaskToken<cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>>>;
 ///     type Lookup = cmpth::InlineTlsCurrent;
 ///
-///     fn worker_tls_anchor() -> &'static <cmpth::OsSystem as ThreadSystem>::ThreadSpecific<cmpth::UltWorker<cmpth::UltAsyncSystem<Self>>> {
+///     fn worker_tls_anchor() -> &'static <cmpth::OsSystem as NestableSystem>::ThreadSpecific<cmpth::UltWorker<cmpth::UltAsyncSystem<Self>>> {
 ///         static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
 ///         cmpth::TlsSlot::from_anchor(&A)
 ///     }
@@ -179,7 +179,7 @@ where
 /// ```
 pub trait UltAsyncIdentity: Sized + Send + Sync + 'static {
     /// The threading system this scheduler runs on.
-    type Base: ThreadSystem;
+    type Base: ThreadSystem + NestableSystem;
 
     /// Task descriptor type. Most implementors want
     /// [`StacklessOnlyTaskDesc<UltAsyncSystem<Self>>`](crate::resumable::stackless::desc::StacklessOnlyTaskDesc)
@@ -212,7 +212,7 @@ pub trait UltAsyncIdentity: Sized + Send + Sync + 'static {
     /// Named in terms of [`UltAsyncSystem<Self>`] — the actual final
     /// system type — not bare `Self`, since `Self` here is just the config
     /// marker; see this trait's own doc comment for why.
-    fn worker_tls_anchor() -> &'static <<Self as UltAsyncIdentity>::Base as ThreadSystem>::ThreadSpecific<UltWorker<UltAsyncSystem<Self>>>
+    fn worker_tls_anchor() -> &'static <<Self as UltAsyncIdentity>::Base as NestableSystem>::ThreadSpecific<UltWorker<UltAsyncSystem<Self>>>
     where
         UltAsyncSystem<Self>: SchedulerSystem;
 }
@@ -240,7 +240,7 @@ impl<M: UltAsyncIdentity> SchedulerSystem for UltAsyncSystem<M> {
     type RecursionPool = crate::resumable::common::pool::ThresholdPool<crate::resumable::common::pool::BlockPool>;
     type Lookup = <M as UltAsyncIdentity>::Lookup;
 
-    fn worker_tls() -> &'static <M::Base as ThreadSystem>::ThreadSpecific<UltWorker<Self>> {
+    fn worker_tls() -> &'static <M::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         <M as UltAsyncIdentity>::worker_tls_anchor()
     }
 

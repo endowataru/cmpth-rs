@@ -30,7 +30,7 @@ pub mod interchange;
 pub mod resumable;
 pub mod scoped;
 
-pub use traits::{BarrierWaitResult, CondTransfer, Context, ContextPolicy, DelegatorConsumer, Delegator, DualBarrier, DualMutex, HandoffTaskDesc, JoinHandleLike, Poller, Resumable, ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, StackfulResumable, TaskDesc, TaskExitSink, TaskSystem, TlsAnchor, TlsSlot, ThreadSystem, Transfer, WakerTaskDesc};
+pub use traits::{BarrierWaitResult, BlockOnSystem, CondTransfer, Context, ContextPolicy, DelegationSystem, DelegatorConsumer, Delegator, DualBarrier, DualMutex, HandoffTaskDesc, JoinHandleLike, NestableSystem, Poller, Resumable, ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, StackfulResumable, StackfulSyncSystem, StacklessSyncSystem, SuspendableSystem, TaskDesc, TaskExitSink, TaskSystem, TlsAnchor, TlsSlot, ThreadSystem, Transfer, WakerTaskDesc};
 pub use scoped::ScopedTaskSystem;
 pub use os::{available_parallelism, OsBarrier, OsCondvar, OsMutex, OsPoller, OsSystem, OsTls};
 pub use resumable::stackful::context::NativeContext;
@@ -94,7 +94,7 @@ impl resumable::common::system::SchedulerSystem for DefaultDualTaskSystem {
     type RecursionPool   = resumable::common::pool::ThresholdPool<resumable::common::pool::BlockPool>;
     type Lookup          = resumable::common::lookup::TlsCurrent;
 
-    fn worker_tls() -> &'static <OsSystem as ThreadSystem>::ThreadSpecific<UltWorker<Self>> {
+    fn worker_tls() -> &'static <OsSystem as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         static A: TlsAnchor = TlsAnchor::new();
         TlsSlot::from_anchor(&A)
     }
@@ -125,8 +125,6 @@ impl resumable::stackful::system::StackfulSchedulerSystem for DefaultDualTaskSys
 }
 
 impl ThreadSystem for DefaultDualTaskSystem {
-    type Poller = resumable::stackful::waker::UltPoller<Self>;
-
     fn yield_now() {
         use resumable::stackful::worker::StackfulWorker;
         match UltWorker::<Self>::current() {
@@ -144,11 +142,26 @@ impl ThreadSystem for DefaultDualTaskSystem {
     {
         resumable::stackful::thread::spawn::<Self, T, F>(f)
     }
+}
 
+impl BlockOnSystem for DefaultDualTaskSystem {
+    type Poller = resumable::stackful::waker::UltPoller<Self>;
+}
+
+impl StackfulSyncSystem for DefaultDualTaskSystem {
     type Mutex<T: Send> = UltDualMutex<Self, T, DualResumable<Self>>;
     type Barrier         = UltDualBarrier<Self, DualResumable<Self>>;
+}
+
+impl SuspendableSystem for DefaultDualTaskSystem {
     type SuspendedThread = resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>;
+}
+
+impl DelegationSystem for DefaultDualTaskSystem {
     type Delegator<C: DelegatorConsumer<Self>> = McsDelegator<Self, C>;
+}
+
+impl NestableSystem for DefaultDualTaskSystem {
     type ThreadSpecific<T: 'static> = resumable::stackful::tls::UltTls<Self, T>;
 }
 
@@ -168,7 +181,7 @@ impl resumable::common::system::SchedulerSystem for DefaultNestedDualTaskSystem 
     type RecursionPool   = resumable::common::pool::ThresholdPool<resumable::common::pool::BlockPool>;
     type Lookup          = resumable::common::lookup::TlsCurrent;
 
-    fn worker_tls() -> &'static <DefaultDualTaskSystem as ThreadSystem>::ThreadSpecific<UltWorker<Self>> {
+    fn worker_tls() -> &'static <DefaultDualTaskSystem as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         static A: TlsAnchor = TlsAnchor::new();
         TlsSlot::from_anchor(&A)
     }
@@ -195,8 +208,6 @@ impl resumable::stackful::system::StackfulSchedulerSystem for DefaultNestedDualT
 }
 
 impl ThreadSystem for DefaultNestedDualTaskSystem {
-    type Poller = resumable::stackful::waker::UltPoller<Self>;
-
     fn yield_now() {
         use resumable::stackful::worker::StackfulWorker;
         match UltWorker::<Self>::current() {
@@ -214,11 +225,26 @@ impl ThreadSystem for DefaultNestedDualTaskSystem {
     {
         resumable::stackful::thread::spawn::<Self, T, F>(f)
     }
+}
 
+impl BlockOnSystem for DefaultNestedDualTaskSystem {
+    type Poller = resumable::stackful::waker::UltPoller<Self>;
+}
+
+impl StackfulSyncSystem for DefaultNestedDualTaskSystem {
     type Mutex<T: Send> = UltDualMutex<Self, T, DualResumable<Self>>;
     type Barrier         = UltDualBarrier<Self, DualResumable<Self>>;
+}
+
+impl SuspendableSystem for DefaultNestedDualTaskSystem {
     type SuspendedThread = resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>;
+}
+
+impl DelegationSystem for DefaultNestedDualTaskSystem {
     type Delegator<C: DelegatorConsumer<Self>> = McsDelegator<Self, C>;
+}
+
+impl NestableSystem for DefaultNestedDualTaskSystem {
     type ThreadSpecific<T: 'static> = resumable::stackful::tls::UltTls<Self, T>;
 }
 
@@ -246,7 +272,7 @@ impl UltIdentity for DefaultStackfulOnlyTaskSystem {
     type Alloc = HeapStack;
     type Lookup = TlsCurrent;
 
-    fn worker_tls_anchor() -> &'static <OsSystem as ThreadSystem>::ThreadSpecific<UltWorker<Self>> {
+    fn worker_tls_anchor() -> &'static <OsSystem as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         static A: TlsAnchor = TlsAnchor::new();
         TlsSlot::from_anchor(&A)
     }
@@ -266,7 +292,7 @@ impl resumable::stackless::system::UltAsyncIdentity for DefaultStacklessOnlyMark
     type Lookup = InlineTlsCurrent;
 
     fn worker_tls_anchor()
-    -> &'static <OsSystem as ThreadSystem>::ThreadSpecific<UltWorker<UltAsyncSystem<Self>>>
+    -> &'static <OsSystem as NestableSystem>::ThreadSpecific<UltWorker<UltAsyncSystem<Self>>>
     {
         static A: TlsAnchor = TlsAnchor::new();
         TlsSlot::from_anchor(&A)

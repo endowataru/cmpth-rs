@@ -1,6 +1,8 @@
 use std::future::Future;
 use std::ops::DerefMut;
 
+use crate::traits::system::TaskSystem;
+
 /// Return value of [`StackfulBarrier::wait`], mirroring
 /// `std::sync::BarrierWaitResult`.
 pub struct BarrierWaitResult {
@@ -111,3 +113,24 @@ impl<M: StackfulBarrier + StacklessBarrier> DualBarrier for M {}
 pub trait DualMutex<T: Send>: StackfulMutex<T> + StacklessMutex<T> {}
 
 impl<T: Send, M: StackfulMutex<T> + StacklessMutex<T>> DualMutex<T> for M {}
+
+/// The stackful mutex/barrier capability, split off from
+/// [`ThreadSystem`](crate::traits::system::stackful::ThreadSystem) so a
+/// system that only wants `spawn`/`join` never has to name a `Mutex` or
+/// `Barrier` type.
+pub trait StackfulSyncSystem: TaskSystem {
+    /// Mutex type for this system.
+    type Mutex<T: Send>: StackfulMutex<T> + Send + Sync;
+
+    /// Barrier type for this system.
+    type Barrier: StackfulBarrier + Send + Sync;
+}
+
+/// Stackless counterpart of [`StackfulSyncSystem`].
+pub trait StacklessSyncSystem: TaskSystem {
+    /// Mutex type for this system.
+    type Mutex<T: Send>: StacklessMutex<T> + Send + Sync;
+
+    /// Barrier type for this system.
+    type Barrier: StacklessBarrier + Send + Sync;
+}

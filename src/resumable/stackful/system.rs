@@ -18,7 +18,10 @@
 //! impl cmpth::UltIdentity for DefaultNestedDualTaskSystem { type Base = DefaultDualTaskSystem; ... }
 //! ```
 
-use crate::traits::stackful::{ContextPolicy, ThreadSystem};
+use crate::traits::stackful::{
+    BlockOnSystem, ContextPolicy, DelegationSystem, NestableSystem, StackfulSyncSystem,
+    SuspendableSystem, ThreadSystem,
+};
 use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
@@ -120,9 +123,10 @@ where
 
 /// Empty bundle: `ThreadSystem` is implemented directly (via `UltIdentity`'s
 /// blanket impl or by hand); `ScopedStackfulTaskSystem` is blanket-derived
-/// from it just above. This impl just ties the two together as one bound.
-impl<S: crate::traits::scoped::ScopedStackfulTaskSystem + ThreadSystem> crate::traits::stackful::StackfulTaskSystem
-    for S
+/// from it just above. This impl just ties the four bounds together as one.
+impl<
+    S: crate::traits::scoped::ScopedStackfulTaskSystem + ThreadSystem + StackfulSyncSystem + BlockOnSystem,
+> crate::traits::stackful::StackfulTaskSystem for S
 {
 }
 
@@ -162,7 +166,7 @@ impl<S: crate::traits::scoped::ScopedStackfulTaskSystem + ThreadSystem> crate::t
 /// body.
 ///
 /// ```
-/// use cmpth::{ThreadSystem, ScopedStackfulTaskSystem, JoinHandleLike};
+/// use cmpth::{ThreadSystem, NestableSystem, ScopedStackfulTaskSystem, JoinHandleLike};
 ///
 /// pub struct MySystem;
 ///
@@ -174,7 +178,7 @@ impl<S: crate::traits::scoped::ScopedStackfulTaskSystem + ThreadSystem> crate::t
 ///     type Alloc = cmpth::HeapStack;
 ///     type Lookup = cmpth::TlsCurrent;
 ///
-///     fn worker_tls_anchor() -> &'static <cmpth::OsSystem as ThreadSystem>::ThreadSpecific<cmpth::UltWorker<Self>> {
+///     fn worker_tls_anchor() -> &'static <cmpth::OsSystem as NestableSystem>::ThreadSpecific<cmpth::UltWorker<Self>> {
 ///         static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
 ///         cmpth::TlsSlot::from_anchor(&A)
 ///     }
@@ -190,7 +194,7 @@ impl<S: crate::traits::scoped::ScopedStackfulTaskSystem + ThreadSystem> crate::t
 /// const.
 pub trait UltIdentity: Sized + Send + Sync + 'static {
     /// The threading system this scheduler runs on.
-    type Base: ThreadSystem;
+    type Base: ThreadSystem + NestableSystem;
 
     /// Context-switch implementation.
     type Ctx: ContextPolicy;
@@ -227,7 +231,7 @@ pub trait UltIdentity: Sized + Send + Sync + 'static {
         Self: SchedulerSystem;
 
     /// The per-system TLS anchor backing [`SchedulerSystem::worker_tls`].
-    fn worker_tls_anchor() -> &'static <<Self as UltIdentity>::Base as ThreadSystem>::ThreadSpecific<UltWorker<Self>>
+    fn worker_tls_anchor() -> &'static <<Self as UltIdentity>::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>>
     where
         Self: SchedulerSystem;
 }
@@ -252,7 +256,7 @@ impl<M: UltIdentity> SchedulerSystem for M {
     type RecursionPool = crate::resumable::common::pool::ThresholdPool<crate::resumable::common::pool::BlockPool>;
     type Lookup = <M as UltIdentity>::Lookup;
 
-    fn worker_tls() -> &'static <M::Base as ThreadSystem>::ThreadSpecific<UltWorker<Self>> {
+    fn worker_tls() -> &'static <M::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         <M as UltIdentity>::worker_tls_anchor()
     }
 
@@ -284,8 +288,6 @@ impl<M: UltIdentity + StackfulSchedulerSystem> ThreadSystem for M
 where
     <M as SchedulerSystem>::Desc: StackfulTaskDesc,
 {
-    type Poller = crate::resumable::stackful::waker::ResumablePoller<Self>;
-
     fn yield_now() {
         use crate::resumable::common::worker::WorkerOps;
         use crate::resumable::stackful::worker::StackfulWorker;
@@ -304,11 +306,41 @@ where
     {
         crate::resumable::stackful::thread::spawn::<Self, T, F>(f)
     }
+}
 
+impl<M: UltIdentity + StackfulSchedulerSystem> BlockOnSystem for M
+where
+    <M as SchedulerSystem>::Desc: StackfulTaskDesc,
+{
+    type Poller = crate::resumable::stackful::waker::ResumablePoller<Self>;
+}
+
+impl<M: UltIdentity + StackfulSchedulerSystem> StackfulSyncSystem for M
+where
+    <M as SchedulerSystem>::Desc: StackfulTaskDesc,
+{
     type Mutex<T: Send>  = crate::resumable::common::sync::DualMutex<Self, T, crate::resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>>;
     type Barrier         = crate::resumable::common::sync::DualBarrier<Self, crate::resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>>;
+}
+
+impl<M: UltIdentity + StackfulSchedulerSystem> SuspendableSystem for M
+where
+    <M as SchedulerSystem>::Desc: StackfulTaskDesc,
+{
     type SuspendedThread = crate::resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>;
+}
+
+impl<M: UltIdentity + StackfulSchedulerSystem> DelegationSystem for M
+where
+    <M as SchedulerSystem>::Desc: StackfulTaskDesc,
+{
     type Delegator<C: crate::traits::stackful::DelegatorConsumer<Self>> =
         crate::resumable::stackful::sync::McsDelegator<Self, C>;
+}
+
+impl<M: UltIdentity + StackfulSchedulerSystem> NestableSystem for M
+where
+    <M as SchedulerSystem>::Desc: StackfulTaskDesc,
+{
     type ThreadSpecific<T: 'static> = crate::resumable::stackful::tls::UltTls<Self, T>;
 }
