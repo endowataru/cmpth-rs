@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use cmpth::traits::{StackfulMutex, StacklessMutex};
-use cmpth::{BasicStackfulOnlyResumable, DefaultDualTaskSystem, SuspendedFuture, DualResumable, ThreadSystem, UltDualMutex};
+use cmpth::{BasicStackfulOnlyResumable, BlockOnSystem, DefaultDualTaskSystem, SuspendedFuture, DualResumable, UltDualMutex};
 
 mod common;
 use common::*;

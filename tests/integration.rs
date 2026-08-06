@@ -168,7 +168,7 @@ fn nested_mutex() {
         DefaultNestedDualTaskSystem::run(2, || {
             use std::sync::Arc;
             use cmpth::traits::StackfulMutex;
-            type M = <DefaultNestedDualTaskSystem as ThreadSystem>::Mutex<u64>;
+            type M = <DefaultNestedDualTaskSystem as StackfulSyncSystem>::Mutex<u64>;
             let m = Arc::new(<M as StackfulMutex<u64>>::new(0));
             let handles: Vec<_> = (0..20)
                 .map(|_| {
@@ -188,7 +188,7 @@ fn nested_mutex() {
     });
 }
 
-fn generic_workload<S: ThreadSystem>() -> u64 {
+fn generic_workload<S: ThreadSystem + StackfulSyncSystem>() -> u64 {
     use std::sync::Arc;
     use cmpth::traits::StackfulMutex;
     let m = Arc::new(<S::Mutex<u64> as StackfulMutex<u64>>::new(0));
@@ -709,7 +709,7 @@ impl cmpth::SchedulerSystem for ManualSystem {
     type RecursionPool   = cmpth::resumable::common::pool::ThresholdPool<cmpth::resumable::common::pool::BlockPool>;
     type Lookup          = TlsCurrent;
 
-    fn worker_tls() -> &'static <OsSystem as cmpth::ThreadSystem>::ThreadSpecific<UltWorker<Self>> {
+    fn worker_tls() -> &'static <OsSystem as cmpth::NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         // The one thing a macro (or the user, as here) must write:
         // a distinct static per system, anchored in this fn body.
         static TLS: OsTls<UltWorker<ManualSystem>> =
@@ -736,8 +736,6 @@ impl cmpth::StackfulSchedulerSystem for ManualSystem {
 }
 
 impl ThreadSystem for ManualSystem {
-    type Poller = cmpth::resumable::stackful::waker::UltPoller<Self>;
-
     fn yield_now() {
         use cmpth::resumable::common::worker::WorkerOps;
         use cmpth::resumable::stackful::worker::StackfulWorker;
@@ -756,12 +754,27 @@ impl ThreadSystem for ManualSystem {
     {
         cmpth::resumable::stackful::thread::spawn::<Self, T, F>(f)
     }
+}
 
+impl BlockOnSystem for ManualSystem {
+    type Poller = cmpth::resumable::stackful::waker::UltPoller<Self>;
+}
+
+impl StackfulSyncSystem for ManualSystem {
     type Mutex<T: Send> = cmpth::McsMutex<Self, T>;
     type Barrier        = cmpth::resumable::stackful::sync::Barrier<Self>;
+}
+
+impl SuspendableSystem for ManualSystem {
     type SuspendedThread = BasicStackfulOnlyResumable<Self>;
+}
+
+impl DelegationSystem for ManualSystem {
     type Delegator<C: cmpth::DelegatorConsumer<Self>> =
         cmpth::resumable::stackful::sync::McsDelegator<Self, C>;
+}
+
+impl NestableSystem for ManualSystem {
     type ThreadSpecific<T: 'static> = cmpth::resumable::stackful::tls::UltTls<Self, T>;
 }
 

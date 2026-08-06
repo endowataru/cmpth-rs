@@ -1,4 +1,4 @@
-use crate::traits::system::stackful::ThreadSystem;
+use crate::traits::system::suspend::SuspendableSystem;
 
 /// User-supplied consumer that the delegator executes on behalf of callers.
 ///
@@ -6,7 +6,7 @@ use crate::traits::system::stackful::ThreadSystem;
 /// fd, …). Callers that cannot acquire the delegator lock write their work
 /// into a queue node; the consumer ULT drains the queue and calls `progress`
 /// to poll for completions.
-pub trait DelegatorConsumer<S: ThreadSystem>: Send + 'static {
+pub trait DelegatorConsumer<S: SuspendableSystem>: Send + 'static {
     /// Per-call work descriptor written into the queue by a delegating caller.
     type Work: Send + Default;
 

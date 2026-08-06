@@ -65,7 +65,7 @@ use cmpth::DefaultStackfulOnlyTaskSystem;
 use cmpth::traits::stackful::*;
 use std::sync::Arc;
 
-fn sum_concurrently<S: ThreadSystem>(n: u64) -> u64 {
+fn sum_concurrently<S: ThreadSystem + StackfulSyncSystem>(n: u64) -> u64 {
     let total = Arc::new(S::Mutex::new(0u64));
     let handles: Vec<_> = (0..n)
         .map(|i| {
@@ -174,7 +174,7 @@ impl cmpth::UltIdentity for MySystem {
     type Alloc = cmpth::HeapStack;                         // stack allocator
     type Lookup = cmpth::TlsCurrent;                       // current-worker lookup
 
-    fn worker_tls_anchor() -> &'static <cmpth::OsSystem as cmpth::ThreadSystem>::ThreadSpecific<cmpth::UltWorker<Self>> {
+    fn worker_tls_anchor() -> &'static <cmpth::OsSystem as cmpth::NestableSystem>::ThreadSpecific<cmpth::UltWorker<Self>> {
         static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
         cmpth::TlsSlot::from_anchor(&A)
     }

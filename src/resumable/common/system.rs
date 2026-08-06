@@ -6,7 +6,7 @@
 //! (async-task capability).
 
 use crate::traits::common::TaskSystem;
-use crate::traits::stackful::ThreadSystem;
+use crate::traits::stackful::{NestableSystem, ThreadSystem};
 use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::external_queue::ExternalQueue;
 use crate::resumable::common::desc::{SuspendedTaskToken, TaskDescAlloc};
@@ -24,7 +24,7 @@ use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
 /// [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem) for the stackful extension.
 pub trait SchedulerSystem: Sized + Send + Sync + 'static {
     /// The threading system this scheduler runs on.
-    type Base: ThreadSystem;
+    type Base: ThreadSystem + NestableSystem;
 
     /// Task descriptor type for this system.
     type Desc: TaskDescAlloc;
@@ -89,7 +89,7 @@ pub trait SchedulerSystem: Sized + Send + Sync + 'static {
     /// The one TLS slot that stores the worker pointer for this scheduler
     /// level.  Each concrete system gets its own `static`, anchored by the
     /// function body of this implementation.
-    fn worker_tls() -> &'static <Self::Base as ThreadSystem>::ThreadSpecific<Self::Worker>;
+    fn worker_tls() -> &'static <Self::Base as NestableSystem>::ThreadSpecific<Self::Worker>;
 
     /// Run one continuation popped off a deque/root/external-queue.
     ///
