@@ -13,7 +13,7 @@ use crate::resumable::common::scheduler::{recursion_pool_threshold, worker_loop,
 use crate::resumable::common::pool::{DescPool, DynamicPool};
 use crate::resumable::stackless::system::StacklessSchedulerSystem;
 use crate::resumable::stackless::thread::fork_async_parent_first;
-use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
+use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
 
 /// Start `num_workers` workers on the base system and run `root` (a
 /// `Future`) as the first task, entirely without stackful ULT machinery —

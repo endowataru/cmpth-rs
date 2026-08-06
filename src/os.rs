@@ -9,7 +9,8 @@ use std::task::Context;
 
 use crate::traits::{BarrierWaitResult, Delegator, DelegatorConsumer, StackfulBarrier, StackfulMutex, Poller};
 use crate::traits::common::{TaskSystem, TlsSlot};
-use crate::traits::stackful::{JoinHandleLike, ThreadSystem, noop_waker};
+use crate::traits::component::stackful::noop_waker;
+use crate::traits::stackful::{JoinHandleLike, ThreadSystem};
 
 // ---------------------------------------------------------------------------
 // OsPoller — busy-polling Poller for OsSystem

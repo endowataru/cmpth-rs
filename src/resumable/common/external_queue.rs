@@ -12,7 +12,7 @@ use crate::resumable::common::scheduler::Scheduler;
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::stackful::thread::{ErasedBody, fork_parent_first};
-use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
+use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
 
 // ---------------------------------------------------------------------------
 // Trait

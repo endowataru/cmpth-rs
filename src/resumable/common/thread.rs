@@ -9,10 +9,10 @@
 use std::any::Any;
 use std::marker::PhantomData;
 
-use crate::resumable::common::system::SchedulerSystem;
+use crate::resumable::common::system::DescScheduler;
 use crate::resumable::common::desc::TaskDesc;
 use crate::resumable::common::pool::free_desc;
-use crate::resumable::common::worker::{UltWorker, Worker};
+use crate::resumable::common::worker::{UltWorker, WorkerOps};
 
 // Result stored directly on the child's stack, avoiding a Box for the success
 // case.  The Err variant still boxes because that is what catch_unwind produces.
@@ -26,7 +26,13 @@ pub(crate) fn align_down(addr: usize, align: usize) -> usize {
     addr & !(align - 1)
 }
 
-pub struct JoinHandle<S: SchedulerSystem, T> {
+// `DescScheduler` lives on the struct itself (not just `Drop`, below)
+// because a `Drop` impl must restate exactly the bounds its type definition
+// carries -- see the `Drop` impl at the bottom of this file, which needs
+// `Worker::current()` and so needs this bound. Every real system satisfies
+// it (see `DescScheduler`'s doc comment), so this costs nothing beyond the
+// restatement.
+pub struct JoinHandle<S: DescScheduler, T> {
     pub(crate) desc: *mut S::Desc,
     pub(crate) result_ptr: *mut StackResult<T>,
     // Type-erased drop for the result slot; avoids a T: Send + 'static bound
@@ -39,11 +45,11 @@ pub(crate) unsafe fn drop_stack_result<T>(ptr: *mut ()) {
     unsafe { std::ptr::drop_in_place(ptr as *mut StackResult<T>) };
 }
 
-unsafe impl<S: SchedulerSystem, T: Send> Send for JoinHandle<S, T> {}
+unsafe impl<S: DescScheduler, T: Send> Send for JoinHandle<S, T> {}
 // JoinHandle holds only raw pointers; it is safe to move at any time.
-impl<S: SchedulerSystem, T> Unpin for JoinHandle<S, T> {}
+impl<S: DescScheduler, T> Unpin for JoinHandle<S, T> {}
 
-impl<S: SchedulerSystem, T> JoinHandle<S, T> {
+impl<S: DescScheduler, T> JoinHandle<S, T> {
     /// Safe access to the descriptor's own `&self` methods. `self.desc` can
     /// be null (see [`Drop`] below — the "already consumed by
     /// `Future::poll`" state) so this must only be called where that's
@@ -56,7 +62,7 @@ impl<S: SchedulerSystem, T> JoinHandle<S, T> {
     }
 }
 
-impl<S: SchedulerSystem, T: Send + 'static> JoinHandle<S, T> {
+impl<S: DescScheduler, T: Send + 'static> JoinHandle<S, T> {
     pub(crate) fn take_result(self, wk: &UltWorker<S>) -> Result<T, Box<dyn Any + Send>> {
         let desc = self.desc;
         let result_ptr = self.result_ptr;
@@ -82,7 +88,10 @@ impl<S: SchedulerSystem, T: Send + 'static> JoinHandle<S, T> {
     }
 }
 
-impl<S: SchedulerSystem, T> Drop for JoinHandle<S, T> {
+impl<S, T> Drop for JoinHandle<S, T>
+where
+    S: DescScheduler,
+{
     // The common case (already consumed by `Future::poll`, `desc` null) is a
     // single branch; without this hint the compiler was leaving the whole
     // function (including the cold detach path) as a real call at every
@@ -100,7 +109,7 @@ impl<S: SchedulerSystem, T> Drop for JoinHandle<S, T> {
         // RUNNING or an async waker (a parked sync joiner is impossible: join
         // consumes the handle) -> detach, the exit path cleans up. Already
         // finished -> this handle owns the result and the descriptor.
-        if self.desc_ref().try_mark_detached() {
+        if self.desc_ref().try_abandon() {
             unsafe { result_drop(result_ptr) };
             match UltWorker::<S>::current() {
                 Some(wk) => S::free_finished_desc(wk, desc),

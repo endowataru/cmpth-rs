@@ -5,11 +5,10 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::AtomicUsize;
 
-use crate::resumable::common::desc::{DescOwned, HasDescOwned, HasScheduler, RunningTaskToken, SuspendedTaskToken, TaskDescCore, TaskDescAlloc, decode_join_state, JS_DETACHED, JS_RUNNING};
+use crate::resumable::common::desc::{DescOwned, HasDescOwned, HasScheduler, RunningTaskToken, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskDescAlloc, JS_DETACHED, JS_RUNNING};
 use crate::resumable::common::scheduler::Scheduler;
 use crate::resumable::common::system::SchedulerSystem;
-use crate::traits::common::JoinState;
-use crate::traits::stackful::{SyncJoinState, SyncJoinerTaskDesc};
+use crate::traits::stackful::HandoffTaskDesc;
 
 /// Implemented by a [`TaskDescCore::Owned`] type that can hold a saved-context
 /// pointer — either directly ([`StackfulOnlyTaskDesc`]'s
@@ -74,9 +73,22 @@ pub trait HasCtx {
 /// execution stack (stackful ULTs). A pure-stackless descriptor type would
 /// not implement this — there is no saved context to hand off, since
 /// `run_async_poll` never does a context switch.
-pub trait StackfulTaskDesc: SyncJoinerTaskDesc + TaskDescCore<Owned: HasCtx + HasScheduler> {}
+///
+/// Also pins `Suspended = SuspendedTaskToken<Self>` (nested in this trait's
+/// own supertrait bound list, so it propagates as a real implied bound at
+/// call sites merely bounded by `StackfulTaskDesc` — see [`HasScheduler`]'s
+/// doc comment for why the nesting position matters): every call site in
+/// this crate that receives a `HandoffTaskDesc`/`TaskDesc::Suspended` token
+/// generic only over `S::Desc: StackfulTaskDesc` immediately hands it to
+/// this crate's own `SuspendedTaskToken`-typed plumbing
+/// (`push_local_top`/`exit_to_cont`/`push_continuation`), so the equality
+/// needs to be visible there, not just to this trait's own default-less
+/// methods.
+pub trait StackfulTaskDesc:
+    HandoffTaskDesc + TaskDesc<Suspended = SuspendedTaskToken<Self>> + TaskDescCore<Owned: HasCtx + HasScheduler>
+{}
 
-impl<D: SyncJoinerTaskDesc + TaskDescCore<Owned: HasCtx + HasScheduler>> StackfulTaskDesc for D {}
+impl<D: HandoffTaskDesc + TaskDesc<Suspended = SuspendedTaskToken<D>> + TaskDescCore<Owned: HasCtx + HasScheduler>> StackfulTaskDesc for D {}
 
 impl<D: TaskDescCore<Owned: HasCtx>> SuspendedTaskToken<D> {
     /// Claim this task's saved context before switching into it (swap to
@@ -173,22 +185,11 @@ impl<S: SchedulerSystem> TaskDescCore for StackfulOnlyTaskDesc<S> {
     type Owned = StackfulOnlyOwned<S>;
     fn owned_cell(&self) -> &UnsafeCell<StackfulOnlyOwned<S>> { &self.owned }
 
-    /// No async capability at all, so `AsyncWaker`/`AsyncJoiner` can never
-    /// actually be published (the only writers,
-    /// `WakerTaskDesc::try_register_waker`/`try_register_async_joiner`,
-    /// don't exist for this type) — narrow to `SyncJoinState`.
-    type JoinOutcome = SyncJoinState<Self>;
-    fn decode_join(word: usize) -> SyncJoinState<Self> {
-        match decode_join_state::<Self>(word) {
-            JoinState::Running => SyncJoinState::Running,
-            JoinState::Finished => SyncJoinState::Finished,
-            JoinState::Detached => SyncJoinState::Detached,
-            JoinState::SyncJoiner(j) => SyncJoinState::SyncJoiner(j),
-            JoinState::AsyncWaker(_) | JoinState::AsyncJoiner(_) => {
-                unreachable!("cmpth: async join state on a system with no async capability")
-            }
-        }
-    }
+    // No async capability at all, so `AsyncWaker`/`AsyncJoiner` can never
+    // actually be published (the only writers,
+    // `WakerTaskDesc::try_register_waker`/`try_register_async_joiner`,
+    // don't exist for this type) — `try_claim_async_joiner` keeps
+    // `TaskDescCore`'s no-op default rather than overriding it.
 }
 
 impl<S: SchedulerSystem> TaskDescAlloc for StackfulOnlyTaskDesc<S> {

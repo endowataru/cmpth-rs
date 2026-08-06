@@ -7,21 +7,21 @@ use std::cell::UnsafeCell;
 use std::collections::VecDeque;
 
 use crate::spin::SpinLock;
-use crate::resumable::common::desc::{SuspendedTaskToken, TaskDescCore};
 
 /// Contract: `push_top`, `push_bottom` and `try_pop_top` are only called by
 /// the worker that owns the deque; `try_steal_bottom` may be called from any
 /// thread.
 ///
-/// Generic over the descriptor type `D` (see [`SuspendedTaskToken`]); every
-/// concrete system today sets `D = DualTaskDesc` via
-/// [`crate::SchedulerSystem::Desc`].
-pub trait WorkerDeque<D: TaskDescCore>: Default + Send + Sync + 'static {
-    fn push_top(&self, c: SuspendedTaskToken<D>);
-    fn push_bottom(&self, c: SuspendedTaskToken<D>);
-    fn try_pop_top(&self) -> Option<SuspendedTaskToken<D>>;
+/// Generic over the element type `T` moved through the deque — neither
+/// provided implementation ever inspects `T`, only stores/returns it. Every
+/// concrete system today sets `T = SuspendedTaskToken<Self::Desc>` via
+/// [`crate::SchedulerSystem::Item`].
+pub trait WorkerDeque<T: Send>: Default + Send + Sync + 'static {
+    fn push_top(&self, v: T);
+    fn push_bottom(&self, v: T);
+    fn try_pop_top(&self) -> Option<T>;
     /// Called from thief workers.
-    fn try_steal_bottom(&self) -> Option<SuspendedTaskToken<D>>;
+    fn try_steal_bottom(&self) -> Option<T>;
 }
 
 /// Default deque: lock-free Chase-Lev (crossbeam).  The owner pushes/pops the
@@ -32,18 +32,18 @@ pub trait WorkerDeque<D: TaskDescCore>: Default + Send + Sync + 'static {
 /// (used by `yield`) degrades to `push_top`; yielding still gives thieves a
 /// steal window, but local FIFO fairness is approximated only.  Use
 /// [`SpinDeque`] if exact yield ordering matters more than throughput.
-pub struct CrossbeamDeque<D: TaskDescCore> {
+pub struct CrossbeamDeque<T: Send> {
     /// Owner-only end (see the trait contract above).
-    local: UnsafeCell<crossbeam_deque::Worker<SuspendedTaskToken<D>>>,
-    stealer: crossbeam_deque::Stealer<SuspendedTaskToken<D>>,
+    local: UnsafeCell<crossbeam_deque::Worker<T>>,
+    stealer: crossbeam_deque::Stealer<T>,
 }
 
-unsafe impl<D: TaskDescCore> Send for CrossbeamDeque<D> {}
+unsafe impl<T: Send> Send for CrossbeamDeque<T> {}
 // Safety: `local` is only touched by the owning worker (trait contract);
 // `stealer` is thread-safe by construction.
-unsafe impl<D: TaskDescCore> Sync for CrossbeamDeque<D> {}
+unsafe impl<T: Send> Sync for CrossbeamDeque<T> {}
 
-impl<D: TaskDescCore> Default for CrossbeamDeque<D> {
+impl<T: Send> Default for CrossbeamDeque<T> {
     fn default() -> Self {
         let local = crossbeam_deque::Worker::new_lifo();
         let stealer = local.stealer();
@@ -51,20 +51,20 @@ impl<D: TaskDescCore> Default for CrossbeamDeque<D> {
     }
 }
 
-impl<D: TaskDescCore> WorkerDeque<D> for CrossbeamDeque<D> {
-    fn push_top(&self, c: SuspendedTaskToken<D>) {
+impl<T: Send + 'static> WorkerDeque<T> for CrossbeamDeque<T> {
+    fn push_top(&self, c: T) {
         unsafe { &*self.local.get() }.push(c);
     }
 
-    fn push_bottom(&self, c: SuspendedTaskToken<D>) {
+    fn push_bottom(&self, c: T) {
         unsafe { &*self.local.get() }.push(c);
     }
 
-    fn try_pop_top(&self) -> Option<SuspendedTaskToken<D>> {
+    fn try_pop_top(&self) -> Option<T> {
         unsafe { &*self.local.get() }.pop()
     }
 
-    fn try_steal_bottom(&self) -> Option<SuspendedTaskToken<D>> {
+    fn try_steal_bottom(&self) -> Option<T> {
         loop {
             match self.stealer.steal() {
                 crossbeam_deque::Steal::Success(c) => return Some(c),
@@ -78,30 +78,30 @@ impl<D: TaskDescCore> WorkerDeque<D> for CrossbeamDeque<D> {
 /// Default deque: a spinlock-protected `VecDeque`.  Simple and correct;
 /// replace with a lock-free Chase-Lev deque via the policy when profiling
 /// says so.
-pub struct SpinDeque<D: TaskDescCore> {
-    q: SpinLock<VecDeque<SuspendedTaskToken<D>>>,
+pub struct SpinDeque<T: Send> {
+    q: SpinLock<VecDeque<T>>,
 }
 
-impl<D: TaskDescCore> Default for SpinDeque<D> {
+impl<T: Send> Default for SpinDeque<T> {
     fn default() -> Self {
         SpinDeque { q: SpinLock::new(VecDeque::new()) }
     }
 }
 
-impl<D: TaskDescCore> WorkerDeque<D> for SpinDeque<D> {
-    fn push_top(&self, c: SuspendedTaskToken<D>) {
+impl<T: Send + 'static> WorkerDeque<T> for SpinDeque<T> {
+    fn push_top(&self, c: T) {
         self.q.lock().push_front(c);
     }
 
-    fn push_bottom(&self, c: SuspendedTaskToken<D>) {
+    fn push_bottom(&self, c: T) {
         self.q.lock().push_back(c);
     }
 
-    fn try_pop_top(&self) -> Option<SuspendedTaskToken<D>> {
+    fn try_pop_top(&self) -> Option<T> {
         self.q.lock().pop_front()
     }
 
-    fn try_steal_bottom(&self) -> Option<SuspendedTaskToken<D>> {
+    fn try_steal_bottom(&self) -> Option<T> {
         self.q.lock().pop_back()
     }
 }

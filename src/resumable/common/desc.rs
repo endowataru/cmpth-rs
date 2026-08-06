@@ -61,8 +61,8 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::Waker;
 
-pub use crate::traits::common::{JoinState, TaskDesc};
-pub use crate::traits::stackful::SyncJoinerTaskDesc;
+pub use crate::traits::common::{TaskDesc, TaskExitSink};
+pub use crate::traits::stackful::HandoffTaskDesc;
 use crate::interchange::PointerInterchangeable;
 
 // ---------------------------------------------------------------------------
@@ -90,6 +90,33 @@ pub(crate) const JS_FINISHED: usize = 1;
 pub(crate) const JS_DETACHED: usize = 2;
 pub(crate) const JS_ASYNC_TAG: usize = 1;
 pub(crate) const JS_ASYNC_JOINER_TAG: usize = 2;
+
+/// Decoded view of a task descriptor's join-protocol state — who (if
+/// anyone) is waiting on this task, or whether it has already finished.
+/// Crate-private: [`TaskDesc`] itself deliberately says nothing about who
+/// might be waiting (see that trait's own doc comment) — this is purely
+/// this crate's own internal decoding of the `join_state` word, used by
+/// [`decode_join_state`] and the blanket [`TaskDesc`]/[`HandoffTaskDesc`]/
+/// [`WakerTaskDesc`](crate::traits::stackless::WakerTaskDesc) impls below.
+pub(crate) enum JoinState<D> {
+    /// Task alive, nobody waiting.
+    Running,
+    /// Result written (or the task was detached-and-cleaned).
+    Finished,
+    /// The `JoinHandle` was dropped early; the exit path cleans up.
+    Detached,
+    /// A parked sync joiner, registered via
+    /// [`HandoffTaskDesc::try_register_joiner`].
+    SyncJoiner(*mut D),
+    /// A registered async waker — used when the polling task's waker isn't
+    /// verifiably one of this system's own (foreign executor, or no worker
+    /// at all).
+    AsyncWaker(*mut Waker),
+    /// Same role as `AsyncWaker`, but unboxed: the polling task's own
+    /// descriptor, reachable directly because its waker is known (by
+    /// construction) to be this system's own poll-loop waker.
+    AsyncJoiner(*mut D),
+}
 
 pub(crate) fn decode_join_state<D>(v: usize) -> JoinState<D> {
     match v {
@@ -214,37 +241,30 @@ pub trait TaskDescCore: Send + Sync + Sized + 'static {
     type Owned: HasDescOwned;
     fn owned_cell(&self) -> &UnsafeCell<Self::Owned>;
 
-    /// Per-flavor "who might be waiting" outcome type — see
-    /// [`TaskDesc::JoinOutcome`].
-    /// Hand-specified per concrete flavor (same as `Owned` above), not
-    /// blanket-derived, since the variant set genuinely differs.
-    type JoinOutcome;
-
-    /// Decode a raw `join_state` word (per the `JS_*` encoding above) into
-    /// this flavor's own [`JoinOutcome`](Self::JoinOutcome).
-    fn decode_join(word: usize) -> Self::JoinOutcome;
-}
-
-/// Internal, always-full-union decode — used only by this crate's own
-/// resumable/-layer exit-completion code (`exit_with_result`/`exit`/
-/// `poll_spawned_task`), which is already generic over a *concrete*
-/// capability-bound flavor combination (`StackfulTaskDesc`/`AsyncTaskDesc`)
-/// and needs to handle whichever waiter kind a `Dual` instantiation might
-/// actually produce, regardless of which narrower
-/// [`TaskDescCore::JoinOutcome`] the same generic code's *other*
-/// instantiations (`StackfulOnlyTaskDesc`/`StacklessOnlyTaskDesc`) declare.
-/// Deliberately bypasses the abstract [`TaskDesc::read_join_state`]/
-/// [`TaskDesc::publish_finished`] (whose return type is properly narrowed
-/// per flavor for external implementors) — this is the crate's own
-/// implementation detail, not part of that public contract.
-pub(crate) fn read_join_state_raw<D: TaskDescCore>(desc: &D) -> JoinState<D> {
-    decode_join_state(desc.join_state().load(Ordering::Acquire))
-}
-
-/// See [`read_join_state_raw`] — same reasoning, the swap-and-decode
-/// counterpart of [`TaskDesc::publish_finished`].
-pub(crate) fn publish_finished_raw<D: TaskDescCore>(desc: &D) -> JoinState<D> {
-    decode_join_state(desc.join_state().swap(JS_FINISHED, Ordering::AcqRel))
+    /// Try to claim a same-system async joiner registered via
+    /// [`WakerTaskDesc::try_register_async_joiner`](crate::traits::stackless::WakerTaskDesc::try_register_async_joiner)
+    /// — the async-joiner counterpart of [`TaskDesc::finish_and_settle`]'s
+    /// `AsyncWaker` handling, letting the completing task hand off
+    /// straight to a same-system polling task's own continuation instead
+    /// of waking a boxed `Waker`.
+    ///
+    /// No-op default (`None`, nothing to claim): correct as-is for any
+    /// descriptor type with no async capability at all — nothing can ever
+    /// write this join-state tag without
+    /// [`WakerTaskDesc`](crate::traits::stackless::WakerTaskDesc), which such a
+    /// type doesn't implement, so this default is never actually invoked
+    /// for it. The flavors that *do* implement
+    /// [`WakerTaskDescCore`](crate::resumable::stackless::desc::WakerTaskDescCore)
+    /// (`StacklessOnlyTaskDesc`, `DualTaskDesc`) override this to delegate
+    /// to their own `WakerTaskDesc::try_claim_parked`. Same shape as
+    /// [`HasCtx::commit_as_ctx`](crate::resumable::stackful::desc::HasCtx::commit_as_ctx)'s
+    /// no-op default — a capability a type doesn't have has nothing to do
+    /// here, so there is no async branch to reach for it, structurally
+    /// rather than by a runtime check.
+    fn try_claim_async_joiner(joiner: *mut Self) -> Option<SuspendedTaskToken<Self>> {
+        let _ = joiner;
+        None
+    }
 }
 
 /// Blanket [`TaskDesc`] for any descriptor
@@ -259,12 +279,6 @@ impl<D: TaskDescCore> TaskDesc for D {
     type Owned = <D as TaskDescCore>::Owned;
     type Suspended = SuspendedTaskToken<D>;
     type Running = RunningTaskToken<D>;
-    type JoinOutcome = <D as TaskDescCore>::JoinOutcome;
-
-    #[inline]
-    fn read_join_state(&self) -> Self::JoinOutcome {
-        D::decode_join(self.join_state().load(Ordering::Acquire))
-    }
 
     #[inline]
     fn is_finished(&self) -> bool {
@@ -276,12 +290,33 @@ impl<D: TaskDescCore> TaskDesc for D {
         self.join_state().store(JS_FINISHED, Ordering::Release);
     }
 
-    #[inline]
-    fn publish_finished(&self) -> Self::JoinOutcome {
-        D::decode_join(self.join_state().swap(JS_FINISHED, Ordering::AcqRel))
+    fn finish_and_settle<K: TaskExitSink<Self>>(&self, sink: &K) {
+        match decode_join_state::<D>(self.join_state().swap(JS_FINISHED, Ordering::AcqRel)) {
+            JoinState::Running => {}
+            JoinState::SyncJoiner(j) => {
+                // SAFETY: `j` was published by `HandoffTaskDesc::try_register_joiner`'s
+                // caller, which only commits it after consuming a real
+                // `Suspended` token it exclusively held — this decode is
+                // the sole consumer of that publish.
+                sink.resume(unsafe { SuspendedTaskToken::from_raw(j) });
+            }
+            // No sink call: a foreign waker isn't this scheduler's
+            // business to hand off through, unlike a same-system
+            // continuation.
+            JoinState::AsyncWaker(w) => unsafe { Box::from_raw(w) }.wake(),
+            JoinState::AsyncJoiner(j) => {
+                if let Some(token) = D::try_claim_async_joiner(j) {
+                    sink.resume(token);
+                }
+                // else: genuinely POLLING/NOTIFIED right now — it will
+                // notice FINISHED on its own next poll.
+            }
+            JoinState::Detached => sink.reclaim(),
+            JoinState::Finished => unreachable!("cmpth: double task exit"),
+        }
     }
 
-    fn try_mark_detached(&self) -> bool {
+    fn try_abandon(&self) -> bool {
         let mut cur = self.join_state().load(Ordering::Acquire);
         loop {
             if cur == JS_FINISHED {
@@ -300,22 +335,42 @@ impl<D: TaskDescCore> TaskDesc for D {
             }
         }
     }
+
+    #[inline]
+    fn is_abandoned(&self) -> bool {
+        self.join_state().load(Ordering::Acquire) == JS_DETACHED
+    }
 }
 
-/// Blanket [`SyncJoinerTaskDesc`] for any descriptor using this crate's own
+/// Blanket [`HandoffTaskDesc`] for any descriptor using this crate's own
 /// word-based join-state encoding — same algorithm this used to be, just
 /// relocated off the base [`TaskDesc`] (see that trait's doc comment for
 /// why: only stackful call sites ever invoke it).
-impl<D: TaskDescCore> SyncJoinerTaskDesc for D {
-    unsafe fn try_register_sync_joiner(&self, joiner: *mut Self) -> bool {
+impl<D: TaskDescCore> HandoffTaskDesc for D {
+    fn try_take_handoff_target(&self) -> Option<Self::Suspended> {
+        match decode_join_state::<D>(self.join_state().load(Ordering::Acquire)) {
+            // SAFETY: same provenance as `TaskDesc::finish_and_settle`'s
+            // `SyncJoiner` arm — `j` was published via a real `Suspended`
+            // token consumed by `try_register_joiner`'s caller.
+            JoinState::SyncJoiner(j) => Some(unsafe { SuspendedTaskToken::from_raw(j) }),
+            JoinState::Running
+            | JoinState::Finished
+            | JoinState::Detached
+            | JoinState::AsyncWaker(_)
+            | JoinState::AsyncJoiner(_) => None,
+        }
+    }
+
+    fn try_register_joiner(&self, joiner: Self::Suspended) -> Result<(), Self::Suspended> {
+        let joiner_ptr = joiner.desc();
         let mut cur = self.join_state().load(Ordering::Relaxed);
         loop {
             if cur == JS_FINISHED {
-                return false;
+                return Err(joiner);
             }
             match self.join_state().compare_exchange_weak(
                 cur,
-                joiner as usize,
+                joiner_ptr as usize,
                 Ordering::Release,
                 Ordering::Acquire,
             ) {
@@ -323,7 +378,11 @@ impl<D: TaskDescCore> SyncJoinerTaskDesc for D {
                     if let JoinState::AsyncWaker(w) = decode_join_state::<Self>(cur) {
                         drop(unsafe { Box::from_raw(w) });
                     }
-                    return true;
+                    // Ownership now lives in the join_state word, reachable
+                    // again only via `try_take_handoff_target`/
+                    // `finish_and_settle`'s matching `from_raw` above.
+                    let _ = joiner.into_raw();
+                    return Ok(());
                 }
                 Err(c) => cur = c,
             }

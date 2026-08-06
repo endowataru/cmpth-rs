@@ -21,7 +21,7 @@
 use crate::traits::stackful::{ContextPolicy, ThreadSystem};
 use crate::resumable::common::deque::WorkerDeque;
 use crate::resumable::common::lookup::CurrentLookup;
-use crate::resumable::common::system::SchedulerSystem;
+use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
 use crate::resumable::common::desc::{HasScheduler, SuspendedTaskToken, TaskDescCore};
 use crate::resumable::common::stack::StackAlloc;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
@@ -43,7 +43,7 @@ pub use crate::traits::stackful::StackfulTaskSystem;
 /// real ULTs" a checkable, compile-time fact instead of a convention.
 ///
 /// Both `Desc: StackfulTaskDesc` and `Owned: HasScheduler<System = Self>`
-/// are nested directly in the supertrait bound list (`SchedulerSystem<Desc:
+/// are nested directly in the supertrait bound list (`DescScheduler<Desc:
 /// ...>`), not a separate `where`-clause — that's what lets every function
 /// merely bounded `S: StackfulSchedulerSystem` get both for free, with no
 /// need to restate either. A `where`-clause form (`SchedulerSystem where
@@ -51,9 +51,11 @@ pub use crate::traits::stackful::StackfulTaskSystem;
 /// both for a `where`-clause on this trait's own declaration and for one on
 /// `SchedulerSystem::Desc`'s declaration in a different trait) — only
 /// associated-type bounds nested in a supertrait's own bound list are
-/// treated as real implied bounds.
+/// treated as real implied bounds. [`DescScheduler`] itself is one such
+/// supertrait, folding in `Item`/`Worker` once so this trait doesn't have
+/// to restate them.
 pub trait StackfulSchedulerSystem:
-    SchedulerSystem<Desc: StackfulTaskDesc + TaskDescCore<Owned: HasScheduler<System = Self>>>
+    DescScheduler<Desc: StackfulTaskDesc + TaskDescCore<Owned: HasScheduler<System = Self>>>
 {
     /// Context-switch implementation.
     type Ctx: ContextPolicy;
@@ -168,7 +170,7 @@ impl<S: crate::traits::scoped::ScopedStackfulTaskSystem + ThreadSystem> crate::t
 ///     type Base = cmpth::OsSystem;
 ///     type Ctx = cmpth::NativeContext;
 ///     type Desc = cmpth::StackfulOnlyTaskDesc<Self>;
-///     type Deque = cmpth::CrossbeamDeque<cmpth::StackfulOnlyTaskDesc<Self>>;
+///     type Deque = cmpth::CrossbeamDeque<cmpth::SuspendedTaskToken<cmpth::StackfulOnlyTaskDesc<Self>>>;
 ///     type Alloc = cmpth::HeapStack;
 ///     type Lookup = cmpth::TlsCurrent;
 ///
@@ -211,7 +213,7 @@ pub trait UltIdentity: Sized + Send + Sync + 'static {
         Self: SchedulerSystem;
 
     /// Work-stealing deque implementation.
-    type Deque: WorkerDeque<Self::Desc>;
+    type Deque: WorkerDeque<SuspendedTaskToken<Self::Desc>>;
 
     /// Stack allocation policy.
     type Alloc: StackAlloc;
@@ -233,6 +235,8 @@ pub trait UltIdentity: Sized + Send + Sync + 'static {
 impl<M: UltIdentity> SchedulerSystem for M {
     type Base  = M::Base;
     type Desc  = M::Desc;
+    type Item  = SuspendedTaskToken<M::Desc>;
+    type Worker = UltWorker<Self>;
     type Deque = M::Deque;
     type ExternalQueue = crate::resumable::common::external_queue::StealPathQueue<M::Desc>;
     type Pool          = crate::resumable::common::pool::ReturnPool<M::Desc, M::Alloc>;
@@ -283,7 +287,7 @@ where
     type Poller = crate::resumable::stackful::waker::ResumablePoller<Self>;
 
     fn yield_now() {
-        use crate::resumable::common::worker::Worker;
+        use crate::resumable::common::worker::WorkerOps;
         use crate::resumable::stackful::worker::StackfulWorker;
         match UltWorker::<Self>::current() {
             Some(wk) => { wk.yield_now(); }

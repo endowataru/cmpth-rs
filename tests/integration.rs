@@ -697,7 +697,9 @@ struct ManualSystem;
 impl cmpth::SchedulerSystem for ManualSystem {
     type Base  = OsSystem;
     type Desc  = DualTaskDesc<Self>;
-    type Deque = CrossbeamDeque<DualTaskDesc<Self>>;
+    type Item  = cmpth::SuspendedTaskToken<DualTaskDesc<Self>>;
+    type Worker = UltWorker<Self>;
+    type Deque = CrossbeamDeque<cmpth::SuspendedTaskToken<DualTaskDesc<Self>>>;
     type ExternalQueue   = StealPathQueue<DualTaskDesc<Self>>;
     type Pool            = ReturnPool<DualTaskDesc<Self>, HeapStack>;
     // Unused: ManualSystem never calls spawn_async.
@@ -737,7 +739,7 @@ impl ThreadSystem for ManualSystem {
     type Poller = cmpth::resumable::stackful::waker::UltPoller<Self>;
 
     fn yield_now() {
-        use cmpth::resumable::common::worker::Worker;
+        use cmpth::resumable::common::worker::WorkerOps;
         use cmpth::resumable::stackful::worker::StackfulWorker;
         match UltWorker::<Self>::current() {
             Some(wk) => { wk.yield_now(); }

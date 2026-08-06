@@ -14,7 +14,7 @@ use crate::resumable::common::desc::HasDescOwned;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::worker::{UltWorker, Worker};
+use crate::resumable::common::worker::{UltWorker, WorkerOps};
 
 static NEXT_ULT_TLS_KEY: AtomicUsize = AtomicUsize::new(0);
 

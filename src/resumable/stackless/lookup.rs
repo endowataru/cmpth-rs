@@ -5,7 +5,6 @@
 use crate::traits::common::TlsSlot;
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::system::SchedulerSystem;
-use crate::resumable::common::worker::UltWorker;
 
 // ---------------------------------------------------------------------------
 // InlineTlsCurrent
@@ -28,7 +27,7 @@ pub struct InlineTlsCurrent;
 
 impl<S: SchedulerSystem> CurrentLookup<S> for InlineTlsCurrent {
     #[inline]
-    fn current() -> Option<&'static UltWorker<S>> {
+    fn current() -> Option<&'static S::Worker> {
         let p = TlsSlot::get_inline(S::worker_tls());
         if p.is_null() { None } else { Some(unsafe { &*p }) }
     }

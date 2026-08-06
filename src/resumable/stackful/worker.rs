@@ -11,7 +11,7 @@ use std::ptr;
 
 use crate::traits::stackful::{CondTransfer, Context, ContextPolicy, Transfer};
 use crate::resumable::common::deque::WorkerDeque;
-use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, Worker};
+use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, WorkerOps};
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, TaskDescCore};
@@ -94,7 +94,7 @@ where
 /// Scheduler-level operations that only make sense with a real, switchable
 /// stack: suspending the calling ULT and resuming whatever's next.
 pub trait StackfulWorker<S: StackfulSchedulerSystem>:
-    Worker<S> + ContextSwitcher<S> + StackfulLocalQueue<S>
+    WorkerOps<S> + ContextSwitcher<S> + StackfulLocalQueue<S>
 where
     S::Desc: StackfulTaskDesc,
 {

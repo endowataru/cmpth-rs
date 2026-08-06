@@ -6,13 +6,12 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Waker};
 
-use crate::resumable::common::desc::{DescOwned, HasDescOwned, HasScheduler, JoinState, RunningTaskToken, SuspendedTaskToken, TaskDescCore, TaskDescAlloc, decode_join_state, JS_ASYNC_JOINER_TAG, JS_ASYNC_TAG, JS_DETACHED, JS_FINISHED, JS_RUNNING};
+use crate::resumable::common::desc::{DescOwned, HasDescOwned, HasScheduler, JoinState, RunningTaskToken, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskDescAlloc, decode_join_state, JS_ASYNC_JOINER_TAG, JS_ASYNC_TAG, JS_DETACHED, JS_FINISHED, JS_RUNNING};
 use crate::resumable::common::scheduler::Scheduler;
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::waker::{self, WakeOutcome, EVER_SHARED, STATE_MASK};
 
 pub use crate::traits::stackless::WakerTaskDesc;
-use crate::traits::stackless::AsyncJoinState;
 
 /// Raw waker-state storage: this crate's own `AtomicUsize`-encoded
 /// POLLING/PARKED/NOTIFIED/IDLE state machine (see
@@ -20,7 +19,7 @@ use crate::traits::stackless::AsyncJoinState;
 /// for the encoding). Implementing this (together with [`TaskDescCore`])
 /// opts a descriptor into the [`WakerTaskDesc`] operations below for free
 /// via the blanket impl — the same two-tier relationship as
-/// [`TaskDescCore`]/[`TaskDesc`](crate::traits::common::TaskDesc).
+/// [`TaskDescCore`]/[`TaskDesc`].
 pub trait WakerTaskDescCore: TaskDescCore {
     /// Zero (IDLE) when no poll session is active on this task.
     fn waker_refs(&self) -> &AtomicUsize;
@@ -48,15 +47,23 @@ impl<D: TaskDescCore + WakerTaskDescCore> WakerTaskDesc for D {
         waker::park_after_poll(self.waker_refs())
     }
 
-    fn try_wake_state(&self) -> WakeOutcome {
-        waker::try_wake_state(self.waker_refs())
+    fn try_claim_parked(&self) -> Option<Self::Suspended> {
+        match waker::try_wake_state(self.waker_refs()) {
+            // SAFETY: `ClaimedParked` is the proof — `try_wake_state`'s CAS
+            // only succeeds once per park, so this caller is the sole
+            // party entitled to reclaim `self`.
+            WakeOutcome::ClaimedParked => {
+                Some(unsafe { SuspendedTaskToken::from_raw(self as *const Self as *mut Self) })
+            }
+            WakeOutcome::SetNotified | WakeOutcome::NoOp => None,
+        }
     }
 
-    fn is_ever_shared(&self) -> bool {
+    fn is_waker_shared(&self) -> bool {
         self.waker_refs().load(Ordering::Relaxed) & EVER_SHARED != 0
     }
 
-    fn transition_to_shared(&self) {
+    fn note_waker_shared(&self) {
         loop {
             let old = self.waker_refs().load(Ordering::Relaxed);
             let new = EVER_SHARED | (old & STATE_MASK);
@@ -71,17 +78,18 @@ impl<D: TaskDescCore + WakerTaskDescCore> WakerTaskDesc for D {
     }
 
     #[inline]
-    unsafe fn try_register_async_joiner(&self, joiner: *mut Self) -> bool {
+    fn try_register_async_joiner(&self, joiner: Self::Suspended) -> Result<(), Self::Suspended> {
+        let joiner_ptr = joiner.desc();
         debug_assert_eq!(
-            joiner as usize & (JS_ASYNC_TAG | JS_ASYNC_JOINER_TAG),
+            joiner_ptr as usize & (JS_ASYNC_TAG | JS_ASYNC_JOINER_TAG),
             0,
             "cmpth: descriptor pointer not aligned enough to tag"
         );
         let mut cur = TaskDescCore::join_state(self).load(Ordering::Acquire);
-        let new = (joiner as usize) | JS_ASYNC_JOINER_TAG;
+        let new = (joiner_ptr as usize) | JS_ASYNC_JOINER_TAG;
         loop {
             if cur == JS_FINISHED {
-                return false;
+                return Err(joiner);
             }
             match TaskDescCore::join_state(self).compare_exchange_weak(
                 cur, new, Ordering::Release, Ordering::Acquire,
@@ -90,7 +98,9 @@ impl<D: TaskDescCore + WakerTaskDescCore> WakerTaskDesc for D {
                     if let JoinState::AsyncWaker(w) = decode_join_state::<Self>(cur) {
                         drop(unsafe { Box::from_raw(w) });
                     }
-                    return true;
+                    // Ownership now lives in the join_state word.
+                    let _ = joiner.into_raw();
+                    return Ok(());
                 }
                 Err(c) => cur = c,
             }
@@ -130,13 +140,14 @@ pub enum TaskPollResult<D> {
     /// The future finished; nothing left to do for this task.
     Ready,
     /// The future finished, and its completion claimed exclusive ownership
-    /// of a waiting [`JoinState::AsyncJoiner`]
-    /// — the caller's poll loop should continue directly into that
-    /// descriptor next (symmetric transfer), instead of pushing it to a
-    /// deque and waiting for some worker to pop it back out. Safe because
-    /// `try_wake_state`'s `ClaimedParked` outcome (the only case this is
-    /// constructed for) proves nobody else can be concurrently polling that
-    /// descriptor.
+    /// of a waiting same-system async joiner, registered via
+    /// [`WakerTaskDesc::try_register_async_joiner`] — the caller's poll
+    /// loop should continue directly into that descriptor next (symmetric
+    /// transfer), instead of pushing it to a deque and waiting for some
+    /// worker to pop it back out. Safe because
+    /// [`WakerTaskDesc::try_claim_parked`] returning `Some` (the only case
+    /// this is constructed for) proves nobody else can be concurrently
+    /// polling that descriptor.
     ReadyAndContinue(*mut D),
     /// The future returned `Poll::Pending`; the caller should park (or
     /// requeue immediately if a wake raced in during the poll).
@@ -188,9 +199,22 @@ pub trait HasPollFn<D> {
 /// Future — the type-erased poll entry point. Builds on [`WakerTaskDesc`]
 /// (a `spawn_async` task's own poll loop, `run_async_poll`, uses
 /// `mark_polling`/`park_after_poll` on itself just like `block_on` does).
-pub trait AsyncTaskDesc: WakerTaskDesc + TaskDescCore<Owned: HasPollFn<Self> + HasScheduler> {}
+///
+/// Also pins `Suspended = SuspendedTaskToken<Self>` (nested in this trait's
+/// own supertrait bound list, so it propagates as a real implied bound at
+/// call sites merely bounded by `AsyncTaskDesc` — see [`HasScheduler`]'s
+/// doc comment for why the nesting position matters): every call site in
+/// this crate that receives a `WakerTaskDesc`/`TaskDesc::Suspended` token
+/// generic only over `S::Desc: AsyncTaskDesc` immediately hands it to this
+/// crate's own `SuspendedTaskToken`-typed plumbing (`push_local_top`/
+/// `push_continuation`/`is_poll_fn_dispatch`/`into_raw`), so the equality
+/// needs to be visible there, not just to this trait's own default-less
+/// methods.
+pub trait AsyncTaskDesc:
+    WakerTaskDesc + TaskDesc<Suspended = SuspendedTaskToken<Self>> + TaskDescCore<Owned: HasPollFn<Self> + HasScheduler>
+{}
 
-impl<D: WakerTaskDesc + TaskDescCore<Owned: HasPollFn<D> + HasScheduler>> AsyncTaskDesc for D {}
+impl<D: WakerTaskDesc + TaskDesc<Suspended = SuspendedTaskToken<D>> + TaskDescCore<Owned: HasPollFn<D> + HasScheduler>> AsyncTaskDesc for D {}
 
 impl<D: TaskDescCore<Owned: HasPollFn<D>>> SuspendedTaskToken<D> {
     /// The type-erased poll entry point, non-null once `spawn_now`/
@@ -276,22 +300,13 @@ impl<S: SchedulerSystem> TaskDescCore for StacklessOnlyTaskDesc<S> {
     type Owned = StacklessOnlyOwned<S>;
     fn owned_cell(&self) -> &UnsafeCell<StacklessOnlyOwned<S>> { &self.owned }
 
-    /// No stackful capability at all, so `SyncJoiner` can never actually be
-    /// published (the only writer,
-    /// `SyncJoinerTaskDesc::try_register_sync_joiner`, doesn't exist for
-    /// this type) — narrow to `AsyncJoinState`.
-    type JoinOutcome = AsyncJoinState<Self>;
-    fn decode_join(word: usize) -> AsyncJoinState<Self> {
-        match decode_join_state::<Self>(word) {
-            JoinState::Running => AsyncJoinState::Running,
-            JoinState::Finished => AsyncJoinState::Finished,
-            JoinState::Detached => AsyncJoinState::Detached,
-            JoinState::AsyncWaker(w) => AsyncJoinState::AsyncWaker(w),
-            JoinState::AsyncJoiner(j) => AsyncJoinState::AsyncJoiner(j),
-            JoinState::SyncJoiner(_) => {
-                unreachable!("cmpth: sync join state on a system with no stackful capability")
-            }
-        }
+    // Async capability: overrides `TaskDescCore`'s no-op
+    // `try_claim_async_joiner` default with the real claim, delegating to
+    // `WakerTaskDesc::try_claim_parked` (available via the blanket impl
+    // above, since this type also implements `WakerTaskDescCore`).
+    fn try_claim_async_joiner(joiner: *mut Self) -> Option<SuspendedTaskToken<Self>> {
+        let j_ref: &Self = unsafe { &*joiner };
+        j_ref.try_claim_parked()
     }
 }
 

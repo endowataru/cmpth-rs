@@ -14,7 +14,7 @@ use crate::resumable::common::scheduler::{recursion_pool_threshold, worker_loop,
 use crate::resumable::common::pool::{DescPool, DynamicPool};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::stackful::thread::fork_parent_first;
-use crate::resumable::common::worker::{LocalQueue, UltWorker, Worker};
+use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
 
 /// Start `num_workers` workers on the base system, run `root` as the first
 /// task, and return when `root` completes and all workers have shut down.

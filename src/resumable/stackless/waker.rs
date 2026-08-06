@@ -10,7 +10,6 @@
 use std::marker::PhantomData;
 use std::task::{RawWaker, RawWakerVTable};
 
-use crate::resumable::common::waker::WakeOutcome;
 use crate::resumable::stackless::desc::WakerTaskDesc;
 use crate::resumable::stackless::system::StacklessSchedulerSystem;
 use crate::resumable::common::waker::{desc_from_erased, drop_shared, push_continuation};
@@ -19,21 +18,16 @@ use crate::resumable::common::waker::{desc_from_erased, drop_shared, push_contin
 /// assertion.  Used for async tasks where PARKED simply means "not in the
 /// deque", not "context saved".
 ///
-/// Also the wake-side counterpart of `JoinState::AsyncJoiner` (see
-/// `TaskDesc::try_register_async_joiner`): called directly, bypassing the
+/// Also the wake-side counterpart of a registered async joiner (see
+/// `WakerTaskDesc::try_register_async_joiner`): called directly, bypassing the
 /// `Waker`/`RawWakerVTable` indirection entirely, since the registering side
 /// (`JoinHandle::poll`) only takes that path when it already knows — from
 /// `UltWorker::polling_async` — that going through a real `Waker` would have
 /// dispatched here anyway.
 pub(crate) unsafe fn try_wake_async<S: StacklessSchedulerSystem>(desc: *const S::Desc) {
-    let desc_ptr = desc as *mut S::Desc;
     let desc: &S::Desc = unsafe { &*desc };
-    if let WakeOutcome::ClaimedParked = desc.try_wake_state() {
-        // No ctx to load for async tasks; just push to deque.
-        // SAFETY: `ClaimedParked` is the proof — `try_wake_state`'s CAS
-        // only succeeds once per park, so this caller is the sole party
-        // entitled to reclaim `desc_ptr`.
-        let token = unsafe { crate::resumable::common::desc::SuspendedTaskToken::from_raw(desc_ptr) };
+    // No ctx to load for async tasks; just push to deque.
+    if let Some(token) = desc.try_claim_parked() {
         push_continuation::<S>(token);
     }
 }
@@ -64,7 +58,7 @@ pub(crate) fn async_task_private_vtable<S: StacklessSchedulerSystem>() -> &'stat
 
 unsafe fn clone_async_private<S: StacklessSchedulerSystem>(ptr: *const ()) -> RawWaker {
     let desc: &S::Desc = unsafe { desc_from_erased(ptr) };
-    desc.transition_to_shared();
+    desc.note_waker_shared();
     RawWaker::new(ptr, &AsyncSharedVtable::<S>::VTABLE)
 }
 
@@ -80,7 +74,7 @@ unsafe fn wake_async_private<S: StacklessSchedulerSystem>(ptr: *const ()) {
 
 unsafe fn wake_by_ref_async_private<S: StacklessSchedulerSystem>(ptr: *const ()) {
     let desc: &S::Desc = unsafe { desc_from_erased(ptr) };
-    if desc.is_ever_shared() {
+    if desc.is_waker_shared() {
         unsafe { wake_by_ref_async_shared::<S>(ptr) };
     } else {
         unsafe { try_wake_async::<S>(desc as *const S::Desc) };
@@ -89,7 +83,7 @@ unsafe fn wake_by_ref_async_private<S: StacklessSchedulerSystem>(ptr: *const ())
 
 unsafe fn drop_async_private<S: StacklessSchedulerSystem>(ptr: *const ()) {
     let desc: &S::Desc = unsafe { desc_from_erased(ptr) };
-    if desc.is_ever_shared() {
+    if desc.is_waker_shared() {
         drop_shared(ptr);
     }
     // Pure PRIVATE: waker is owned by run_async_poll's stack frame; no action.

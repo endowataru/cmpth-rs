@@ -41,13 +41,14 @@ use std::sync::atomic::AtomicUsize;
 use std::task::{Context, RawWaker, RawWakerVTable, Waker};
 
 use crate::traits::Poller;
-use crate::traits::stackful::{noop_waker, ThreadSystem};
+use crate::traits::component::stackful::noop_waker;
+use crate::traits::stackful::ThreadSystem;
 use crate::resumable::stackless::desc::WakerTaskDesc;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::waker::{self, WakeOutcome, desc_from_erased, drop_shared, push_continuation};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::worker::{UltWorker, Worker};
+use crate::resumable::common::worker::{UltWorker, WorkerOps};
 use crate::resumable::stackful::worker::StackfulWorker;
 
 // ---------------------------------------------------------------------------
@@ -331,20 +332,14 @@ impl<S: StackfulSchedulerSystem> Drop for ResumablePoller<S> where <S as Schedul
 /// # Safety
 /// `desc` must point to a live `DualTaskDesc`.
 unsafe fn try_wake<S: StackfulSchedulerSystem>(desc: *const S::Desc) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
-    let desc_ptr = desc as *mut S::Desc;
     let desc: &S::Desc = unsafe { &*desc };
-    if let WakeOutcome::ClaimedParked = desc.try_wake_state() {
+    if let Some(token) = desc.try_claim_parked() {
         // ctx is a plain field now (see HasCtx's doc comment) — this
         // debug_assert-only read was already relying on exactly that
         // invariant even when ctx was atomic: the Acquire CAS inside
-        // try_wake_state already happened-after the ctx store (Release) in
-        // cond_shim, so no ordering of ctx's own is needed here either way.
-        // SAFETY: `ClaimedParked` is the proof — `try_wake_state`'s CAS
-        // only succeeds once per park, so this caller is the sole party
-        // entitled to reclaim `desc`. One token, used for the debug_assert
-        // peek and then handed straight to `push_continuation` — not
-        // rebuilt a second time.
-        let token = unsafe { crate::resumable::common::desc::SuspendedTaskToken::from_raw(desc_ptr) };
+        // try_claim_parked already happened-after the ctx store (Release)
+        // in cond_shim, so no ordering of ctx's own is needed here either
+        // way.
         debug_assert!(!token.peek_saved_context().is_null());
         push_continuation::<S>(token);
     }
@@ -356,7 +351,7 @@ unsafe fn try_wake<S: StackfulSchedulerSystem>(desc: *const S::Desc) where <S as
 
 unsafe fn clone_private<S: StackfulSchedulerSystem>(ptr: *const ()) -> RawWaker where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     let desc: &S::Desc = unsafe { desc_from_erased(ptr) };
-    desc.transition_to_shared();
+    desc.note_waker_shared();
     // The clone uses the SHARED vtable; the original retains PRIVATE vtable
     // but its wake_private/drop_private check EVER_SHARED and dispatch correctly.
     RawWaker::new(ptr, shared_vtable::<S>())
@@ -372,7 +367,7 @@ unsafe fn wake_private<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as S
 
 unsafe fn wake_by_ref_private<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     let desc: &S::Desc = unsafe { desc_from_erased(ptr) };
-    if desc.is_ever_shared() {
+    if desc.is_waker_shared() {
         // Transitioned to SHARED after construction; use SHARED wake logic.
         unsafe { wake_by_ref_shared::<S>(ptr) };
     } else {
@@ -382,7 +377,7 @@ unsafe fn wake_by_ref_private<S: StackfulSchedulerSystem>(ptr: *const ()) where 
 
 unsafe fn drop_private<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     let desc: &S::Desc = unsafe { desc_from_erased(ptr) };
-    if desc.is_ever_shared() {
+    if desc.is_waker_shared() {
         // The original waker is being dropped; treat like a SHARED drop.
         drop_shared(ptr);
     }
