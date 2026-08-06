@@ -79,7 +79,7 @@ where
     let child = move |wk: &UltWorker<S>, prev| {
         // Running on the child's stack.  Publish the parent for stealing, run
         // the closure, then exit via exit_with_result.
-        wk.push_local_top(prev);
+        wk.push(prev);
         let val = catch_unwind(AssertUnwindSafe(|| unsafe { f_ptr.read() }()));
         // The closure may have suspended and resumed on a different worker,
         // so re-derive which one we're on now.
@@ -165,7 +165,7 @@ where
     <S as SchedulerSystem>::Desc: StackfulTaskDesc,
 {
     fn resume(&self, cont: <S::Desc as TaskDesc>::Suspended) {
-        self.wk.push_local_top(cont);
+        self.wk.push(cont);
     }
 
     fn reclaim(&self) {
@@ -192,7 +192,7 @@ where
     <S as SchedulerSystem>::Desc: StackfulTaskDesc,
 {
     fn resume(&self, cont: <S::Desc as TaskDesc>::Suspended) {
-        self.wk.push_local_top(cont);
+        self.wk.push(cont);
     }
 
     fn reclaim(&self) {

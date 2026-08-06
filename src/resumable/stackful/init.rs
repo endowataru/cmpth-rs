@@ -72,6 +72,7 @@ use std::sync::atomic::Ordering;
 use crate::traits::common::TlsSlot;
 use crate::traits::stackful::{JoinHandleLike, ThreadSystem};
 use crate::traits::system::stackful::{StackfulBuilder, StackfulInitSystem};
+use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::desc::{HasScheduler, RunningTaskToken, SuspendedTaskToken, TaskDescAlloc};
 use crate::resumable::common::external_queue::ExternalQueue;
 use crate::resumable::common::pool::{DescPool, DynamicPool};
@@ -155,8 +156,10 @@ where
     S::worker_tls().warm_up();
 
     let workers: Box<[UltWorker<S>]> = (0..num_workers).map(UltWorker::new).collect();
+    let stealers = workers.iter().map(|w| w.deque.stealer()).collect();
     let shared = Arc::new(Scheduler {
         workers,
+        stealers,
         finished: std::sync::atomic::AtomicBool::new(false),
         external_queue: S::ExternalQueue::default(),
         task_pool: S::Pool::new_pool(num_workers, S::STACK_SIZE),
@@ -226,7 +229,7 @@ where
         // as an ordinary, stealable task, same as C++
         // `on_fork_child_first`'s `wk.local_push_top(parent_cont)` — this
         // is the moment `init`'s caller becomes a schedulable ULT.
-        wk.push_local_top(prev);
+        wk.push(prev);
 
         // Ordinary dispatch loop, same one every worker OS thread runs,
         // until `StackfulInit::drop` sets `finished`.

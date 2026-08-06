@@ -65,9 +65,9 @@ pub trait WakerTaskDesc: TaskDesc {
 /// Stackless (poll-based) flavor of parking.
 ///
 /// `enter`/`swap` are deliberately not part of this trait yet: a correct
-/// stackless implementation needs the caller to defer itself to the
-/// FIFO/steal end of the local deque (`push_local_bottom`) so the target it
-/// hands off to isn't overtaken by the caller's own re-queued continuation,
+/// stackless implementation needs the caller to defer itself (`defer`) so
+/// the target it hands off to isn't overtaken by the caller's own re-queued
+/// continuation,
 /// and [`StacklessTaskSystem::yield_now`](crate::traits::system::stackless::StacklessTaskSystem::yield_now)'s self-wake path doesn't do that
 /// today (see its doc comment). Adding them before that's fixed would
 /// silently invert the intended priority.

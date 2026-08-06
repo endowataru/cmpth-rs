@@ -728,7 +728,7 @@ impl cmpth::SchedulerSystem for ManualSystem {
     type Desc  = DualTaskDesc<Self>;
     type Item  = cmpth::SuspendedTaskToken<DualTaskDesc<Self>>;
     type Worker = UltWorker<Self>;
-    type Deque = CrossbeamDeque<cmpth::SuspendedTaskToken<DualTaskDesc<Self>>>;
+    type RunQueue = HybridRunQueue<cmpth::SuspendedTaskToken<DualTaskDesc<Self>>>;
     type ExternalQueue   = StealPathQueue<DualTaskDesc<Self>>;
     type Pool            = ReturnPool<DualTaskDesc<Self>, HeapStack>;
     // Unused: ManualSystem never calls spawn_async.

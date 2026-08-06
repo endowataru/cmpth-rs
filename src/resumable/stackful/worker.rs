@@ -10,7 +10,7 @@ use std::mem::ManuallyDrop;
 use std::ptr;
 
 use crate::traits::stackful::{CondTransfer, Context, ContextPolicy, Transfer};
-use crate::resumable::common::deque::WorkerDeque;
+use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, WorkerOps};
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
@@ -119,7 +119,7 @@ where
             if c.is_root() {
                 wk.set_root_cont(c);
             } else {
-                wk.push_local_top(c);
+                wk.push(c);
             }
         }
         wk
@@ -134,9 +134,9 @@ where
         self.exit_to_cont(next, f)
     }
 
-    /// Cooperative yield: requeue at the FIFO end so other tasks run first.
+    /// Cooperative yield: defer so other tasks already queued run first.
     fn yield_now(&self) -> &Self {
-        self.suspend_to_sched(|wk, prev| wk.push_local_bottom(prev))
+        self.suspend_to_sched(|wk, prev| wk.defer(prev))
     }
 }
 
@@ -172,7 +172,7 @@ where
     S: StackfulSchedulerSystem,
     S::Desc: StackfulTaskDesc,
 {
-    if let Some(c) = wk.deque.try_pop_top() {
+    if let Some(c) = wk.deque.try_pop() {
         return c;
     }
     wk.take_root_cont()

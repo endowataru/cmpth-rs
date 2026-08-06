@@ -176,7 +176,7 @@ where
     <S::Desc as crate::resumable::common::desc::TaskDescCore>::Owned: HasScheduler<System = S>,
 {
     match UltWorker::<S>::current() {
-        Some(wk) => wk.push_local_top(token),
+        Some(wk) => wk.push(token),
         None => {
             let scheduler = token.scheduler();
             assert!(

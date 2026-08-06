@@ -107,17 +107,17 @@ fn try_reclaim_and_run<S>(wk: &UltWorker<S>, desc: *mut S::Desc)
 where
     S: StacklessSchedulerSystem,
 {
-    match wk.pop_local() {
+    match wk.try_pop() {
         Some(popped) if std::ptr::eq(popped.desc(), desc) => {
             if popped.is_poll_fn_dispatch() {
                 let poll_fn = popped.poll_fn()
                     .expect("cmpth: descriptor committed to poll_fn dispatch but poll_fn unset");
                 crate::resumable::stackless::worker::run_async_poll(wk, desc, poll_fn);
             } else {
-                wk.push_local_top(popped);
+                wk.push(popped);
             }
         }
-        Some(other) => wk.push_local_top(other),
+        Some(other) => wk.push(other),
         None => {}
     }
 }
@@ -240,8 +240,8 @@ where
     unsafe { f_ptr.write(mk()) };
     token.set_poll_fn(Some(poll_spawned_task::<S, T, F>));
 
-    // Push to the deque as a ready-to-poll task.
-    wk.push_local_top(token);
+    // Push to the run queue as a ready-to-poll task.
+    wk.push(token);
 
     JoinHandle { desc, result_ptr, result_drop: drop_stack_result::<T>, _marker: PhantomData }
 }
@@ -300,12 +300,12 @@ where
         if cont.is_poll_fn_dispatch() {
             self.continue_with.set(Some(cont));
         } else {
-            // A real ULT continuation — push it back to the deque like any
-            // other requeued task. Always called from within a worker
+            // A real ULT continuation — push it back to the run queue like
+            // any other requeued task. Always called from within a worker
             // (execute → run_async_poll → poll_fn).
             let wk = UltWorker::<S>::current()
                 .expect("cmpth: poll_spawned_task called outside a worker");
-            wk.push_local_top(cont);
+            wk.push(cont);
         }
     }
 

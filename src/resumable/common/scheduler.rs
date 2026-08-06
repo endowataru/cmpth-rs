@@ -8,6 +8,7 @@ use std::sync::atomic::Ordering;
 
 use crate::traits::common::TlsSlot;
 use crate::traits::stackful::ThreadSystem;
+use crate::resumable::common::deque::{Steal, WorkerRunQueue};
 use crate::resumable::common::external_queue::ExternalQueue;
 use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
 use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
@@ -19,6 +20,17 @@ use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
 /// point) needs the stackful extension.
 pub struct Scheduler<S: SchedulerSystem> {
     pub(crate) workers: Box<[UltWorker<S>]>,
+    /// Cloneable stealer handles, one per worker, indexed the same as
+    /// `workers`. A thief reaches a victim's run queue exclusively through
+    /// this table now, never through `workers[victim]` itself — `UltWorker`
+    /// is full of `Cell` fields whose `unsafe impl Sync` justification is
+    /// "only the owning base thread touches these", so keeping thieves off
+    /// it entirely (rather than merely disciplined about which field they
+    /// touch) turns that justification from a convention into something
+    /// structural. Populated once, at construction, by mapping over
+    /// `workers` (see the two `init`/`run_async` call sites) — never
+    /// mutated afterward.
+    pub(crate) stealers: Box<[<S::RunQueue as WorkerRunQueue<S::Item>>::Stealer]>,
     pub(crate) finished: std::sync::atomic::AtomicBool,
     pub(crate) external_queue: S::ExternalQueue,
     pub(crate) task_pool: S::Pool,
@@ -82,18 +94,35 @@ where
     let shared = wk.shared();
     let mut idle_rounds = 0u32;
     while !shared.finished.load(Ordering::Acquire) {
-        if let Some(c) = wk.pop_local()
-            .or_else(|| wk.try_steal())
-            .or_else(|| shared.external_queue.try_pop())
-        {
+        if let Some(c) = wk.try_pop() {
+            wk.execute(c);
+            idle_rounds = 0;
+            continue;
+        }
+        // `try_steal` distinguishes "every victim was genuinely empty"
+        // (`Steal::Empty`) from "some victim had work but it couldn't be
+        // taken right now" (`Steal::Retry`, e.g. lost a CAS race) — see
+        // `Steal`'s own doc comment. A `Retry` round must not count toward
+        // `idle_rounds` below: there is known work nearby, so backing off
+        // to `S::Base::yield_now()` on its account would be a real
+        // regression, not just noise.
+        let steal = wk.try_steal();
+        if let Steal::Success(c) = steal {
+            wk.execute(c);
+            idle_rounds = 0;
+            continue;
+        }
+        if let Some(c) = shared.external_queue.try_pop() {
             wk.execute(c);
             idle_rounds = 0;
             continue;
         }
         std::hint::spin_loop();
-        idle_rounds += 1;
-        if idle_rounds & 0x3F == 0 {
-            S::Base::yield_now();
+        if matches!(steal, Steal::Empty) {
+            idle_rounds += 1;
+            if idle_rounds & 0x3F == 0 {
+                S::Base::yield_now();
+            }
         }
     }
 }

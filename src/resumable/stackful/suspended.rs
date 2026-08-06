@@ -62,7 +62,7 @@ impl<T: StackfulOnlyResumableCore> Resumable<T::StackfulSchedulerSystem> for T {
 
     fn notify(&self) {
         let c = self.take_cont();
-        Self::wk().push_local_top(c);
+        Self::wk().push(c);
     }
 }
 
@@ -97,7 +97,7 @@ impl<T: StackfulOnlyResumableCore> StackfulResumable<T::StackfulSchedulerSystem>
     fn enter(&self) {
         let wk = Self::wk();
         let c = self.take_cont();
-        wk.suspend_to_cont(c, |wk, prev| wk.push_local_top(prev));
+        wk.suspend_to_cont(c, |wk, prev| wk.push(prev));
     }
 
     fn swap(&self, next: &Self) {

@@ -60,11 +60,10 @@ pub trait StacklessTaskSystem: ScopedStacklessTaskSystem {
     /// then `Ready` on the next — a single suspend/resume round-trip.
     ///
     /// **Not a fair yield**: the self-wake goes through the same generic
-    /// waker path any other wakeup does, which re-queues this task at the
-    /// *LIFO* end of its worker's local deque (`push_local_top`) — the
-    /// same end `pop_local` pops from next — not the FIFO end
-    /// (`push_local_bottom`) that would actually let already-queued
-    /// sibling tasks run first. A correct fair yield needs to reach the
+    /// waker path any other wakeup does, which re-queues this task via
+    /// `push` — the same source `try_pop` pops from next — not `defer`,
+    /// which would actually let already-queued sibling tasks run first. A
+    /// correct fair yield needs to reach the
     /// scheduler directly (bypassing the waker) to request the FIFO end
     /// specifically; nothing here does that yet. Useful today for "come
     /// back to me after one poll round-trip" (e.g. a busy-poll retry

@@ -22,7 +22,7 @@ use crate::traits::stackful::{
     BlockOnSystem, ContextPolicy, DelegationSystem, NestableSystem, StackfulSyncSystem,
     SuspendableSystem, ThreadSystem,
 };
-use crate::resumable::common::deque::WorkerDeque;
+use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
 use crate::resumable::common::desc::{HasScheduler, SuspendedTaskToken, TaskDescCore};
@@ -182,7 +182,7 @@ impl<
 ///     type Base = cmpth::OsSystem;
 ///     type Ctx = cmpth::NativeContext;
 ///     type Desc = cmpth::StackfulOnlyTaskDesc<Self>;
-///     type Deque = cmpth::CrossbeamDeque<cmpth::SuspendedTaskToken<cmpth::StackfulOnlyTaskDesc<Self>>>;
+///     type RunQueue = cmpth::HybridRunQueue<cmpth::SuspendedTaskToken<cmpth::StackfulOnlyTaskDesc<Self>>>;
 ///     type Alloc = cmpth::HeapStack;
 ///     type Lookup = cmpth::TlsCurrent;
 ///
@@ -224,8 +224,8 @@ pub trait UltIdentity: Sized + Send + Sync + 'static {
     where
         Self: SchedulerSystem;
 
-    /// Work-stealing deque implementation.
-    type Deque: WorkerDeque<SuspendedTaskToken<Self::Desc>>;
+    /// Work-stealing run queue implementation.
+    type RunQueue: WorkerRunQueue<SuspendedTaskToken<Self::Desc>> + Default;
 
     /// Stack allocation policy.
     type Alloc: StackAlloc;
@@ -249,7 +249,7 @@ impl<M: UltIdentity> SchedulerSystem for M {
     type Desc  = M::Desc;
     type Item  = SuspendedTaskToken<M::Desc>;
     type Worker = UltWorker<Self>;
-    type Deque = M::Deque;
+    type RunQueue = M::RunQueue;
     type ExternalQueue = crate::resumable::common::external_queue::StealPathQueue<M::Desc>;
     type Pool          = crate::resumable::common::pool::ReturnPool<M::Desc, M::Alloc>;
     // Never actually allocated through: nothing calls spawn_async on a

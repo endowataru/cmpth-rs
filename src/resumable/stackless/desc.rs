@@ -206,7 +206,7 @@ pub trait HasPollFn<D> {
 /// doc comment for why the nesting position matters): every call site in
 /// this crate that receives a `WakerTaskDesc`/`TaskDesc::Suspended` token
 /// generic only over `S::Desc: AsyncTaskDesc` immediately hands it to this
-/// crate's own `SuspendedTaskToken`-typed plumbing (`push_local_top`/
+/// crate's own `SuspendedTaskToken`-typed plumbing (`push`/
 /// `push_continuation`/`is_poll_fn_dispatch`/`into_raw`), so the equality
 /// needs to be visible there, not just to this trait's own default-less
 /// methods.
