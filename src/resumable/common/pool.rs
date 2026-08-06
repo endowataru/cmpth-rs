@@ -547,7 +547,7 @@ impl<D: TaskDescAlloc, A: StackAlloc, const THRESHOLD: usize> Drop for ReturnPoo
 /// generalized to raw, type-erased bytes for callers with no concrete `D`
 /// known at compile time — see [`DynamicPool`]'s doc comment for why
 /// `recurse` specifically needs that erasure.
-pub trait StaticPool: Sync + 'static {
+pub(crate) trait StaticPool: Sync + 'static {
     /// Create a pool for `num_workers` workers, each allocation sized
     /// (and aligned) per `layout`.
     fn new(num_workers: usize, layout: Layout) -> Self;
@@ -564,7 +564,7 @@ pub trait StaticPool: Sync + 'static {
 }
 
 /// A pool where allocation size varies per call, served from a
-/// [`StaticPool`]-backed free list sized at construction (the `threshold`)
+/// `StaticPool`-backed free list sized at construction (the `threshold`)
 /// with a one-off allocation fallback for anything bigger — the same
 /// oversized-request handling [`ReturnPool`]/[`DescPool::alloc`] already
 /// have for `AsyncPool`, pulled out one layer so [`recurse`](crate::resumable::stackless::thread::recurse)
@@ -612,7 +612,7 @@ impl PoolNode for BlockHeader {
     fn alloc_wk(&self) -> &Cell<usize> { &self.alloc_wk }
 }
 
-/// [`StaticPool`] backed by the same `node_take`/`node_give` free-list
+/// `StaticPool` backed by the same `node_take`/`node_give` free-list
 /// core [`ReturnPool`] uses, instantiated with `BlockHeader` instead of a
 /// `Node<D>`. Each returned block is `header_layout.extend(payload_layout)`
 /// bytes; the header stays hidden before the pointer callers see.
@@ -698,10 +698,19 @@ impl<const THRESHOLD: usize> Drop for BlockPool<THRESHOLD> {
 // ThresholdPool — the DynamicPool implementation
 // ---------------------------------------------------------------------------
 
-/// [`DynamicPool`] adapter: wraps any [`StaticPool`], serving requests that
+/// [`DynamicPool`] adapter: wraps any `StaticPool`, serving requests that
 /// fit `threshold` from it and falling back to a one-off allocation for
 /// anything bigger — the same split [`ReturnPool::alloc`] already makes
 /// for oversized `spawn_async` futures, generalized to any `P`.
+/// `StaticPool` is `pub(crate)` while this struct must stay `pub` — it is the
+/// concrete value of the public `SchedulerSystem::RecursionPool` associated
+/// type in several impls, so making it crate-private is an `E0446` error.
+/// The leak is nominal only: `P` is always `BlockPool` internally, and
+/// nothing outside this crate has any reason to implement `StaticPool` or to
+/// name a different `P`. Narrowing `StaticPool` is worth more (it keeps a
+/// raw `*mut u8` allocator interface out of the public surface) than keeping
+/// a bound that no external caller can act on.
+#[allow(private_bounds)]
 pub struct ThresholdPool<P: StaticPool> {
     threshold: Layout,
     inner: P,

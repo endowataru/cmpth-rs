@@ -133,7 +133,7 @@ pub trait SchedulerSystem: Sized + Send + Sync + 'static {
 /// A [`SchedulerSystem`] whose scheduling unit is this crate's own task
 /// descriptor token and whose worker is this crate's own [`UltWorker`] —
 /// i.e. every system built on the `resumable` engine (as opposed to a
-/// future `scoped`-style system, which will put a stack-resident job
+/// future `scoped`-style system, which will put a stack-resident task
 /// reference in `Item` instead).
 ///
 /// Exists so the engine's internals can state that assumption **once**

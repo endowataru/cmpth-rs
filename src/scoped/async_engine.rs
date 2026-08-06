@@ -1,7 +1,7 @@
 //! Poll-based counterpart to [`sync_engine`](super::sync_engine) backing
 //! [`ScopedStacklessTaskSystem`](crate::traits::ScopedStacklessTaskSystem): same
-//! worker-pool/steal shape (reusing [`super::job::JobRef`]'s stack-resident,
-//! type-erased job representation), but bodies are [`Future`]s driven via
+//! worker-pool/steal shape (reusing [`super::task::TaskRef`]'s stack-resident,
+//! type-erased task representation), but bodies are [`Future`]s driven via
 //! polling instead of plain closures called once.
 //!
 //! The future returned by [`parallel_call`] never blocks the OS thread
@@ -12,10 +12,10 @@
 //! inline (nobody else could be touching it — same "not stolen, no
 //! steal-side traffic" fast path [`sync_engine`](super::sync_engine) has);
 //! if it was genuinely stolen we register a [`Waker`] on its
-//! [`AsyncJob::latch`] and return `Pending` instead of busy-waiting.
+//! [`AsyncTask::latch`] and return `Pending` instead of busy-waiting.
 //!
-//! `b`'s storage is an `Arc<AsyncJob<Rb>>`, not a borrowed stack frame like
-//! [`super::job::StackJob`]: the future returned by [`parallel_call`] can
+//! `b`'s storage is an `Arc<AsyncTask<Rb>>`, not a borrowed stack frame like
+//! [`super::task::StackTask`]: the future returned by [`parallel_call`] can
 //! be dropped (cancelled) at any poll boundary, including while `b` is
 //! still being driven by a thief on another worker thread, so its storage
 //! must be able to outlive the caller's own frame — see
@@ -24,11 +24,11 @@
 //! heap allocation per call. A thief that actually steals a branch commits
 //! its own dedicated worker OS thread to driving it to completion via
 //! [`drive`] — a small busy loop that re-polls on wake and helps execute
-//! other stealable async jobs while idle, mirroring
+//! other stealable async tasks while idle, mirroring
 //! [`sync_engine`](super::sync_engine)'s "help while waiting" loop. That's
 //! the one place this engine still blocks an OS thread synchronously —
 //! deliberately: a dedicated pool worker has nothing better to do while a
-//! job it grabbed isn't ready, same as the sync engine.
+//! task it grabbed isn't ready, same as the sync engine.
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker as Deque};
 use std::cell::Cell;
@@ -38,10 +38,10 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 
-use super::job::JobRef;
+use super::task::TaskRef;
 
 // ---------------------------------------------------------------------------
-// AsyncLatch — like `job::Latch`, but can hold a registered Waker: a stolen
+// AsyncLatch — like `task::Latch`, but can hold a registered Waker: a stolen
 // branch may still be running when the pusher wants to wait on it (unlike
 // the sync engine, which only ever busy-polls a bool), so late registration
 // must be race-free against a concurrent `set()`. Same CAS discipline as
@@ -70,7 +70,7 @@ impl AsyncLatch {
         }
     }
 
-    /// Try to install `waker` (pusher side). Returns `false` if the job was
+    /// Try to install `waker` (pusher side). Returns `false` if the task was
     /// already finished by the time this ran — caller should take the
     /// result immediately instead of waiting.
     fn register(&self, waker: &Waker) -> bool {
@@ -99,11 +99,11 @@ unsafe impl Send for AsyncLatch {}
 unsafe impl Sync for AsyncLatch {}
 
 // ---------------------------------------------------------------------------
-// AsyncJob — `b`'s storage. `Arc`-owned (see module docs) rather than
+// AsyncTask — `b`'s storage. `Arc`-owned (see module docs) rather than
 // stack-resident: whichever of {pusher gets it back unstolen, thief steals
 // it} runs first takes `body` out under the mutex: `Taken` on the loser's
 // side is unreachable, not a possible outcome, since the deque only ever
-// hands the job to one of them.
+// hands the task to one of them.
 // ---------------------------------------------------------------------------
 
 enum Body<Fut> {
@@ -111,19 +111,19 @@ enum Body<Fut> {
     Taken,
 }
 
-struct AsyncJob<Fut: Future> {
+struct AsyncTask<Fut: Future> {
     body: Mutex<Body<Fut>>,
     result: Mutex<Option<Fut::Output>>,
     latch: AsyncLatch,
 }
 
-impl<Fut> AsyncJob<Fut>
+impl<Fut> AsyncTask<Fut>
 where
     Fut: Future + Send + 'static,
     Fut::Output: Send + 'static,
 {
     fn new(fut: Fut) -> Self {
-        AsyncJob {
+        AsyncTask {
             body: Mutex::new(Body::Pending(Box::pin(fut))),
             result: Mutex::new(None),
             latch: AsyncLatch::new(),
@@ -134,13 +134,13 @@ where
         let mut guard = self.body.lock().unwrap();
         match std::mem::replace(&mut *guard, Body::Taken) {
             Body::Pending(fut) => fut,
-            Body::Taken => unreachable!("cmpth: AsyncJob driven twice"),
+            Body::Taken => unreachable!("cmpth: AsyncTask driven twice"),
         }
     }
 
     /// Drive to completion (blocking busy+help loop), store the result,
     /// then publish + wake. Used both by a thief (via the type-erased
-    /// [`JobRef`] trampoline) and by the pusher's own inline fast path when
+    /// [`TaskRef`] trampoline) and by the pusher's own inline fast path when
     /// it gets `b` back unstolen.
     fn drive_to_completion(&self) {
         let mut fut = self.take_body();
@@ -150,32 +150,32 @@ where
     }
 
     fn take_result(&self) -> Fut::Output {
-        self.result.lock().unwrap().take().expect("cmpth: AsyncJob latch set without a result")
+        self.result.lock().unwrap().take().expect("cmpth: AsyncTask latch set without a result")
     }
 
     unsafe fn execute_trampoline(data: *const ()) {
-        let job = unsafe { Arc::from_raw(data as *const Self) };
-        job.drive_to_completion();
+        let task = unsafe { Arc::from_raw(data as *const Self) };
+        task.drive_to_completion();
     }
 
     /// A plain associated fn, not a `self: &Arc<Self>` method — that
     /// receiver form isn't a blessed arbitrary self type on stable Rust
     /// (only `Arc<Self>` by value is), so the `Arc` is just an ordinary
     /// parameter here.
-    fn as_job_ref(job: &Arc<Self>) -> JobRef {
+    fn as_task_ref(task: &Arc<Self>) -> TaskRef {
         // Leaks one strong ref into the raw pointer; reclaimed either here
         // (unstolen: `Arc::from_raw` below, no trampoline call) or by
         // `execute_trampoline` (stolen: reconstructed there instead).
-        let data = Arc::into_raw(Arc::clone(job)) as *const ();
-        // Safety: `JobRef` is only ever constructed for jobs whose type
+        let data = Arc::into_raw(Arc::clone(task)) as *const ();
+        // Safety: `TaskRef` is only ever constructed for tasks whose type
         // `Fut` matches `execute_trampoline`'s own monomorphization here.
-        unsafe { JobRef::from_raw_parts(data, Self::execute_trampoline) }
+        unsafe { TaskRef::from_raw_parts(data, Self::execute_trampoline) }
     }
 }
 
 // ---------------------------------------------------------------------------
 // drive — poll-on-wake, help-while-idle busy loop. The one place this
-// engine blocks an OS thread: driving a future (the pool's root, or a job a
+// engine blocks an OS thread: driving a future (the pool's root, or a task a
 // thief just grabbed) to completion without a dedicated stack for it to
 // suspend onto.
 // ---------------------------------------------------------------------------
@@ -215,14 +215,14 @@ fn drive<Fut: Future + ?Sized>(mut fut: Pin<&mut Fut>) -> Fut::Output {
 // ---------------------------------------------------------------------------
 
 struct Registry {
-    stealers: Vec<Stealer<JobRef>>,
-    injector: Injector<JobRef>,
+    stealers: Vec<Stealer<TaskRef>>,
+    injector: Injector<TaskRef>,
     shutdown: AtomicBool,
 }
 
 struct WorkerContext {
     index: usize,
-    deque: Deque<JobRef>,
+    deque: Deque<TaskRef>,
     registry: Arc<Registry>,
 }
 
@@ -253,8 +253,8 @@ pub(crate) fn current_num_workers() -> Option<usize> {
 }
 
 fn try_execute_one(wk: &WorkerContext) -> bool {
-    if let Some(job) = wk.deque.pop() {
-        unsafe { job.execute() };
+    if let Some(task) = wk.deque.pop() {
+        unsafe { task.execute() };
         return true;
     }
     let n = wk.registry.stealers.len();
@@ -262,8 +262,8 @@ fn try_execute_one(wk: &WorkerContext) -> bool {
         let i = (wk.index + off) % n;
         loop {
             match wk.registry.stealers[i].steal() {
-                Steal::Success(job) => {
-                    unsafe { job.execute() };
+                Steal::Success(task) => {
+                    unsafe { task.execute() };
                     return true;
                 }
                 Steal::Empty => break,
@@ -273,8 +273,8 @@ fn try_execute_one(wk: &WorkerContext) -> bool {
     }
     loop {
         match wk.registry.injector.steal() {
-            Steal::Success(job) => {
-                unsafe { job.execute() };
+            Steal::Success(task) => {
+                unsafe { task.execute() };
                 return true;
             }
             Steal::Empty => return false,
@@ -297,10 +297,10 @@ enum State<Fa: Future> {
 /// machine this drives.
 pub(crate) struct ParallelInvoke<Fa: Future, Fb: Future> {
     state: State<Fa>,
-    job: Arc<AsyncJob<Fb>>,
-    /// `job`'s `JobRef::data`, as a plain integer once pushed — lets
-    /// `poll` tell "got our own job back unstolen" apart from "someone
-    /// else's job came back" the same way `sync_engine::parallel_call`
+    task: Arc<AsyncTask<Fb>>,
+    /// `task`'s `TaskRef::data`, as a plain integer once pushed — lets
+    /// `poll` tell "got our own task back unstolen" apart from "someone
+    /// else's task came back" the same way `sync_engine::parallel_call`
     /// does, without a raw pointer field (which would otherwise make this
     /// struct not automatically `Send`).
     pushed: Option<usize>,
@@ -316,7 +316,7 @@ where
     type Output = (Fa::Output, Fb::Output);
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        // Safety: `state`/`job`/`pushed` are all moved wholesale, never
+        // Safety: `state`/`task`/`pushed` are all moved wholesale, never
         // individually pinned to a self-referential address; only the
         // boxed future inside `State::RunningA` needs pin-projecting, and
         // it's already behind its own independent `Pin<Box<_>>`.
@@ -324,9 +324,9 @@ where
 
         if this.pushed.is_none() {
             let wk = current_context();
-            let job_ref = AsyncJob::as_job_ref(&this.job);
-            this.pushed = Some(job_ref.data as usize);
-            wk.deque.push(job_ref);
+            let task_ref = AsyncTask::as_task_ref(&this.task);
+            this.pushed = Some(task_ref.data as usize);
+            wk.deque.push(task_ref);
         }
 
         if let State::RunningA(a) = &mut this.state {
@@ -341,19 +341,19 @@ where
         }
 
         let wk = current_context();
-        let pushed = this.pushed.expect("cmpth: job_b not pushed before WaitingB");
+        let pushed = this.pushed.expect("cmpth: task_b not pushed before WaitingB");
         match wk.deque.pop() {
             Some(popped) if popped.data as usize == pushed => {
                 // Not stolen: reclaim the leaked ref (we still hold our own
-                // `this.job` handle) and drive it inline.
-                drop(unsafe { Arc::from_raw(popped.data as *const AsyncJob<Fb>) });
-                this.job.drive_to_completion();
+                // `this.task` handle) and drive it inline.
+                drop(unsafe { Arc::from_raw(popped.data as *const AsyncTask<Fb>) });
+                this.task.drive_to_completion();
             }
             popped => {
                 if let Some(other) = popped {
                     wk.deque.push(other);
                 }
-                if this.job.latch.register(cx.waker()) {
+                if this.task.latch.register(cx.waker()) {
                     return Poll::Pending;
                 }
                 // Else: already finished by the time we tried to register
@@ -361,7 +361,7 @@ where
             }
         }
 
-        let rb = this.job.take_result();
+        let rb = this.task.take_result();
         let State::WaitingB(ra) = std::mem::replace(&mut this.state, State::Done) else {
             unreachable!("cmpth: state was checked to be WaitingB above")
         };
@@ -382,8 +382,8 @@ where
     Fa::Output: Send + 'static,
     Fb::Output: Send + 'static,
 {
-    let job = Arc::new(AsyncJob::new(mk_b()));
-    ParallelInvoke { state: State::RunningA(Box::pin(mk_a())), job, pushed: None }
+    let task = Arc::new(AsyncTask::new(mk_b()));
+    ParallelInvoke { state: State::RunningA(Box::pin(mk_a())), task, pushed: None }
 }
 
 // ---------------------------------------------------------------------------
@@ -404,8 +404,8 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     assert!(num_workers >= 1, "need at least one worker");
-    let deques: Vec<Deque<JobRef>> = (0..num_workers).map(|_| Deque::new_lifo()).collect();
-    let stealers: Vec<Stealer<JobRef>> = deques.iter().map(|d| d.stealer()).collect();
+    let deques: Vec<Deque<TaskRef>> = (0..num_workers).map(|_| Deque::new_lifo()).collect();
+    let stealers: Vec<Stealer<TaskRef>> = deques.iter().map(|d| d.stealer()).collect();
     let registry = Arc::new(Registry { stealers, injector: Injector::new(), shutdown: AtomicBool::new(false) });
 
     let mut deques = deques.into_iter();
