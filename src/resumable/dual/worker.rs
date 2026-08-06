@@ -6,7 +6,7 @@
 //! [`stackful::worker`](crate::resumable::stackful::worker) for the shared
 //! machinery this builds on.
 
-use crate::resumable::common::deque::WorkerDeque;
+use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulLocalQueue};
@@ -43,12 +43,12 @@ where
     S: StackfulSchedulerSystem,
     S::Desc: StackfulTaskDesc + AsyncTaskDesc,
 {
-    if let Some(c) = wk.deque.try_pop_top() {
+    if let Some(c) = wk.deque.try_pop() {
         if c.is_poll_fn_dispatch() {
             // Async tasks have no saved context; they can only be executed
             // by the scheduler loop via execute().  Push the async task back
-            // to the LIFO end and return root so the scheduler loop handles it.
-            wk.deque.push_top(c);
+            // so the scheduler loop handles it.
+            wk.deque.push(c);
         } else {
             return c;
         }

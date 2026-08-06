@@ -15,7 +15,7 @@
 use std::cell::Cell;
 use std::ptr;
 
-use crate::resumable::common::deque::WorkerDeque;
+use crate::resumable::common::deque::{RunQueueStealer, Steal, WorkerRunQueue};
 use crate::resumable::common::pool::DescPool;
 use crate::resumable::common::scheduler::Scheduler;
 use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
@@ -45,19 +45,24 @@ pub trait TaskPool<S: SchedulerSystem> {
 // LocalQueue (base)
 // ---------------------------------------------------------------------------
 
-/// Per-worker work-stealing deque, independent of task flavor.
+/// Per-worker work-stealing run queue, independent of task flavor.
 pub trait LocalQueue<S: SchedulerSystem> {
-    /// Push `c` to the **LIFO** end (will run before anything already queued).
-    fn push_local_top(&self, c: SuspendedTaskToken<S::Desc>);
+    /// Run `c` next on this worker (will run before anything already
+    /// queued).
+    fn push(&self, c: SuspendedTaskToken<S::Desc>);
 
-    /// Push `c` to the **FIFO** end (yield: let other tasks run first).
-    fn push_local_bottom(&self, c: SuspendedTaskToken<S::Desc>);
+    /// Run `c` after work already queued here (yield: let other tasks run
+    /// first).
+    fn defer(&self, c: SuspendedTaskToken<S::Desc>);
 
-    /// Pop from the LIFO end of this worker's local deque.
-    fn pop_local(&self) -> Option<SuspendedTaskToken<S::Desc>>;
+    /// Take what this worker should run next.
+    fn try_pop(&self) -> Option<SuspendedTaskToken<S::Desc>>;
 
-    /// Try to steal one task from another worker's FIFO end.
-    fn try_steal(&self) -> Option<SuspendedTaskToken<S::Desc>>;
+    /// Try to steal one task from another worker. `Steal::Retry` means some
+    /// victim had work but it could not be taken right now — distinct from
+    /// `Steal::Empty` (every victim scanned was genuinely empty) so callers
+    /// don't mistake contention for idleness.
+    fn try_steal(&self) -> Steal<SuspendedTaskToken<S::Desc>>;
 
     /// This worker's index within its scheduler.
     fn num(&self) -> usize;
@@ -92,7 +97,7 @@ pub trait WorkerOps<S: SchedulerSystem>: TaskPool<S> + LocalQueue<S> + Send + Sy
 
 pub struct UltWorker<S: SchedulerSystem> {
     num: usize,
-    pub(crate) deque: S::Deque,
+    pub(crate) deque: S::RunQueue,
     /// The task currently running on this worker, if any. `None` means
     /// nothing is running (mirrors the old `Cell<*mut S::Desc>`'s null
     /// convention). Deliberately `Option<RunningTaskToken<S::Desc>>`, not a bare
@@ -137,7 +142,7 @@ impl<S: SchedulerSystem> UltWorker<S> {
     pub(crate) fn new(num: usize) -> Self {
         UltWorker {
             num,
-            deque: S::Deque::default(),
+            deque: S::RunQueue::default(),
             cur_task_cell: Cell::new(None),
             root_desc: S::Desc::new_root(),
             root_cont: Cell::new(None),
@@ -278,8 +283,8 @@ impl<S: SchedulerSystem> TaskPool<S> for UltWorker<S> {
 
 // --- LocalQueue ---
 
-// `S::Deque: WorkerDeque<S::Item>` alone doesn't let this impl call
-// `self.deque.push_top(c)` with `c: SuspendedTaskToken<S::Desc>` -- `Item`
+// `S::RunQueue: WorkerRunQueue<S::Item>` alone doesn't let this impl call
+// `self.deque.push(c)` with `c: SuspendedTaskToken<S::Desc>` -- `Item`
 // is a genuinely independent associated type (see `SchedulerSystem::Item`'s
 // doc comment for why), so the equality has to be spelled out here (via
 // `DescScheduler`). True for every concrete system today. Making this impl
@@ -290,36 +295,43 @@ impl<S: SchedulerSystem> TaskPool<S> for UltWorker<S> {
 // bounded by `StackfulSchedulerSystem`/`StacklessSchedulerSystem` gets it
 // for free).
 impl<S: DescScheduler> LocalQueue<S> for UltWorker<S> {
-    fn push_local_top(&self, c: SuspendedTaskToken<S::Desc>) {
-        self.deque.push_top(c);
+    fn push(&self, c: SuspendedTaskToken<S::Desc>) {
+        self.deque.push(c);
     }
 
-    fn push_local_bottom(&self, c: SuspendedTaskToken<S::Desc>) {
-        self.deque.push_bottom(c);
+    fn defer(&self, c: SuspendedTaskToken<S::Desc>) {
+        self.deque.defer(c);
     }
 
-    fn pop_local(&self) -> Option<SuspendedTaskToken<S::Desc>> {
-        self.deque.try_pop_top()
+    fn try_pop(&self) -> Option<SuspendedTaskToken<S::Desc>> {
+        self.deque.try_pop()
     }
 
-    fn try_steal(&self) -> Option<SuspendedTaskToken<S::Desc>> {
+    fn try_steal(&self) -> Steal<SuspendedTaskToken<S::Desc>> {
         let shared = self.shared();
         let n = shared.workers.len();
         if n <= 1 {
-            return None;
+            return Steal::Empty;
         }
         let seed = self.steal_seed.get();
         self.steal_seed.set(seed.wrapping_add(1));
+        let mut saw_retry = false;
         for i in 0..n {
             let victim = (seed + i) % n;
             if victim == self.num {
                 continue;
             }
-            if let Some(c) = shared.workers[victim].deque.try_steal_bottom() {
-                return Some(c);
+            // Reached exclusively through `shared.stealers[victim]` -- a
+            // plain, already-built stealer handle -- never through
+            // `shared.workers[victim]` itself. See `Scheduler::stealers`'s
+            // doc comment for why that's more than a style preference.
+            match shared.stealers[victim].try_steal() {
+                Steal::Success(c) => return Steal::Success(c),
+                Steal::Retry => saw_retry = true,
+                Steal::Empty => {}
             }
         }
-        None
+        if saw_retry { Steal::Retry } else { Steal::Empty }
     }
 
     fn num(&self) -> usize {

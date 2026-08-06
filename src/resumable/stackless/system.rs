@@ -12,7 +12,7 @@ use std::future::Future;
 use std::marker::PhantomData;
 
 use crate::traits::stackful::{NestableSystem, ThreadSystem};
-use crate::resumable::common::deque::WorkerDeque;
+use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
 use crate::resumable::common::worker::UltWorker;
@@ -193,7 +193,7 @@ where
 /// impl cmpth::UltAsyncIdentity for MyAsyncMarker {
 ///     type Base = cmpth::OsSystem;
 ///     type Desc = cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>;
-///     type Deque = cmpth::CrossbeamDeque<cmpth::SuspendedTaskToken<cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>>>;
+///     type RunQueue = cmpth::HybridRunQueue<cmpth::SuspendedTaskToken<cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>>>;
 ///     type Lookup = cmpth::InlineTlsCurrent;
 ///
 ///     fn worker_tls_anchor() -> &'static <cmpth::OsSystem as NestableSystem>::ThreadSpecific<cmpth::UltWorker<cmpth::UltAsyncSystem<Self>>> {
@@ -229,8 +229,8 @@ pub trait UltAsyncIdentity: Sized + Send + Sync + 'static {
     where
         UltAsyncSystem<Self>: SchedulerSystem;
 
-    /// Work-stealing deque implementation.
-    type Deque: WorkerDeque<crate::resumable::common::desc::SuspendedTaskToken<Self::Desc>>;
+    /// Work-stealing run queue implementation.
+    type RunQueue: WorkerRunQueue<crate::resumable::common::desc::SuspendedTaskToken<Self::Desc>> + Default;
 
     /// Fixed slot size for the `spawn_async` descriptor pool.
     const ASYNC_POOL_SIZE: usize = 512;
@@ -261,7 +261,7 @@ impl<M: UltAsyncIdentity> SchedulerSystem for UltAsyncSystem<M> {
     type Desc  = M::Desc;
     type Item  = crate::resumable::common::desc::SuspendedTaskToken<M::Desc>;
     type Worker = UltWorker<Self>;
-    type Deque = M::Deque;
+    type RunQueue = M::RunQueue;
     type ExternalQueue = crate::resumable::common::external_queue::StealPathQueue<M::Desc>;
     // Never actually allocated through: this flavor has no `spawn`, only
     // `spawn_async` (which goes through AsyncPool below). SimplePool is the

@@ -8,6 +8,7 @@ use std::sync::atomic::Ordering;
 
 use crate::traits::common::TlsSlot;
 use crate::traits::stackful::{JoinHandleLike, ThreadSystem};
+use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::external_queue::ExternalQueue;
 use crate::resumable::common::scheduler::{recursion_pool_threshold, worker_loop, Scheduler};
 use crate::resumable::common::pool::{DescPool, DynamicPool};
@@ -51,8 +52,10 @@ where
     S::worker_tls().warm_up();
 
     let workers: Box<[UltWorker<S>]> = (0..num_workers).map(UltWorker::new).collect();
+    let stealers = workers.iter().map(|w| w.deque.stealer()).collect();
     let shared = Arc::new(Scheduler {
         workers,
+        stealers,
         finished: std::sync::atomic::AtomicBool::new(false),
         external_queue: S::ExternalQueue::default(),
         // task_pool is never touched on a pure stackless-only system (no
@@ -76,7 +79,7 @@ where
         },
         scheduler_ptr,
     );
-    shared.workers[0].push_local_top(root_cont);
+    shared.workers[0].push(root_cont);
 
     let handles: Vec<_> = (1..num_workers)
         .map(|i| {

@@ -137,7 +137,7 @@ where
                     std::mem::take(&mut *inner.lock().unwrap());
                 if let Some(wk) = UltWorker::<S>::current() {
                     for cont in pending {
-                        wk.push_local_bottom(cont);
+                        wk.defer(cont);
                     }
                 }
                 match sched_weak.upgrade() {
@@ -154,6 +154,6 @@ where
         });
 
         let cont = fork_parent_first::<S>(body, scheduler_ptr);
-        scheduler.workers[0].push_local_top(cont);
+        scheduler.workers[0].push(cont);
     }
 }

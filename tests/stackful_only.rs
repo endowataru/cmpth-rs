@@ -226,3 +226,50 @@ fn run_propagates_a_panic_in_f_to_the_caller() {
         assert_eq!(JoinHandleLike::join(DefaultStackfulOnlyTaskSystem::spawn(|| 1 + 1)), 2);
     });
 }
+
+/// `yield_now()` must let work that is *already queued* on this worker run
+/// before the yielding task resumes.
+///
+/// Needs **two** queued items to be observable. `suspend_to_sched` pops the
+/// next continuation *before* its callback pushes the yielding task
+/// (`resumable/stackful/worker.rs`), so with a single queued item both a
+/// LIFO and a FIFO re-queue behave identically. The degradation only shows
+/// up once something else is still queued behind the item that was popped.
+///
+/// `spawn` is child-first: it switches into the child and the child
+/// publishes the *parent's* continuation. Two nested spawns therefore leave
+/// two continuations queued (`c1` on top of `main`) while `c2` runs:
+///
+/// - fair   -> c2 yields; c1 resumes; then `main` (queued first) ; then c2
+/// - unfair -> c2 yields; c1 resumes; then **c2 jumps back ahead of main**
+#[test]
+fn yield_now_lets_already_queued_work_run_first() {
+    let order = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let rec = {
+        let o = Arc::clone(&order);
+        move |v: u8| o.lock().unwrap().push(v)
+    };
+
+    let r = rec.clone();
+    DefaultStackfulOnlyTaskSystem::builder().workers(1).run(move || {
+        let r1 = r.clone();
+        let h1 = DefaultStackfulOnlyTaskSystem::spawn(move || {
+            let r2 = r1.clone();
+            let h2 = DefaultStackfulOnlyTaskSystem::spawn(move || {
+                r2(1);
+                DefaultStackfulOnlyTaskSystem::yield_now();
+                r2(4);
+            });
+            r1(2);
+            JoinHandleLike::join(h2);
+        });
+        r(3);
+        JoinHandleLike::join(h1);
+    });
+
+    assert_eq!(
+        *order.lock().unwrap(),
+        vec![1, 2, 3, 4],
+        "yield_now re-queued the yielding task ahead of work already waiting"
+    );
+}

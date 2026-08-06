@@ -34,7 +34,7 @@ use crate::resumable::common::pool::DescPool;
 /// `desc` must already be exclusively owned by the caller for the duration
 /// of this call — every caller establishes this via a real
 /// `SuspendedTaskToken` (consumed with `into_raw()`, or implicitly via
-/// `pop_local()`'s own single-consumer guarantee plus the token's `Drop`
+/// `try_pop()`'s own single-consumer guarantee plus the token's `Drop`
 /// being a no-op) before passing the raw pointer in.
 pub(crate) fn run_async_poll<S>(
     wk: &UltWorker<S>,
@@ -97,7 +97,7 @@ pub(crate) fn run_async_poll<S>(
                     // invariant, still holding since poll_fn returned
                     // control back to us without handing `desc` to anyone
                     // else).
-                    wk.push_local_top(unsafe { SuspendedTaskToken::from_raw(desc) });
+                    wk.push(unsafe { SuspendedTaskToken::from_raw(desc) });
                 }
                 return;
             }

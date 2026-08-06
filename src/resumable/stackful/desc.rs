@@ -81,7 +81,7 @@ pub trait HasCtx {
 /// this crate that receives a `HandoffTaskDesc`/`TaskDesc::Suspended` token
 /// generic only over `S::Desc: StackfulTaskDesc` immediately hands it to
 /// this crate's own `SuspendedTaskToken`-typed plumbing
-/// (`push_local_top`/`exit_to_cont`/`push_continuation`), so the equality
+/// (`push`/`exit_to_cont`/`push_continuation`), so the equality
 /// needs to be visible there, not just to this trait's own default-less
 /// methods.
 pub trait StackfulTaskDesc:

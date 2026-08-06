@@ -7,7 +7,7 @@
 
 use crate::traits::common::TaskSystem;
 use crate::traits::stackful::{NestableSystem, ThreadSystem};
-use crate::resumable::common::deque::WorkerDeque;
+use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::external_queue::ExternalQueue;
 use crate::resumable::common::desc::{SuspendedTaskToken, TaskDescAlloc};
 use crate::resumable::common::lookup::CurrentLookup;
@@ -29,16 +29,18 @@ pub trait SchedulerSystem: Sized + Send + Sync + 'static {
     /// Task descriptor type for this system.
     type Desc: TaskDescAlloc;
 
-    /// The unit that goes on a worker deque / the external queue. Every
+    /// The unit that goes on a worker run queue / the external queue. Every
     /// concrete system sets this to `SuspendedTaskToken<Self::Desc>` — kept
-    /// as its own associated type (rather than folding it into `Deque`'s
-    /// bound directly) so [`WorkerDeque`] and [`ExternalQueue`] stay generic
-    /// over "whatever this system moves through them," with no need to name
-    /// `SuspendedTaskToken`/`Self::Desc` themselves.
+    /// as its own associated type (rather than folding it into `RunQueue`'s
+    /// bound directly) so [`WorkerRunQueue`] and [`ExternalQueue`] stay
+    /// generic over "whatever this system moves through them," with no need
+    /// to name `SuspendedTaskToken`/`Self::Desc` themselves.
     type Item: Send;
 
-    /// Work-stealing deque implementation.
-    type Deque: WorkerDeque<Self::Item>;
+    /// Work-stealing run queue implementation. `+ Default` here (rather than
+    /// as a [`WorkerRunQueue`] supertrait) so that trait's contract stays
+    /// scoped to the queue behavior itself.
+    type RunQueue: WorkerRunQueue<Self::Item> + Default;
 
     /// Descriptor pool implementation for this system, used by the stackful
     /// `spawn` path (fixed-size ULT stacks, `STACK_SIZE` on
