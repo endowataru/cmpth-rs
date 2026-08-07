@@ -131,6 +131,19 @@ pub struct UltWorker<S: SchedulerSystem> {
     /// `run_async_poll` clearing it *before* publishing the descriptor to
     /// the deque, not after — see that function.
     pub(crate) polling_async: Cell<*mut S::Desc>,
+    /// Set by [`StacklessTaskSystem::yield_now`](crate::traits::stackless::StacklessTaskSystem::yield_now)'s
+    /// first poll when it observes `polling_async` non-null (i.e. it is
+    /// running as the task `run_async_poll` is synchronously driving right
+    /// now), so that function's `Pending` arm knows to requeue via `defer`
+    /// (fair) instead of the ordinary self-wake path's `push`. Read (via
+    /// `take`, clearing it) exactly once per poll, unconditionally, in
+    /// every `TaskPollResult` arm — not only the one that acts on it — so a
+    /// `true` left behind by a task that then returned `Ready` (or parked
+    /// properly instead of self-waking) can never leak into whatever gets
+    /// polled next on this worker. See `run_async_poll`
+    /// (`resumable/stackless/worker.rs`) and `yield_now`'s blanket impl
+    /// (`resumable/stackless/system.rs`).
+    pub(crate) yield_requested: Cell<bool>,
 }
 
 // `Cell` fields are only accessed by the owning base thread; `deque` is
@@ -149,6 +162,7 @@ impl<S: SchedulerSystem> UltWorker<S> {
             steal_seed: Cell::new(num.wrapping_mul(0x9E37_79B9).wrapping_add(1)),
             shared: Cell::new(ptr::null()),
             polling_async: Cell::new(ptr::null_mut()),
+            yield_requested: Cell::new(false),
         }
     }
 

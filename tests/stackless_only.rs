@@ -175,3 +175,65 @@ fn async_task_system_yield_now() {
         h.await;
     });
 }
+
+/// `yield_now().await` must let work that is *already queued* on this
+/// worker run before the yielding task resumes -- the stackless counterpart
+/// of `stackful_only.rs::yield_now_lets_already_queued_work_run_first`.
+///
+/// Unlike `spawn`'s stackful counterpart, `spawn_async` never context
+/// switches into the child: it just registers a descriptor and pushes it
+/// (`spawn_now`, `resumable/stackless/thread.rs`) while the spawning task's
+/// own poll keeps running synchronously past the first `.await`
+/// (`SpawnAction::poll` is unconditionally `Ready`). So — unlike the
+/// stackful test, which needs two queued items to be observable because
+/// `suspend_to_sched` pops the next continuation *before* its callback
+/// re-queues the yielding task — a single queued sibling here would
+/// already discriminate fair (`defer`) from unfair (`push`): whichever one
+/// is used, it competes directly against what's already sitting in the run
+/// queue at the moment `yield_now`'s `Pending` arm runs. Two siblings are
+/// used anyway, both to mirror the stackful test's shape and to confirm the
+/// *relative* order between them survives untouched (LIFO `push`: the
+/// second spawned runs first).
+///
+/// Single worker, so nothing here can run except via this worker's own run
+/// queue -- no stealing to muddy the ordering.
+#[test]
+fn yield_now_lets_already_queued_work_run_first() {
+    let order = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let rec = {
+        let o = Arc::clone(&order);
+        move |v: u8| o.lock().unwrap().push(v)
+    };
+
+    let r = rec.clone();
+    DefaultStacklessOnlyTaskSystem::builder().workers(1).run_async(async move {
+        let r1 = r.clone();
+        let r2 = r.clone();
+
+        // Pushed LIFO: c1 first (ends up underneath), c2 second (ends up on
+        // top). Both `.await`s here only drive `SpawnAction` to `Ready`
+        // (registration), not the child body itself -- neither child has
+        // run yet.
+        let h1 = DefaultStacklessOnlyTaskSystem::spawn(move || async move {
+            r1(3);
+        })
+        .await;
+        let h2 = DefaultStacklessOnlyTaskSystem::spawn(move || async move {
+            r2(2);
+        })
+        .await;
+
+        r(1);
+        DefaultStacklessOnlyTaskSystem::yield_now().await;
+        r(4);
+
+        h1.await;
+        h2.await;
+    });
+
+    assert_eq!(
+        *order.lock().unwrap(),
+        vec![1, 2, 3, 4],
+        "yield_now re-queued the yielding task ahead of work already waiting"
+    );
+}

@@ -1,5 +1,4 @@
 use std::future::Future;
-use std::task::Poll;
 
 use crate::traits::system::TaskSystem;
 use crate::traits::system::scoped::ScopedStacklessTaskSystem;
@@ -56,42 +55,34 @@ pub trait StacklessTaskSystem: ScopedStacklessTaskSystem {
         F: Future + Send,
         Mk: FnOnce() -> F;
 
-    /// Returns `Pending` on the first poll (waking itself immediately),
-    /// then `Ready` on the next — a single suspend/resume round-trip.
+    /// Returns `Pending` on the first poll, then `Ready` on the next — a
+    /// single suspend/resume round-trip that is a **fair** yield: on the
+    /// worker actually driving this task (`run_async_poll`), the
+    /// implementation routes the requeue through `WorkerRunQueue::defer`
+    /// rather than the ordinary self-wake path's `push`, so already-queued
+    /// sibling tasks on that worker run first — see the blanket impl in
+    /// [`resumable::stackless::system`](crate::resumable::stackless::system)
+    /// for the mechanism.
     ///
-    /// **Not a fair yield**: the self-wake goes through the same generic
-    /// waker path any other wakeup does, which re-queues this task via
-    /// `push` — the same source `try_pop` pops from next — not `defer`,
-    /// which would actually let already-queued sibling tasks run first. A
-    /// correct fair yield needs to reach the
-    /// scheduler directly (bypassing the waker) to request the FIFO end
-    /// specifically; nothing here does that yet. Useful today for "come
-    /// back to me after one poll round-trip" (e.g. a busy-poll retry
-    /// loop watching a flag another worker sets), not for cooperative
-    /// scheduling between tasks that share a worker.
+    /// No default body: a correct implementation needs to reach the
+    /// current worker's run queue directly to make that `defer` vs. `push`
+    /// choice, and this interface-layer trait must not name any
+    /// `resumable`-layer type to do so — the same `traits/` vs.
+    /// `resumable/` layering rule every other method on this trait already
+    /// follows (a default body here would leak worker/queue types into the
+    /// interface layer). Each `StacklessTaskSystem` implementor supplies
+    /// its own.
     ///
     /// Deliberately shares its name with
     /// [`ThreadSystem::yield_now`](crate::traits::system::stackful::ThreadSystem::yield_now)
-    /// (the stackful, synchronous, whole-ULT-suspending version, which
-    /// *is* fair — it goes through the real scheduler loop) rather than
+    /// (the stackful, synchronous, whole-ULT-suspending version) rather than
     /// being renamed to dodge the collision — on a dual system
     /// implementing both traits, calling `Concrete::yield_now()` is
     /// ambiguous by design (same resolution as `spawn` above) and must be
     /// disambiguated with `<Concrete as StacklessTaskSystem>::yield_now()`
     /// / `<Concrete as ThreadSystem>::yield_now()`; a generic caller
     /// bounded by only one of the two traits never sees the ambiguity.
-    fn yield_now() -> impl Future<Output = ()> {
-        let mut yielded = false;
-        std::future::poll_fn(move |cx| {
-            if yielded {
-                Poll::Ready(())
-            } else {
-                yielded = true;
-                cx.waker().wake_by_ref();
-                Poll::Pending
-            }
-        })
-    }
+    fn yield_now() -> impl Future<Output = ()>;
 }
 
 // ---------------------------------------------------------------------------

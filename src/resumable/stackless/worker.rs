@@ -75,6 +75,14 @@ pub(crate) fn run_async_poll<S>(
         // waker is dropped here; drop_async_private is a no-op for PRIVATE mode.
         drop(waker);
 
+        // Consume any `yield_now()` request made during *this* poll --
+        // unconditionally, before branching on `result`, so a `true` left
+        // by a task that turns out to complete (`Ready`/`ReadyAndContinue`)
+        // rather than actually self-wake-and-park never leaks into
+        // whatever this worker polls next. Only the `Pending` arm below
+        // ever acts on it.
+        let yield_requested = wk.yield_requested.take();
+
         match result {
             TaskPollResult::Ready => {
                 wk.polling_async.set(prev_polling);
@@ -97,7 +105,15 @@ pub(crate) fn run_async_poll<S>(
                     // invariant, still holding since poll_fn returned
                     // control back to us without handing `desc` to anyone
                     // else).
-                    wk.push(unsafe { SuspendedTaskToken::from_raw(desc) });
+                    let token = unsafe { SuspendedTaskToken::from_raw(desc) };
+                    if yield_requested {
+                        // Fair yield: behind whatever this worker already
+                        // had queued, not ahead of it -- see
+                        // `StacklessTaskSystem::yield_now`.
+                        wk.defer(token);
+                    } else {
+                        wk.push(token);
+                    }
                 }
                 return;
             }
