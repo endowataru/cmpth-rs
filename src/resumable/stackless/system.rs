@@ -15,7 +15,7 @@ use crate::traits::stackful::{NestableSystem, ThreadSystem};
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
-use crate::resumable::common::worker::UltWorker;
+use crate::resumable::common::worker::{UltWorker, WorkerOps};
 use crate::resumable::stackless::desc::AsyncTaskDesc;
 use crate::traits::scoped::ScopedStacklessTaskSystem;
 
@@ -42,6 +42,32 @@ impl<S: StacklessSchedulerSystem> StacklessTaskSystem for S {
         Mk: FnOnce() -> F,
     {
         crate::resumable::stackless::thread::recurse::<Self, F, Mk>(mk)
+    }
+
+    fn yield_now() -> impl Future<Output = ()> {
+        let mut yielded = false;
+        std::future::poll_fn(move |cx| {
+            if yielded {
+                return std::task::Poll::Ready(());
+            }
+            yielded = true;
+            // Fair only when there is a `run_async_poll` frame to actually
+            // consume the flag: `polling_async` non-null is precisely "this
+            // worker is synchronously driving me right now" (see that
+            // field's doc comment on `UltWorker`). Outside that -- e.g.
+            // `yield_now().await` reached from inside a ULT's `block_on`,
+            // where no `run_async_poll` frame exists on this call chain --
+            // setting the flag would just leave it there for some later,
+            // unrelated task's poll to observe, so fall back to the plain
+            // self-wake this method always did.
+            if let Some(wk) = UltWorker::<S>::current() {
+                if !wk.polling_async.get().is_null() {
+                    wk.yield_requested.set(true);
+                }
+            }
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        })
     }
 }
 
