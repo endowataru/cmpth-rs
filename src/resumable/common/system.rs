@@ -14,33 +14,18 @@ use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::pool::{DescPool, DynamicPool};
 use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
 
-/// Base system interface required by [`UltWorker`] and
-/// [`Scheduler`](crate::resumable::common::scheduler::Scheduler), independent of whether
-/// tasks are stackful ULTs, stackless `spawn_async` futures, or both.
+/// Storage-related subset of [`SchedulerSystem`]: the descriptor type and
+/// the pools/external-queue that store and move it around. Split out as its
+/// own supertrait so this axis can be named independently of the rest of
+/// [`SchedulerSystem`] (worker/run-queue/dispatch).
 ///
-/// Deliberately does **not** name a context-switch policy or stack
-/// allocator: a stackless-only system has no real stack to switch into, so
-/// requiring one here would force it to name machinery it never uses. See
-/// [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem) for the stackful extension.
-pub trait SchedulerSystem: Sized + Send + Sync + 'static {
-    /// The threading system this scheduler runs on.
-    type Base: ThreadSystem + NestableSystem;
-
+/// `Desc` lives here (not on [`SchedulerSystem`] itself) because every other
+/// member of this trait is typed by it (`Pool: DescPool<Self::Desc>`, etc.);
+/// [`SchedulerSystem`] inherits it via the supertrait bound, so `Self::Desc`
+/// keeps resolving unchanged for any `S: SchedulerSystem`.
+pub trait PoolSystem: Sized + Send + Sync + 'static {
     /// Task descriptor type for this system.
     type Desc: TaskDescAlloc;
-
-    /// The unit that goes on a worker run queue / the external queue. Every
-    /// concrete system sets this to `SuspendedTaskToken<Self::Desc>` — kept
-    /// as its own associated type (rather than folding it into `RunQueue`'s
-    /// bound directly) so [`WorkerRunQueue`] and [`ExternalQueue`] stay
-    /// generic over "whatever this system moves through them," with no need
-    /// to name `SuspendedTaskToken`/`Self::Desc` themselves.
-    type Item: Send;
-
-    /// Work-stealing run queue implementation. `+ Default` here (rather than
-    /// as a [`WorkerRunQueue`] supertrait) so that trait's contract stays
-    /// scoped to the queue behavior itself.
-    type RunQueue: WorkerRunQueue<Self::Item> + Default;
 
     /// Descriptor pool implementation for this system, used by the stackful
     /// `spawn` path (fixed-size ULT stacks, `STACK_SIZE` on
@@ -74,11 +59,37 @@ pub trait SchedulerSystem: Sized + Send + Sync + 'static {
     /// anyone but its immediate caller.
     type RecursionPool: DynamicPool;
 
-    /// Current-worker lookup policy.
-    type Lookup: CurrentLookup<Self>;
-
     /// Queue for continuations pushed by external (non-worker) OS threads.
     type ExternalQueue: ExternalQueue<Self>;
+}
+
+/// Base system interface required by [`UltWorker`] and
+/// [`Scheduler`](crate::resumable::common::scheduler::Scheduler), independent of whether
+/// tasks are stackful ULTs, stackless `spawn_async` futures, or both.
+///
+/// Deliberately does **not** name a context-switch policy or stack
+/// allocator: a stackless-only system has no real stack to switch into, so
+/// requiring one here would force it to name machinery it never uses. See
+/// [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem) for the stackful extension.
+pub trait SchedulerSystem: PoolSystem {
+    /// The threading system this scheduler runs on.
+    type Base: ThreadSystem + NestableSystem;
+
+    /// The unit that goes on a worker run queue / the external queue. Every
+    /// concrete system sets this to `SuspendedTaskToken<Self::Desc>` — kept
+    /// as its own associated type (rather than folding it into `RunQueue`'s
+    /// bound directly) so [`WorkerRunQueue`] and [`ExternalQueue`] stay
+    /// generic over "whatever this system moves through them," with no need
+    /// to name `SuspendedTaskToken`/`Self::Desc` themselves.
+    type Item: Send;
+
+    /// Work-stealing run queue implementation. `+ Default` here (rather than
+    /// as a [`WorkerRunQueue`] supertrait) so that trait's contract stays
+    /// scoped to the queue behavior itself.
+    type RunQueue: WorkerRunQueue<Self::Item> + Default;
+
+    /// Current-worker lookup policy.
+    type Lookup: CurrentLookup<Self>;
 
     /// The concrete worker type driving this scheduler. Every system today
     /// sets this to [`UltWorker<Self>`] — kept as its own associated type
@@ -141,11 +152,11 @@ pub trait SchedulerSystem: Sized + Send + Sync + 'static {
 /// UltWorker<..>` on every generic function that touches both the abstract
 /// associated types and the concrete ones.
 pub trait DescScheduler:
-    SchedulerSystem<Item = SuspendedTaskToken<<Self as SchedulerSystem>::Desc>, Worker = UltWorker<Self>>
+    SchedulerSystem<Item = SuspendedTaskToken<<Self as PoolSystem>::Desc>, Worker = UltWorker<Self>>
 {
 }
 
-impl<S: SchedulerSystem<Item = SuspendedTaskToken<<S as SchedulerSystem>::Desc>, Worker = UltWorker<S>>> DescScheduler for S {}
+impl<S: SchedulerSystem<Item = SuspendedTaskToken<<S as PoolSystem>::Desc>, Worker = UltWorker<S>>> DescScheduler for S {}
 
 // ---------------------------------------------------------------------------
 // Blanket TaskSystem for every SchedulerSystem

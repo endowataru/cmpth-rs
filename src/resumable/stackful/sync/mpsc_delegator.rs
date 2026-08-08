@@ -29,7 +29,7 @@ use std::sync::Arc;
 use crate::traits::{DelegatorConsumer, Resumable, StackfulResumable};
 use crate::resumable::stackful::sync::delegator::SyncQueue;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
-use crate::resumable::common::system::SchedulerSystem;
+use crate::resumable::common::system::PoolSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::traits::{ThreadSystem, SuspendableSystem};
 use crate::resumable::common::thread;
@@ -41,7 +41,7 @@ use crate::resumable::stackful::thread::spawn;
 
 struct Inner<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>>
 where
-    <S as SchedulerSystem>::Desc: StackfulTaskDesc,
+    <S as PoolSystem>::Desc: StackfulTaskDesc,
     <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>,
 {
     queue: Q,
@@ -52,11 +52,11 @@ where
     consumer_th: std::cell::UnsafeCell<Option<thread::JoinHandle<S, ()>>>,
 }
 
-unsafe impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Send for Inner<S, C, Q> where <S as SchedulerSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {}
-unsafe impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Sync for Inner<S, C, Q> where <S as SchedulerSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {}
+unsafe impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Send for Inner<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {}
+unsafe impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Sync for Inner<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {}
 
-impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default> Inner<S, C, Q> where <S as SchedulerSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
-    fn new(consumer: C) -> Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
+impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default> Inner<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
+    fn new(consumer: C) -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
         Inner {
             queue: Q::default(),
             consumer: std::cell::UnsafeCell::new(consumer),
@@ -73,8 +73,8 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
 // delegator.rs (see that file's comments for the four-bugs-found history).
 // ---------------------------------------------------------------------------
 
-impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Inner<S, C, Q> where <S as SchedulerSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
-    fn consumer(&self) -> &mut C where <S as SchedulerSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
+impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Inner<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
+    fn consumer(&self) -> &mut C where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
         unsafe { &mut *self.consumer.get() }
     }
 
@@ -84,7 +84,7 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
     /// unlock();`, not a bare `unlock()`).
     fn lock_wait(&self)
     where
-        <S as SchedulerSystem>::Desc: StackfulTaskDesc,
+        <S as PoolSystem>::Desc: StackfulTaskDesc,
         <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>,
     {
         let (is_locked, prev, cur) = self.queue.start_lock();
@@ -105,7 +105,7 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
     fn lock_or_delegate<Del>(&self, del: Del) -> bool
     where
         Del: FnOnce(&mut C::Work) -> &<S as SuspendableSystem>::SuspendedThread,
-        <S as SchedulerSystem>::Desc: StackfulTaskDesc,
+        <S as PoolSystem>::Desc: StackfulTaskDesc,
         <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>,
     {
         let (is_locked, _prev, cur) = self.queue.start_lock();
@@ -127,7 +127,7 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
 
     fn unlock(&self)
     where
-        <S as SchedulerSystem>::Desc: StackfulTaskDesc,
+        <S as PoolSystem>::Desc: StackfulTaskDesc,
         <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>,
     {
         self.is_executed.set(true);
@@ -157,7 +157,7 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
 
     fn unlock_and_wait(&self, wait_sth: &<S as SuspendableSystem>::SuspendedThread)
     where
-        <S as SchedulerSystem>::Desc: StackfulTaskDesc,
+        <S as PoolSystem>::Desc: StackfulTaskDesc,
         <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>,
     {
         self.is_executed.set(true);
@@ -182,7 +182,7 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
 
     fn consume(&self)
     where
-        <S as SchedulerSystem>::Desc: StackfulTaskDesc,
+        <S as PoolSystem>::Desc: StackfulTaskDesc,
         <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>,
     {
         let con = self.consumer();
@@ -245,7 +245,7 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
 
     fn consumer_loop(&self)
     where
-        <S as SchedulerSystem>::Desc: StackfulTaskDesc,
+        <S as PoolSystem>::Desc: StackfulTaskDesc,
         <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>,
     {
         while !self.finished.load(Ordering::Acquire) {
@@ -257,7 +257,7 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
     where
         Imm: FnOnce(&mut C) -> (bool, Option<<S as SuspendableSystem>::SuspendedThread>),
         Del: FnOnce(&mut C::Work) -> &<S as SuspendableSystem>::SuspendedThread,
-        <S as SchedulerSystem>::Desc: StackfulTaskDesc,
+        <S as PoolSystem>::Desc: StackfulTaskDesc,
         <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>,
     {
         let is_locked = self.lock_or_delegate(del);
@@ -288,10 +288,10 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
 
 impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Drop for Inner<S, C, Q>
 where
-    <S as SchedulerSystem>::Desc: StackfulTaskDesc,
+    <S as PoolSystem>::Desc: StackfulTaskDesc,
     <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>,
 {
-    fn drop(&mut self) where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    fn drop(&mut self) where <S as PoolSystem>::Desc: StackfulTaskDesc {
         self.lock_wait();
         self.finished.store(true, Ordering::Release);
         let is_active = self.consumer().is_active();
@@ -311,15 +311,15 @@ where
 // Producer — Clone, mpsc::Sender-like
 // ---------------------------------------------------------------------------
 
-pub struct Producer<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>>(Arc<Inner<S, C, Q>>) where <S as SchedulerSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>;
+pub struct Producer<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>>(Arc<Inner<S, C, Q>>) where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>;
 
-impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Clone for Producer<S, C, Q> where <S as SchedulerSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
-    fn clone(&self) -> Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
+impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Clone for Producer<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
+    fn clone(&self) -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
         Producer(Arc::clone(&self.0))
     }
 }
 
-impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Producer<S, C, Q> where <S as SchedulerSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
+impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Producer<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
     /// Runs `imm` inline if uncontended, otherwise delegates via `del` and
     /// waits for the result. Blocks only on the caller's own work; any
     /// backlog left behind by other callers is handed to the consumer ULT
@@ -330,7 +330,7 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
     where
         Imm: FnOnce(&mut C) -> (bool, Option<<S as SuspendableSystem>::SuspendedThread>),
         Del: FnOnce(&mut C::Work) -> &<S as SuspendableSystem>::SuspendedThread,
-        <S as SchedulerSystem>::Desc: StackfulTaskDesc,
+        <S as PoolSystem>::Desc: StackfulTaskDesc,
         <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>,
     {
         self.0.execute_or_delegate(imm, del)
@@ -355,7 +355,7 @@ where
     S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem,
     C: DelegatorConsumer<S>,
     Q: SyncQueue<S, C> + Default + 'static,
-    <S as SchedulerSystem>::Desc: StackfulTaskDesc,
+    <S as PoolSystem>::Desc: StackfulTaskDesc,
     <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>,
 {
     let inner = Arc::new(Inner::<S, C, Q>::new(consumer));

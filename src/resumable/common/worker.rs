@@ -47,9 +47,10 @@ pub trait TaskPool<S: SchedulerSystem> {
 
 /// `spawn_async`-descriptor allocation with a per-worker free list. Separate
 /// from [`TaskPool`]: a `spawn_async` slot comes from
-/// [`SchedulerSystem::AsyncPool`], a different pool from the ULT-stack
+/// [`PoolSystem::AsyncPool`](crate::resumable::common::system::PoolSystem::AsyncPool),
+/// a different pool from the ULT-stack
 /// `S::Pool` `TaskPool` allocates from (a dual system needs both live at
-/// once — see [`SchedulerSystem::AsyncPool`]'s doc comment) — and this trait
+/// once — see [`PoolSystem::AsyncPool`](crate::resumable::common::system::PoolSystem::AsyncPool)'s doc comment) — and this trait
 /// is stackless-only, unlike `TaskPool`, which every system needs.
 pub trait AsyncTaskPool<S: SchedulerSystem> {
     /// Allocate a descriptor with storage for at least `size` bytes (see
@@ -71,7 +72,7 @@ pub trait AsyncTaskPool<S: SchedulerSystem> {
 /// [`stackless::thread::recurse`](crate::resumable::stackless::thread::recurse)'s
 /// per-frame storage. Unlike [`TaskPool`]/[`AsyncTaskPool`], this names no
 /// descriptor type in its signature — it is a plain sized allocator (see
-/// [`SchedulerSystem::RecursionPool`]),
+/// [`PoolSystem::RecursionPool`](crate::resumable::common::system::PoolSystem::RecursionPool)),
 /// unrelated to descriptors, so it needs neither `S` nor `D` to spell out
 /// what it hands back.
 pub trait RecursionAlloc {

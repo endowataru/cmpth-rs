@@ -723,12 +723,8 @@ fn float_regs_survive_yield() {
 /// nested schedulers).
 struct ManualSystem;
 
-impl cmpth::SchedulerSystem for ManualSystem {
-    type Base  = OsSystem;
+impl cmpth::PoolSystem for ManualSystem {
     type Desc  = DualTaskDesc<Self>;
-    type Item  = cmpth::SuspendedTaskToken<DualTaskDesc<Self>>;
-    type Worker = UltWorker<Self>;
-    type RunQueue = HybridRunQueue<cmpth::SuspendedTaskToken<DualTaskDesc<Self>>>;
     type ExternalQueue   = StealPathQueue<DualTaskDesc<Self>>;
     type Pool            = ReturnPool<DualTaskDesc<Self>, HeapStack>;
     // Unused: ManualSystem never calls spawn_async.
@@ -736,6 +732,13 @@ impl cmpth::SchedulerSystem for ManualSystem {
     const ASYNC_POOL_SIZE: usize = 0;
     // Unused: ManualSystem never calls recurse.
     type RecursionPool   = cmpth::resumable::common::pool::ThresholdPool<cmpth::resumable::common::pool::BlockPool>;
+}
+
+impl cmpth::SchedulerSystem for ManualSystem {
+    type Base  = OsSystem;
+    type Item  = cmpth::SuspendedTaskToken<DualTaskDesc<Self>>;
+    type Worker = UltWorker<Self>;
+    type RunQueue = HybridRunQueue<cmpth::SuspendedTaskToken<DualTaskDesc<Self>>>;
     type Lookup          = TlsCurrent;
 
     fn worker_tls() -> &'static <OsSystem as cmpth::NestableSystem>::ThreadSpecific<UltWorker<Self>> {
@@ -826,12 +829,8 @@ fn manual_impl_without_macro() {
 /// [`PollerUltQueue`] instead of the default [`StealPathQueue`].
 struct PollerSystem;
 
-impl cmpth::SchedulerSystem for PollerSystem {
-    type Base  = OsSystem;
+impl cmpth::PoolSystem for PollerSystem {
     type Desc  = StackfulOnlyTaskDesc<Self>;
-    type Item  = cmpth::SuspendedTaskToken<StackfulOnlyTaskDesc<Self>>;
-    type Worker = UltWorker<Self>;
-    type RunQueue = HybridRunQueue<cmpth::SuspendedTaskToken<StackfulOnlyTaskDesc<Self>>>;
     type ExternalQueue   = PollerUltQueue<StackfulOnlyTaskDesc<Self>>;
     type Pool            = ReturnPool<StackfulOnlyTaskDesc<Self>, HeapStack>;
     // Unused: PollerSystem never calls spawn_async.
@@ -839,6 +838,13 @@ impl cmpth::SchedulerSystem for PollerSystem {
     const ASYNC_POOL_SIZE: usize = 0;
     // Unused: PollerSystem never calls recurse.
     type RecursionPool   = cmpth::resumable::common::pool::ThresholdPool<cmpth::resumable::common::pool::BlockPool>;
+}
+
+impl cmpth::SchedulerSystem for PollerSystem {
+    type Base  = OsSystem;
+    type Item  = cmpth::SuspendedTaskToken<StackfulOnlyTaskDesc<Self>>;
+    type Worker = UltWorker<Self>;
+    type RunQueue = HybridRunQueue<cmpth::SuspendedTaskToken<StackfulOnlyTaskDesc<Self>>>;
     type Lookup          = TlsCurrent;
 
     fn worker_tls() -> &'static <OsSystem as cmpth::NestableSystem>::ThreadSpecific<UltWorker<Self>> {

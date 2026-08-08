@@ -45,7 +45,7 @@ use crate::resumable::common::stack::{HeapStack, StackAlloc};
 /// locking the common case.
 ///
 /// Generic over the descriptor type `D` (see
-/// [`crate::SchedulerSystem::Desc`]); every concrete system today sets
+/// [`crate::PoolSystem::Desc`]); every concrete system today sets
 /// `D = DualTaskDesc`.
 ///
 /// `alloc`'s `size` lets one pool serve requests of varying size (needed for
@@ -577,7 +577,7 @@ pub(crate) trait StaticPool: Sync + 'static {
 /// instance has to serve arbitrarily many distinct `F` types through the
 /// program's lifetime, so its payload can only be described by a `Layout`,
 /// not a concrete type — unlike `ReturnPool<D>`, where `D` is fixed once as
-/// `SchedulerSystem::Desc`.
+/// `PoolSystem::Desc`.
 pub trait DynamicPool: Sync + 'static {
     /// Create a pool for `num_workers` workers whose common-case requests
     /// fit within `threshold` (size *and* align).
@@ -703,7 +703,7 @@ impl<const THRESHOLD: usize> Drop for BlockPool<THRESHOLD> {
 /// anything bigger — the same split [`ReturnPool::alloc`] already makes
 /// for oversized `spawn_async` futures, generalized to any `P`.
 /// `StaticPool` is `pub(crate)` while this struct must stay `pub` — it is the
-/// concrete value of the public `SchedulerSystem::RecursionPool` associated
+/// concrete value of the public `PoolSystem::RecursionPool` associated
 /// type in several impls, so making it crate-private is an `E0446` error.
 /// The leak is nominal only: `P` is always `BlockPool` internally, and
 /// nothing outside this crate has any reason to implement `StaticPool` or to
