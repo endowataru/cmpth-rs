@@ -17,8 +17,7 @@ use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle
 use crate::resumable::common::desc::{HasExternalQueue, SuspendedTaskToken, TaskDesc, TaskDescAlloc, TaskDescCore, TaskExitSink};
 use crate::resumable::stackless::desc::WakerTaskDesc;
 use crate::resumable::stackless::desc::{AsyncTaskDesc, HasPollFn, TaskPollResult};
-use crate::resumable::common::pool::{DescPool, DynamicPool};
-use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
+use crate::resumable::common::worker::{AsyncTaskPool, LocalQueue, RecursionAlloc, UltWorker, WorkerOps};
 
 // ---------------------------------------------------------------------------
 // .await-ing a JoinHandle
@@ -223,12 +222,12 @@ where
     let stack_size =
         result_layout.size() + result_layout.align() + f_layout.size() + f_layout.align() + 16;
 
-    let desc = wk.shared().async_task_pool.alloc(wk.num(), true, stack_size);
+    let desc = wk.alloc_async_task(true, stack_size);
     // SAFETY: `desc` was just freshly allocated by `async_task_pool.alloc`
     // and has never been wrapped in a token before — trivially exclusive.
     let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
     token.commit_as_poll_fn();
-    token.set_external_queue(&wk.shared().external_queue as *const _);
+    token.set_external_queue(wk.external_queue() as *const _);
 
     let stack_top = token.as_desc().stack_top() as usize;
     let result_addr = align_down(stack_top - result_layout.size(), result_layout.align());
@@ -317,7 +316,7 @@ where
         unsafe { std::ptr::drop_in_place(self.result_ptr) };
         let wk = UltWorker::<S>::current()
             .expect("cmpth: poll_spawned_task called outside a worker");
-        unsafe { wk.shared().async_task_pool.dealloc(wk.num(), self.desc_ptr) };
+        unsafe { wk.free_async_task(self.desc_ptr) };
     }
 }
 
@@ -401,9 +400,10 @@ where
 
 /// Wrap a recursive async call's future, avoiding a `Box::pin` heap
 /// allocation. Storage comes from a per-worker free list keyed by size
-/// (see `Scheduler::recursion_pool`, reached via `wk.shared()`) instead of
-/// the global allocator, falling back to a raw allocation when called
-/// outside a worker.
+/// (see `Scheduler::recursion_pool`, reached via
+/// [`RecursionAlloc::alloc_recursion_frame`]) instead of the global
+/// allocator, falling back to a raw allocation when called outside a
+/// worker.
 ///
 /// An `async fn` cannot directly recurse — the call `f(n - 1).await`
 /// inside `f`'s own body would need `f`'s state machine to embed another
@@ -448,7 +448,7 @@ where
 {
     let layout = Layout::new::<F>();
     let raw = match UltWorker::<S>::current() {
-        Some(wk) => wk.shared().recursion_pool.alloc(wk.num(), layout),
+        Some(wk) => wk.alloc_recursion_frame(layout),
         None => unsafe { std::alloc::alloc(layout) },
     };
     if raw.is_null() {
@@ -491,7 +491,7 @@ impl<S: DescScheduler, F> Drop for RecursionFrame<S, F> {
         let layout = Layout::new::<F>();
         match UltWorker::<S>::current() {
             Some(wk) => unsafe {
-                wk.shared().recursion_pool.dealloc(wk.num(), self.ptr.as_ptr() as *mut u8, layout)
+                wk.free_recursion_frame(self.ptr.as_ptr() as *mut u8, layout)
             },
             None => unsafe { std::alloc::dealloc(self.ptr.as_ptr() as *mut u8, layout) },
         }

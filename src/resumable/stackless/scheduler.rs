@@ -70,7 +70,7 @@ where
         recursion_pool: S::RecursionPool::new(num_workers, recursion_pool_threshold::<S>()),
     });
     for w in shared.workers.iter() {
-        w.shared.set(Arc::as_ptr(&shared));
+        w.bind_scheduler(Arc::as_ptr(&shared));
     }
 
     let shared2 = Arc::clone(&shared);
@@ -87,11 +87,11 @@ where
     let handles: Vec<_> = (1..num_workers)
         .map(|i| {
             let shared = Arc::clone(&shared);
-            S::Base::spawn(move || worker_loop(&shared.workers[i]))
+            S::Base::spawn(move || worker_loop(&shared.workers[i], &shared))
         })
         .collect();
 
-    worker_loop(&shared.workers[0]);
+    worker_loop(&shared.workers[0], &shared);
 
     for h in handles {
         h.join();

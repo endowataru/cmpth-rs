@@ -7,13 +7,12 @@
 //! machinery this builds on.
 
 use crate::resumable::common::deque::WorkerRunQueue;
-use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker};
+use crate::resumable::common::worker::{AsyncTaskPool, TaskPool, UltWorker};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulLocalQueue};
 use crate::resumable::common::desc::SuspendedTaskToken;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::stackless::desc::AsyncTaskDesc;
-use crate::resumable::common::pool::DescPool;
 
 /// `execute` body for dual systems: today's original logic — check
 /// `poll_fn` first, and either poll inline or perform a real context switch.
@@ -63,7 +62,7 @@ where
 ///
 /// # Safety
 /// No other references to `desc` may exist after this call (same contract
-/// as [`TaskPool::free_task`]/[`DescPool::dealloc`]).
+/// as [`TaskPool::free_task`]/[`AsyncTaskPool::free_async_task`]).
 pub unsafe fn free_finished_desc_dual<S>(wk: &UltWorker<S>, desc: *mut S::Desc)
 where
     S: StackfulSchedulerSystem,
@@ -74,7 +73,7 @@ where
     // again after publishing `FINISHED`, so no other token can exist for
     // it; safe to construct one transiently just to read the dispatch tag.
     if unsafe { crate::resumable::common::desc::SuspendedTaskToken::from_raw(desc) }.is_poll_fn_dispatch() {
-        unsafe { wk.shared().async_task_pool.dealloc(wk.num(), desc) };
+        unsafe { wk.free_async_task(desc) };
     } else {
         unsafe { wk.free_task(desc) };
     }

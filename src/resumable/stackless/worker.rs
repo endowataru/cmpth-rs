@@ -6,13 +6,12 @@
 
 use std::task::{RawWaker, Waker};
 
-use crate::resumable::common::worker::{LocalQueue, UltWorker};
+use crate::resumable::common::worker::{AsyncTaskPool, LocalQueue, UltWorker};
 use crate::resumable::common::system::DescScheduler;
 use crate::resumable::stackless::system::StacklessSchedulerSystem;
 use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken};
 use crate::resumable::stackless::desc::WakerTaskDesc;
 use crate::resumable::stackless::desc::{TaskPollFn, TaskPollResult};
-use crate::resumable::common::pool::DescPool;
 
 /// Drive one async task's poll to completion or a suspend point. Called
 /// from `execute_dual` (when `desc.poll_fn` is `Some`) and from
@@ -153,10 +152,10 @@ where
 ///
 /// # Safety
 /// No other references to `desc` may exist after this call (same contract
-/// as [`DescPool::dealloc`]).
+/// as [`AsyncTaskPool::free_async_task`]).
 pub unsafe fn free_finished_desc_async<S>(wk: &UltWorker<S>, desc: *mut S::Desc)
 where
     S: DescScheduler,
 {
-    unsafe { wk.shared().async_task_pool.dealloc(wk.num(), desc) };
+    unsafe { wk.free_async_task(desc) };
 }

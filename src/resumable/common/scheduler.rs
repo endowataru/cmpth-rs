@@ -67,7 +67,9 @@ pub(crate) fn recursion_pool_threshold<S: SchedulerSystem>() -> Layout {
 unsafe impl<S: SchedulerSystem> Send for Scheduler<S> {}
 unsafe impl<S: SchedulerSystem> Sync for Scheduler<S> {}
 
-pub(crate) fn worker_loop<S>(wk: &UltWorker<S>)
+/// `shared` is an explicit parameter, not read back out of `wk` — every
+/// caller already holds the `Scheduler<S>` it just built or was handed.
+pub(crate) fn worker_loop<S>(wk: &UltWorker<S>, shared: &Scheduler<S>)
 where
     S: DescScheduler,
 {
@@ -83,7 +85,7 @@ where
     };
     wk.set_cur_task(root_task);
 
-    worker_idle_loop(wk);
+    worker_idle_loop(wk, shared);
 
     S::worker_tls().set(std::ptr::null_mut());
 }
@@ -96,11 +98,13 @@ where
 /// function, and TLS teardown happens later too (on whichever OS thread
 /// ends up running the initializer's `Drop`, not necessarily this one) — so
 /// neither belongs inside this shared core.
-pub(crate) fn worker_idle_loop<S>(wk: &UltWorker<S>)
+///
+/// `shared` is an explicit parameter, not read back out of `wk` — every
+/// caller already holds the `Scheduler<S>` it just built or was handed.
+pub(crate) fn worker_idle_loop<S>(wk: &UltWorker<S>, shared: &Scheduler<S>)
 where
     S: DescScheduler,
 {
-    let shared = wk.shared();
     let mut idle_rounds = 0u32;
     while !shared.finished.load(Ordering::Acquire) {
         if let Some(c) = wk.try_pop() {

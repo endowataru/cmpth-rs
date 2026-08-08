@@ -176,7 +176,7 @@ where
         recursion_pool: S::RecursionPool::new(num_workers, recursion_pool_threshold::<S>()),
     });
     for w in shared.workers.iter() {
-        w.shared.set(Arc::as_ptr(&shared));
+        w.bind_scheduler(Arc::as_ptr(&shared));
     }
 
     // Build the calling native stack's own pseudo-descriptor — see
@@ -215,7 +215,7 @@ where
     let handles: Vec<_> = (1..num_workers)
         .map(|i| {
             let shared = Arc::clone(&shared);
-            S::Base::spawn(move || worker_loop(&shared.workers[i]))
+            S::Base::spawn(move || worker_loop(&shared.workers[i], &shared))
         })
         .collect();
 
@@ -230,6 +230,7 @@ where
     let root_desc_ptr = wk0.root_desc() as *const S::Desc as *mut S::Desc;
 
     let state2 = Arc::clone(&state);
+    let shared3 = Arc::clone(&shared);
     let scheduler_loop = move |wk: &UltWorker<S>, prev: SuspendedTaskToken<S::Desc>| {
         // Running on the scheduler loop's own fresh stack now, as
         // `wk0.root_desc()` (see this module's doc comment for why).
@@ -241,7 +242,7 @@ where
 
         // Ordinary dispatch loop, same one every worker OS thread runs,
         // until `StackfulInit::drop` sets `finished`.
-        worker_idle_loop(wk);
+        worker_idle_loop(wk, &shared3);
 
         // Join the other workers' OS threads — mirrors C++
         // `on_fork_root`'s `finish_workers()`.
