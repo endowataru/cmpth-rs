@@ -10,15 +10,16 @@ use crate::traits::common::TlsSlot;
 use crate::traits::stackful::ThreadSystem;
 use crate::resumable::common::deque::{Steal, WorkerRunQueue};
 use crate::resumable::common::external_queue::ExternalQueue;
-use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
+use crate::resumable::common::system::{DescScheduler, SchedulerSystem, WorkerSystem};
 use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
 
-/// State shared by all workers of one scheduler instance. Base-level
-/// (`S: SchedulerSystem`): shared by stackful-only, dual, and (eventually)
-/// stackless-only systems alike — only
+/// State shared by all workers of one scheduler instance. Worker-layer
+/// (`S: WorkerSystem`): only the pools/run-queue/external-queue axis, no
+/// dispatch (`execute`/`free_finished_desc`) — shared by stackful-only,
+/// dual, and (eventually) stackless-only systems alike — only
 /// [`init`](crate::resumable::stackful::init::init) (the stackful entry
 /// point) needs the stackful extension.
-pub struct Scheduler<S: SchedulerSystem> {
+pub struct Scheduler<S: WorkerSystem> {
     pub(crate) workers: Box<[UltWorker<S>]>,
     /// Cloneable stealer handles, one per worker, indexed the same as
     /// `workers`. A thief reaches a victim's run queue exclusively through

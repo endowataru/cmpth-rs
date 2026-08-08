@@ -7,7 +7,7 @@
 //! comment. The interface below is defined by *scheduling intent* (`push` /
 //! `defer`) rather than by position (`top` / `bottom`).
 //!
-//! Swap the implementation via [`crate::SchedulerSystem::RunQueue`].
+//! Swap the implementation via [`crate::WorkerSystem::RunQueue`].
 
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
@@ -57,7 +57,7 @@ pub enum Steal<T> {
 /// Generic over the element type `T` moved through the queue — neither
 /// provided implementation ever inspects `T`, only stores/returns it. Every
 /// concrete system today sets `T = SuspendedTaskToken<Self::Desc>` via
-/// [`crate::SchedulerSystem::Item`].
+/// [`crate::WorkerSystem::Item`].
 pub trait WorkerRunQueue<T: Send>: Send + Sync + 'static {
     type Stealer: RunQueueStealer<T>;
 

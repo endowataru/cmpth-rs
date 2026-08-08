@@ -12,8 +12,8 @@ use std::ptr;
 use crate::traits::stackful::{CondTransfer, Context, ContextPolicy, Transfer};
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, WorkerOps};
-use crate::resumable::common::system::SchedulerSystem;
-use crate::resumable::stackful::system::StackfulSchedulerSystem;
+use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
+use crate::resumable::stackful::system::{StackfulSchedulerSystem, StackfulWorkerSystem};
 use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, TaskDescCore};
 use crate::interchange::Transferred;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
@@ -29,9 +29,13 @@ use crate::resumable::stackful::desc::StackfulTaskDesc;
 /// inside the callback is therefore inherently race-free; no "saving in
 /// progress" flags or spin-wait handshakes are needed anywhere.
 ///
-/// Only implementable when `S: StackfulSchedulerSystem` (needs `S::Ctx`) — a
-/// stackless-only system has no context-switch policy to name.
-pub trait ContextSwitcher<S: StackfulSchedulerSystem>: Sized
+/// Only implementable when `S: StackfulWorkerSystem` (needs `S::Ctx`) — a
+/// stackless-only system has no context-switch policy to name. Worker-layer
+/// (`S: StackfulWorkerSystem`), not gated on dispatch (`SchedulerSystem`):
+/// switching contexts never touches `execute`/`free_finished_desc`. The
+/// concrete impl below (for [`UltWorker<S>`]) still needs `S: SchedulerSystem`
+/// too, since `UltWorker<S>` itself does.
+pub trait ContextSwitcher<S: StackfulWorkerSystem>: Sized
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -72,14 +76,15 @@ where
 // ---------------------------------------------------------------------------
 
 /// Root-continuation management: only meaningful when there is a real
-/// scheduler-loop stack a suspending ULT can fall back into.
-pub trait StackfulLocalQueue<S: StackfulSchedulerSystem>: LocalQueue<S>
+/// scheduler-loop stack a suspending ULT can fall back into. Worker-layer
+/// (`S: StackfulWorkerSystem`), same reasoning as [`ContextSwitcher`].
+pub trait StackfulLocalQueue<S: StackfulWorkerSystem>: LocalQueue<S>
 where
     S::Desc: StackfulTaskDesc,
 {
     /// Pop the next runnable continuation: local deque first, then the root
     /// (scheduler-loop) continuation. Forwards to
-    /// [`StackfulSchedulerSystem::pop_or_root`] — see that method for why the
+    /// [`StackfulWorkerSystem::pop_or_root`] — see that method for why the
     /// dispatch body lives on the system trait, not here.
     fn pop_or_root(&self) -> SuspendedTaskToken<S::Desc>;
 
@@ -156,10 +161,20 @@ where
 /// continuation (no `poll_fn` tag ever gets set, since `spawn_async` isn't
 /// reachable when `S::Desc` isn't `AsyncTaskDesc`), so this always performs
 /// a real context switch — no runtime check.
+///
+/// Lowest rung reachable: the fold trait [`StackfulSchedulerSystem`], not
+/// lower. `wk.suspend_to_cont`/`wk.set_root_cont` need `ContextSwitcher<S>`/
+/// `StackfulLocalQueue<S>` to be implemented for `UltWorker<S>`, and *that*
+/// impl (below) needs `DescScheduler` regardless — `cond_suspend_to_cont`'s
+/// shim calls `cur_task_token_mut`, which is only defined for `S:
+/// DescScheduler` (`common::worker`) — plus `StackfulWorkerSystem` for
+/// `S::Ctx`. `DescScheduler + StackfulWorkerSystem` together are exactly
+/// what the fold trait's blanket impl requires, so there is no narrower
+/// capability trait this can reach without first splitting `ContextSwitcher`
+/// itself (out of scope here).
 pub fn execute_stackful<S>(wk: &UltWorker<S>, cont: SuspendedTaskToken<S::Desc>)
 where
     S: StackfulSchedulerSystem,
-    S::Desc: StackfulTaskDesc,
 {
     let wk2 = wk.suspend_to_cont(cont, |wk, prev| wk.set_root_cont(prev));
     debug_assert!(std::ptr::eq(wk2 as *const UltWorker<S>, wk as *const UltWorker<S>));
@@ -167,10 +182,16 @@ where
 
 /// `pop_or_root` body for stackful-only systems: every popped item is a
 /// real, switchable continuation, so no requeue check is needed.
+///
+/// Lowest rung: [`DescScheduler`] — `wk.deque.try_pop()` returns `S::Item`,
+/// which this function's `SuspendedTaskToken<S::Desc>` return type needs
+/// pinned equal to via `DescScheduler`; `wk.take_root_cont()` only needs
+/// `SchedulerSystem`, already implied. Does *not* need `StackfulWorkerSystem`
+/// (no context switch happens here, so `S::Ctx` is never named) or
+/// `S::Desc: StackfulTaskDesc`.
 pub fn pop_or_root_stackful<S>(wk: &UltWorker<S>) -> SuspendedTaskToken<S::Desc>
 where
-    S: StackfulSchedulerSystem,
-    S::Desc: StackfulTaskDesc,
+    S: DescScheduler,
 {
     if let Some(c) = wk.deque.try_pop() {
         return c;
@@ -194,6 +215,13 @@ where
 
 // --- StackfulLocalQueue ---
 
+// `S: StackfulSchedulerSystem`, not the narrower `SchedulerSystem +
+// StackfulWorkerSystem` bound `StackfulLocalQueue`'s own trait declaration
+// uses: `pop_or_root` below calls `S::pop_or_root`, which (see
+// `StackfulWorkerSystem::pop_or_root`'s doc comment) needs `Self:
+// DescScheduler` — combined with `StackfulWorkerSystem`, that's exactly the
+// fold trait again (see `execute_stackful`'s doc comment for the same
+// dependency on `ContextSwitcher`'s impl just below).
 impl<S: StackfulSchedulerSystem> StackfulLocalQueue<S> for UltWorker<S>
 where
     S::Desc: StackfulTaskDesc,

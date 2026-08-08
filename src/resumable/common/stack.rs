@@ -120,7 +120,7 @@ unsafe fn dealloc_heap_stack(ptr: *mut u8, size: usize) {
 // ---------------------------------------------------------------------------
 
 /// Stack allocation policy.  Selected per system via
-/// [`StackfulSchedulerSystem::StackAlloc`](crate::StackfulSchedulerSystem::StackAlloc)
+/// [`StackfulWorkerSystem::StackAlloc`](crate::StackfulWorkerSystem::StackAlloc)
 /// (for real ULT stacks) or as the `A` parameter of
 /// [`ReturnPool`](crate::resumable::common::pool::ReturnPool)/
 /// [`SimplePool`](crate::resumable::common::pool::SimplePool) (for

@@ -7,7 +7,7 @@
 use std::task::{RawWaker, Waker};
 
 use crate::resumable::common::worker::{AsyncTaskPool, LocalQueue, UltWorker};
-use crate::resumable::common::system::DescScheduler;
+use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::stackless::system::StacklessSchedulerSystem;
 use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken};
 use crate::resumable::stackless::desc::WakerTaskDesc;
@@ -153,9 +153,14 @@ where
 /// # Safety
 /// No other references to `desc` may exist after this call (same contract
 /// as [`AsyncTaskPool::free_async_task`]).
+///
+/// Lowest rung: plain [`SchedulerSystem`] — `wk.free_async_task` only needs
+/// `AsyncTaskPool<S>` (`SchedulerSystem`-gated); `desc` is a raw `*mut
+/// S::Desc`, never `S::Item`, so this doesn't need the `Item`/`Worker`
+/// pinning `DescScheduler` adds.
 pub unsafe fn free_finished_desc_async<S>(wk: &UltWorker<S>, desc: *mut S::Desc)
 where
-    S: DescScheduler,
+    S: SchedulerSystem,
 {
     unsafe { wk.free_async_task(desc) };
 }

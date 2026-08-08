@@ -1,5 +1,6 @@
-//! [`SchedulerSystem`] — the base scheduler-system trait shared by every
-//! flavor (stackful, stackless, dual). Extended by
+//! [`WorkerSystem`]/[`SchedulerSystem`] — the base worker-lookup and
+//! dispatch traits shared by every flavor (stackful, stackless, dual).
+//! Extended by
 //! [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem)
 //! (real-stack capability) and
 //! [`StacklessTaskSystem`](crate::resumable::stackless::system::StacklessTaskSystem)
@@ -63,15 +64,14 @@ pub trait PoolSystem: Sized + Send + Sync + 'static {
     type ExternalQueue: ExternalQueue<Self>;
 }
 
-/// Base system interface required by [`UltWorker`] and
-/// [`Scheduler`](crate::resumable::common::scheduler::Scheduler), independent of whether
-/// tasks are stackful ULTs, stackless `spawn_async` futures, or both.
-///
-/// Deliberately does **not** name a context-switch policy or stack
-/// allocator: a stackless-only system has no real stack to switch into, so
-/// requiring one here would force it to name machinery it never uses. See
-/// [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem) for the stackful extension.
-pub trait SchedulerSystem: PoolSystem {
+/// Worker-layer subset of what used to be [`SchedulerSystem`]: the threading
+/// base, the run-queue/item types, current-worker lookup, and the TLS slot
+/// that anchors it. Split out as its own supertrait so this axis — "how do I
+/// find/drive a worker" — can be named independently of dispatch
+/// ([`SchedulerSystem::execute`]/[`SchedulerSystem::free_finished_desc`]),
+/// which a later step moves off `SchedulerSystem` entirely into capability
+/// traits that must not require it.
+pub trait WorkerSystem: PoolSystem {
     /// The threading system this scheduler runs on.
     type Base: ThreadSystem + NestableSystem;
 
@@ -103,7 +103,18 @@ pub trait SchedulerSystem: PoolSystem {
     /// level.  Each concrete system gets its own `static`, anchored by the
     /// function body of this implementation.
     fn worker_tls() -> &'static <Self::Base as NestableSystem>::ThreadSpecific<Self::Worker>;
+}
 
+/// Dispatch subset of the base scheduler-system trait shared by every
+/// flavor (stackful, stackless, dual): running a popped continuation and
+/// freeing a finished descriptor.  Independent of whether tasks are stackful
+/// ULTs, stackless `spawn_async` futures, or both.
+///
+/// Deliberately does **not** name a context-switch policy or stack
+/// allocator: a stackless-only system has no real stack to switch into, so
+/// requiring one here would force it to name machinery it never uses. See
+/// [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem) for the stackful extension.
+pub trait SchedulerSystem: WorkerSystem {
     /// Run one continuation popped off a deque/root/external-queue.
     ///
     /// Required, with **no default**: the correct body depends entirely on
@@ -152,11 +163,11 @@ pub trait SchedulerSystem: PoolSystem {
 /// UltWorker<..>` on every generic function that touches both the abstract
 /// associated types and the concrete ones.
 pub trait DescScheduler:
-    SchedulerSystem<Item = SuspendedTaskToken<<Self as PoolSystem>::Desc>, Worker = UltWorker<Self>>
+    SchedulerSystem + WorkerSystem<Item = SuspendedTaskToken<<Self as PoolSystem>::Desc>, Worker = UltWorker<Self>>
 {
 }
 
-impl<S: SchedulerSystem<Item = SuspendedTaskToken<<S as PoolSystem>::Desc>, Worker = UltWorker<S>>> DescScheduler for S {}
+impl<S: SchedulerSystem + WorkerSystem<Item = SuspendedTaskToken<<S as PoolSystem>::Desc>, Worker = UltWorker<S>>> DescScheduler for S {}
 
 // ---------------------------------------------------------------------------
 // Blanket TaskSystem for every SchedulerSystem
