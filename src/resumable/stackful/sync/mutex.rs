@@ -6,7 +6,7 @@ use crate::spin::SpinLock;
 use crate::traits::{Resumable, StackfulMutex, StackfulResumable};
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::system::PoolSystem;
-use crate::resumable::stackful::system::StackfulSchedulerSystem;
+use crate::resumable::stackful::system::{StackfulSchedulerSystem, StackfulWorkerSystem};
 
 // ---------------------------------------------------------------------------
 // MutexCore
@@ -43,7 +43,7 @@ fn mutex_lock<M: MutexCore>(m: &M) -> MutexGuard<'_, M> where <<M as MutexCore>:
         return MutexGuard { mutex: m };
     }
     s.waiters.push_back(Default::default());
-    let sth: *const <M::StackfulSchedulerSystem as StackfulSchedulerSystem>::SuspendedThread = s.waiters.back().unwrap();
+    let sth: *const <M::StackfulSchedulerSystem as StackfulWorkerSystem>::SuspendedThread = s.waiters.back().unwrap();
     unsafe { &*sth }.wait_with(move || drop(s));
     MutexGuard { mutex: m }
 }

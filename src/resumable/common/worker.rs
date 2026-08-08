@@ -19,7 +19,7 @@ use std::ptr;
 use crate::resumable::common::deque::{RunQueueStealer, Steal, WorkerRunQueue};
 use crate::resumable::common::pool::{DescPool, DynamicPool};
 use crate::resumable::common::scheduler::Scheduler;
-use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
+use crate::resumable::common::system::{DescScheduler, SchedulerSystem, WorkerSystem};
 use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, TaskDescAlloc};
 
 // ---------------------------------------------------------------------------
@@ -27,7 +27,7 @@ use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, TaskD
 // ---------------------------------------------------------------------------
 
 /// Task-descriptor allocation with a per-worker free list.
-pub trait TaskPool<S: SchedulerSystem> {
+pub trait TaskPool<S: WorkerSystem> {
     /// Allocate a descriptor for a ULT stack. The size comes from the
     /// pool's own configuration (`Scheduler::stack_size`, set by
     /// [`StackfulBuilder::stack_size`](crate::traits::system::stackful::StackfulBuilder::stack_size)),
@@ -52,7 +52,7 @@ pub trait TaskPool<S: SchedulerSystem> {
 /// `S::Pool` `TaskPool` allocates from (a dual system needs both live at
 /// once — see [`PoolSystem::AsyncPool`](crate::resumable::common::system::PoolSystem::AsyncPool)'s doc comment) — and this trait
 /// is stackless-only, unlike `TaskPool`, which every system needs.
-pub trait AsyncTaskPool<S: SchedulerSystem> {
+pub trait AsyncTaskPool<S: WorkerSystem> {
     /// Allocate a descriptor with storage for at least `size` bytes (see
     /// [`DescPool::alloc`]).
     fn alloc_async_task(&self, has_handle: bool, size: usize) -> *mut S::Desc;
@@ -94,12 +94,12 @@ pub trait RecursionAlloc {
 
 /// Per-worker work-stealing run queue, independent of task flavor.
 ///
-/// Speaks [`SchedulerSystem::Item`], never `SuspendedTaskToken<S::Desc>`:
+/// Speaks [`WorkerSystem::Item`], never `SuspendedTaskToken<S::Desc>`:
 /// this layer moves work around without looking inside it, so naming the
 /// descriptor here would be a claim it does not need to make. The item stops
 /// being opaque exactly one method later, in
 /// [`WorkerOps::execute`].
-pub trait LocalQueue<S: SchedulerSystem> {
+pub trait LocalQueue<S: WorkerSystem> {
     /// Run `c` next on this worker (will run before anything already
     /// queued).
     fn push(&self, c: S::Item);
@@ -130,9 +130,9 @@ pub trait LocalQueue<S: SchedulerSystem> {
 
 /// Base worker interface: locating the current worker, and running one
 /// popped continuation. Named `WorkerOps` (not `Worker`) to keep the name
-/// free for [`SchedulerSystem::Worker`] — the associated type naming which
+/// free for [`WorkerSystem::Worker`] — the associated type naming which
 /// concrete struct implements this trait for a given system.
-pub trait WorkerOps<S: SchedulerSystem>: TaskPool<S> + LocalQueue<S> + Send + Sync + 'static {
+pub trait WorkerOps<S: WorkerSystem>: TaskPool<S> + LocalQueue<S> + Send + Sync + 'static {
     /// The worker currently running on this base thread, if any.
     fn current() -> Option<&'static Self>
     where
@@ -148,7 +148,7 @@ pub trait WorkerOps<S: SchedulerSystem>: TaskPool<S> + LocalQueue<S> + Send + Sy
 // Concrete implementation: UltWorker<S>
 // ---------------------------------------------------------------------------
 
-pub struct UltWorker<S: SchedulerSystem> {
+pub struct UltWorker<S: WorkerSystem> {
     num: usize,
     pub(crate) deque: S::RunQueue,
     /// The task currently running on this worker, if any. `None` means

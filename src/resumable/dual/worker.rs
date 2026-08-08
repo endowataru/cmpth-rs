@@ -8,6 +8,7 @@
 
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::worker::{AsyncTaskPool, TaskPool, UltWorker};
+use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulLocalQueue};
 use crate::resumable::common::desc::SuspendedTaskToken;
@@ -16,6 +17,13 @@ use crate::resumable::stackless::desc::AsyncTaskDesc;
 
 /// `execute` body for dual systems: today's original logic — check
 /// `poll_fn` first, and either poll inline or perform a real context switch.
+///
+/// Lowest rung reachable: the fold trait [`StackfulSchedulerSystem`], not
+/// lower — same as [`crate::resumable::stackful::worker::execute_stackful`]
+/// for the sync-ULT branch (needs `ContextSwitcher`/`StackfulLocalQueue`,
+/// which need `DescScheduler + StackfulWorkerSystem`), and the poll_fn
+/// branch's `crate::resumable::stackless::worker::run_async_poll` needs
+/// `StacklessSchedulerSystem` (itself `DescScheduler`-gated) regardless.
 pub fn execute_dual<S>(wk: &UltWorker<S>, cont: SuspendedTaskToken<S::Desc>)
 where
     S: StackfulSchedulerSystem,
@@ -37,10 +45,17 @@ where
 /// `pop_or_root` body for dual systems: today's original logic — an async
 /// task popped off the top has no saved context to switch into, so requeue
 /// it and fall back to the root (scheduler-loop) continuation instead.
+///
+/// Lowest rung: [`DescScheduler`] + `S::Desc: AsyncTaskDesc` — same `Item`
+/// pinning need as
+/// [`crate::resumable::stackful::worker::pop_or_root_stackful`] (`wk.deque`
+/// round-trips `S::Item`), plus `AsyncTaskDesc` for `is_poll_fn_dispatch`.
+/// No context switch happens here, so — unlike `execute_dual` — this needs
+/// neither `StackfulWorkerSystem` nor `StackfulTaskDesc`.
 pub fn pop_or_root_dual<S>(wk: &UltWorker<S>) -> SuspendedTaskToken<S::Desc>
 where
-    S: StackfulSchedulerSystem,
-    S::Desc: StackfulTaskDesc + AsyncTaskDesc,
+    S: DescScheduler,
+    S::Desc: AsyncTaskDesc,
 {
     if let Some(c) = wk.deque.try_pop() {
         if c.is_poll_fn_dispatch() {
@@ -63,10 +78,16 @@ where
 /// # Safety
 /// No other references to `desc` may exist after this call (same contract
 /// as [`TaskPool::free_task`]/[`AsyncTaskPool::free_async_task`]).
+///
+/// Lowest rung: plain [`SchedulerSystem`] + `S::Desc: AsyncTaskDesc` — the
+/// biggest drop of the three dual functions: `desc` is a raw `*mut S::Desc`
+/// throughout (never `S::Item`), so this needs neither `DescScheduler` (no
+/// `Item`/`Worker` pinning) nor `StackfulWorkerSystem`/`StackfulTaskDesc` (no
+/// context switch).
 pub unsafe fn free_finished_desc_dual<S>(wk: &UltWorker<S>, desc: *mut S::Desc)
 where
-    S: StackfulSchedulerSystem,
-    S::Desc: StackfulTaskDesc + AsyncTaskDesc,
+    S: SchedulerSystem,
+    S::Desc: AsyncTaskDesc,
 {
     // SAFETY: `desc` is finished (about to be freed) — `TaskDesc::join_state`'s
     // own contract guarantees the exit path never touches the descriptor

@@ -51,8 +51,8 @@ pub use resumable::stackful::suspended::{BasicStackfulOnlyResumable, StackfulOnl
 pub use resumable::stackful::sync::{Barrier as UltBarrier, McsDelegator, McsMutex, McsMutexGuard, McsCondvar, BarrierCore, MutexCore};
 pub use resumable::common::sync::{DualBarrier as UltDualBarrier, DualMutex as UltDualMutex, DualMutexGuard as UltDualMutexGuard};
 pub use resumable::stackful::sync::{delegator, Producer as DelegatorProducer};
-pub use resumable::common::system::{PoolSystem, SchedulerSystem};
-pub use resumable::stackful::system::{StackfulSchedulerSystem, StackfulTaskSystem, UltIdentity};
+pub use resumable::common::system::{PoolSystem, SchedulerSystem, WorkerSystem};
+pub use resumable::stackful::system::{StackfulSchedulerSystem, StackfulTaskSystem, StackfulWorkerSystem, UltIdentity};
 pub use resumable::stackless::system::{StacklessSchedulerSystem, StacklessTaskSystem, UltAsyncIdentity, UltAsyncSystem};
 pub use resumable::stackful::tls::UltTls;
 pub use resumable::common::worker::{LocalQueue, TaskPool, UltWorker, WorkerOps, current_worker};
@@ -90,7 +90,7 @@ impl resumable::common::system::PoolSystem for DefaultDualTaskSystem {
     type RecursionPool   = resumable::common::pool::ThresholdPool<resumable::common::pool::BlockPool>;
 }
 
-impl resumable::common::system::SchedulerSystem for DefaultDualTaskSystem {
+impl resumable::common::system::WorkerSystem for DefaultDualTaskSystem {
     type Base  = OsSystem;
     type Item  = SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>;
     type Worker = UltWorker<Self>;
@@ -101,10 +101,12 @@ impl resumable::common::system::SchedulerSystem for DefaultDualTaskSystem {
         static A: TlsAnchor = TlsAnchor::new();
         TlsSlot::from_anchor(&A)
     }
+}
 
+impl resumable::common::system::SchedulerSystem for DefaultDualTaskSystem {
     // Dual system: a popped continuation may be either a real ULT or an
     // async task, so dispatch needs the poll_fn check (see execute_dual's
-    // doc comment / StackfulSchedulerSystem::pop_or_root below for why this
+    // doc comment / StackfulWorkerSystem::pop_or_root below for why this
     // can't just be the stackful-only default).
     fn execute(wk: &UltWorker<Self>, cont: SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>) {
         resumable::dual::worker::execute_dual(wk, cont)
@@ -115,7 +117,7 @@ impl resumable::common::system::SchedulerSystem for DefaultDualTaskSystem {
     }
 }
 
-impl resumable::stackful::system::StackfulSchedulerSystem for DefaultDualTaskSystem {
+impl resumable::stackful::system::StackfulWorkerSystem for DefaultDualTaskSystem {
     type Ctx   = NativeContext;
     type StackAlloc = resumable::common::stack::HeapStack;
     const STACK_SIZE: usize = 64 * 1024;
@@ -132,7 +134,7 @@ impl ThreadSystem for DefaultDualTaskSystem {
         use resumable::stackful::worker::StackfulWorker;
         match UltWorker::<Self>::current() {
             Some(wk) => { wk.yield_now(); }
-            None => <<Self as SchedulerSystem>::Base as ThreadSystem>::yield_now(),
+            None => <<Self as WorkerSystem>::Base as ThreadSystem>::yield_now(),
         }
     }
 
@@ -180,7 +182,7 @@ impl resumable::common::system::PoolSystem for DefaultNestedDualTaskSystem {
     type RecursionPool   = resumable::common::pool::ThresholdPool<resumable::common::pool::BlockPool>;
 }
 
-impl resumable::common::system::SchedulerSystem for DefaultNestedDualTaskSystem {
+impl resumable::common::system::WorkerSystem for DefaultNestedDualTaskSystem {
     type Base  = DefaultDualTaskSystem;
     type Item  = SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>;
     type Worker = UltWorker<Self>;
@@ -191,7 +193,9 @@ impl resumable::common::system::SchedulerSystem for DefaultNestedDualTaskSystem 
         static A: TlsAnchor = TlsAnchor::new();
         TlsSlot::from_anchor(&A)
     }
+}
 
+impl resumable::common::system::SchedulerSystem for DefaultNestedDualTaskSystem {
     fn execute(wk: &UltWorker<Self>, cont: SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>) {
         resumable::dual::worker::execute_dual(wk, cont)
     }
@@ -201,7 +205,7 @@ impl resumable::common::system::SchedulerSystem for DefaultNestedDualTaskSystem 
     }
 }
 
-impl resumable::stackful::system::StackfulSchedulerSystem for DefaultNestedDualTaskSystem {
+impl resumable::stackful::system::StackfulWorkerSystem for DefaultNestedDualTaskSystem {
     type Ctx   = NativeContext;
     type StackAlloc = resumable::common::stack::HeapStack;
     const STACK_SIZE: usize = 64 * 1024;
@@ -218,7 +222,7 @@ impl ThreadSystem for DefaultNestedDualTaskSystem {
         use resumable::stackful::worker::StackfulWorker;
         match UltWorker::<Self>::current() {
             Some(wk) => { wk.yield_now(); }
-            None => <<Self as SchedulerSystem>::Base as ThreadSystem>::yield_now(),
+            None => <<Self as WorkerSystem>::Base as ThreadSystem>::yield_now(),
         }
     }
 

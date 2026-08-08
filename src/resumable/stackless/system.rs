@@ -14,7 +14,7 @@ use std::marker::PhantomData;
 use crate::traits::stackful::{NestableSystem, ThreadSystem};
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::lookup::CurrentLookup;
-use crate::resumable::common::system::{DescScheduler, PoolSystem, SchedulerSystem};
+use crate::resumable::common::system::{DescScheduler, PoolSystem, SchedulerSystem, WorkerSystem};
 use crate::resumable::common::worker::{UltWorker, WorkerOps};
 use crate::resumable::stackless::desc::AsyncTaskDesc;
 use crate::traits::scoped::ScopedStacklessTaskSystem;
@@ -269,7 +269,7 @@ pub trait UltAsyncIdentity: Sized + Send + Sync + 'static {
     where
         UltAsyncSystem<Self>: SchedulerSystem;
 
-    /// The per-system TLS anchor backing [`SchedulerSystem::worker_tls`].
+    /// The per-system TLS anchor backing [`WorkerSystem::worker_tls`].
     /// Named in terms of [`UltAsyncSystem<Self>`] — the actual final
     /// system type — not bare `Self`, since `Self` here is just the config
     /// marker; see this trait's own doc comment for why.
@@ -297,7 +297,7 @@ impl<M: UltAsyncIdentity> PoolSystem for UltAsyncSystem<M> {
     type RecursionPool = crate::resumable::common::pool::ThresholdPool<crate::resumable::common::pool::BlockPool>;
 }
 
-impl<M: UltAsyncIdentity> SchedulerSystem for UltAsyncSystem<M> {
+impl<M: UltAsyncIdentity> WorkerSystem for UltAsyncSystem<M> {
     type Base  = M::Base;
     type Item  = crate::resumable::common::desc::SuspendedTaskToken<M::Desc>;
     type Worker = UltWorker<Self>;
@@ -307,7 +307,9 @@ impl<M: UltAsyncIdentity> SchedulerSystem for UltAsyncSystem<M> {
     fn worker_tls() -> &'static <M::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         <M as UltAsyncIdentity>::worker_tls_anchor()
     }
+}
 
+impl<M: UltAsyncIdentity> SchedulerSystem for UltAsyncSystem<M> {
     // Stackless-only: always poll, never switch — no poll_fn tag check,
     // because every task on this system is a poll_fn task.
     fn execute(wk: &UltWorker<Self>, cont: crate::resumable::common::desc::SuspendedTaskToken<M::Desc>) {

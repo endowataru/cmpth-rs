@@ -734,7 +734,7 @@ impl cmpth::PoolSystem for ManualSystem {
     type RecursionPool   = cmpth::resumable::common::pool::ThresholdPool<cmpth::resumable::common::pool::BlockPool>;
 }
 
-impl cmpth::SchedulerSystem for ManualSystem {
+impl cmpth::WorkerSystem for ManualSystem {
     type Base  = OsSystem;
     type Item  = cmpth::SuspendedTaskToken<DualTaskDesc<Self>>;
     type Worker = UltWorker<Self>;
@@ -748,7 +748,9 @@ impl cmpth::SchedulerSystem for ManualSystem {
             <OsTls<UltWorker<ManualSystem>> as TlsSlot<UltWorker<ManualSystem>>>::INIT;
         &TLS
     }
+}
 
+impl cmpth::SchedulerSystem for ManualSystem {
     // Stackful-only: no poll_fn tag check, see `execute_stackful`'s doc comment.
     fn execute(wk: &UltWorker<Self>, cont: cmpth::SuspendedTaskToken<DualTaskDesc<Self>>) {
         cmpth::resumable::stackful::worker::execute_stackful(wk, cont)
@@ -759,7 +761,7 @@ impl cmpth::SchedulerSystem for ManualSystem {
     }
 }
 
-impl cmpth::StackfulSchedulerSystem for ManualSystem {
+impl cmpth::StackfulWorkerSystem for ManualSystem {
     type Ctx   = NativeContext;
     type StackAlloc = HeapStack;
     const STACK_SIZE: usize = 64 * 1024;
@@ -840,7 +842,7 @@ impl cmpth::PoolSystem for PollerSystem {
     type RecursionPool   = cmpth::resumable::common::pool::ThresholdPool<cmpth::resumable::common::pool::BlockPool>;
 }
 
-impl cmpth::SchedulerSystem for PollerSystem {
+impl cmpth::WorkerSystem for PollerSystem {
     type Base  = OsSystem;
     type Item  = cmpth::SuspendedTaskToken<StackfulOnlyTaskDesc<Self>>;
     type Worker = UltWorker<Self>;
@@ -852,7 +854,9 @@ impl cmpth::SchedulerSystem for PollerSystem {
             <OsTls<UltWorker<PollerSystem>> as TlsSlot<UltWorker<PollerSystem>>>::INIT;
         &TLS
     }
+}
 
+impl cmpth::SchedulerSystem for PollerSystem {
     // Stackful-only: no poll_fn tag check, see `execute_stackful`'s doc comment.
     fn execute(wk: &UltWorker<Self>, cont: cmpth::SuspendedTaskToken<StackfulOnlyTaskDesc<Self>>) {
         cmpth::resumable::stackful::worker::execute_stackful(wk, cont)
@@ -863,7 +867,7 @@ impl cmpth::SchedulerSystem for PollerSystem {
     }
 }
 
-impl cmpth::StackfulSchedulerSystem for PollerSystem {
+impl cmpth::StackfulWorkerSystem for PollerSystem {
     type Ctx   = NativeContext;
     type StackAlloc = HeapStack;
     const STACK_SIZE: usize = 64 * 1024;

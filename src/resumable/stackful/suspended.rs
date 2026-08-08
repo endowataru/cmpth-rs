@@ -4,8 +4,8 @@ use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
 
 use crate::traits::{Resumable, StackfulResumable};
-use crate::resumable::common::system::PoolSystem;
-use crate::resumable::stackful::system::StackfulSchedulerSystem;
+use crate::resumable::common::system::{DescScheduler, PoolSystem};
+use crate::resumable::stackful::system::StackfulWorkerSystem;
 use crate::resumable::common::desc::SuspendedTaskToken;
 use crate::interchange::AtomicSlot;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
@@ -21,9 +21,9 @@ use crate::resumable::stackful::worker::{ContextSwitcher, StackfulWorker};
 /// implementing `cont()`.
 pub trait StackfulOnlyResumableCore: Send + Default
 where
-    <Self::StackfulSchedulerSystem as PoolSystem>::Desc: crate::resumable::stackful::desc::StackfulTaskDesc,
+    <Self::StackfulWorkerSystem as PoolSystem>::Desc: crate::resumable::stackful::desc::StackfulTaskDesc,
 {
-    type StackfulSchedulerSystem: StackfulSchedulerSystem;
+    type StackfulWorkerSystem: StackfulWorkerSystem;
 
     /// Access the raw continuation slot.
     ///
@@ -33,19 +33,37 @@ where
     /// with an `Acquire` swap.  On weakly-ordered machines (AArch64) a plain
     /// store here can become visible before the saved context does, letting
     /// the notifier resume a continuation whose frame is not yet written.
-    fn cont(&self) -> &AtomicSlot<SuspendedTaskToken<<Self::StackfulSchedulerSystem as PoolSystem>::Desc>>;
+    fn cont(&self) -> &AtomicSlot<SuspendedTaskToken<<Self::StackfulWorkerSystem as PoolSystem>::Desc>>;
 
     // --- helpers shared by the blanket impls below ---------------------------
 
-    fn take_cont(&self) -> SuspendedTaskToken<<Self::StackfulSchedulerSystem as PoolSystem>::Desc> {
+    fn take_cont(&self) -> SuspendedTaskToken<<Self::StackfulWorkerSystem as PoolSystem>::Desc> {
         // `take` (not load+store) so that concurrent take/cancel pairs can
         // never both obtain the continuation.
         self.cont().take(Ordering::Acquire)
             .expect("StackfulOnlyResumableCore: no parked continuation")
     }
 
-    fn wk() -> &'static UltWorker<Self::StackfulSchedulerSystem> {
-        UltWorker::<Self::StackfulSchedulerSystem>::current()
+    /// `Self::StackfulWorkerSystem: DescScheduler` is not part of this
+    /// trait's own associated-type bound (only plain `StackfulWorkerSystem`
+    /// — see that bound's declaration above): the equality constraint on
+    /// [`StackfulWorkerSystem::SuspendedThread`]
+    /// (`StackfulOnlyResumableCore<StackfulWorkerSystem = Self>`) is written
+    /// from *inside* the `StackfulWorkerSystem` trait, where `Self` is only
+    /// known to be `StackfulWorkerSystem`, not `DescScheduler` — so the
+    /// bound has to live here instead, on the one method that actually needs
+    /// a live worker. Combined with the trait-level `StackfulWorkerSystem`
+    /// bound, this is enough to derive the fold trait
+    /// [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem)
+    /// (its blanket impl needs exactly `SchedulerSystem + StackfulWorkerSystem
+    /// + DescScheduler<Desc: ...>`, and `DescScheduler` already implies
+    /// `SchedulerSystem`), which is what makes `UltWorker::current()` below
+    /// resolve.
+    fn wk() -> &'static UltWorker<Self::StackfulWorkerSystem>
+    where
+        Self::StackfulWorkerSystem: DescScheduler,
+    {
+        UltWorker::<Self::StackfulWorkerSystem>::current()
             .expect("cmpth: StackfulOnlyResumableCore operation called outside a worker")
     }
 }
@@ -55,7 +73,10 @@ where
 /// switch here — the slot can only ever hold a real continuation, unlike
 /// `DualResumable`, which may hold an async waiter and has to fall back to
 /// a plain wake internally.
-impl<T: StackfulOnlyResumableCore> Resumable<T::StackfulSchedulerSystem> for T {
+impl<T: StackfulOnlyResumableCore> Resumable<T::StackfulWorkerSystem> for T
+where
+    T::StackfulWorkerSystem: DescScheduler,
+{
     fn is_set(&self) -> bool {
         self.cont().is_set(Ordering::Acquire)
     }
@@ -66,9 +87,12 @@ impl<T: StackfulOnlyResumableCore> Resumable<T::StackfulSchedulerSystem> for T {
     }
 }
 
-impl<T: StackfulOnlyResumableCore> StackfulResumable<T::StackfulSchedulerSystem> for T {
+impl<T: StackfulOnlyResumableCore> StackfulResumable<T::StackfulWorkerSystem> for T
+where
+    T::StackfulWorkerSystem: DescScheduler,
+{
     fn wait_with<F: FnOnce()>(&self, f: F) {
-        type D<T> = <<T as StackfulOnlyResumableCore>::StackfulSchedulerSystem as PoolSystem>::Desc;
+        type D<T> = <<T as StackfulOnlyResumableCore>::StackfulWorkerSystem as PoolSystem>::Desc;
         let slot = self.cont() as *const AtomicSlot<SuspendedTaskToken<D<Self>>>;
         Self::wk().suspend_to_sched(move |_wk, prev| {
             // Release: publishes the context saved just before this callback.
@@ -80,7 +104,7 @@ impl<T: StackfulOnlyResumableCore> StackfulResumable<T::StackfulSchedulerSystem>
     }
 
     fn wait_with_cond<F: FnOnce() -> bool>(&self, f: F) {
-        type D<T> = <<T as StackfulOnlyResumableCore>::StackfulSchedulerSystem as PoolSystem>::Desc;
+        type D<T> = <<T as StackfulOnlyResumableCore>::StackfulWorkerSystem as PoolSystem>::Desc;
         let slot = self.cont() as *const AtomicSlot<SuspendedTaskToken<D<Self>>>;
         Self::wk().cond_suspend_to_sched(move |_wk, prev| {
             // SAFETY: same as `wait_with` — `slot` outlives this callback.
@@ -101,7 +125,7 @@ impl<T: StackfulOnlyResumableCore> StackfulResumable<T::StackfulSchedulerSystem>
     }
 
     fn swap(&self, next: &Self) {
-        type D<T> = <<T as StackfulOnlyResumableCore>::StackfulSchedulerSystem as PoolSystem>::Desc;
+        type D<T> = <<T as StackfulOnlyResumableCore>::StackfulWorkerSystem as PoolSystem>::Desc;
         debug_assert!(!self.is_set());
         let wk = Self::wk();
         let c = next.take_cont();
@@ -118,24 +142,24 @@ impl<T: StackfulOnlyResumableCore> StackfulResumable<T::StackfulSchedulerSystem>
 /// [`StackfulOnlyResumableCore`] by providing just the `cont()` accessor;
 /// all behaviour comes from the blanket [`Resumable`]/[`StackfulResumable`]
 /// impls above.
-pub struct BasicStackfulOnlyResumable<S: StackfulSchedulerSystem> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+pub struct BasicStackfulOnlyResumable<S: StackfulWorkerSystem> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     cont: AtomicSlot<SuspendedTaskToken<S::Desc>>,
     _marker: PhantomData<S>,
 }
 
-unsafe impl<S: StackfulSchedulerSystem> Send for BasicStackfulOnlyResumable<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {}
+unsafe impl<S: StackfulWorkerSystem> Send for BasicStackfulOnlyResumable<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {}
 
-impl<S: StackfulSchedulerSystem> Default for BasicStackfulOnlyResumable<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulWorkerSystem> Default for BasicStackfulOnlyResumable<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     fn default() -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc { Self::new() }
 }
 
-impl<S: StackfulSchedulerSystem> BasicStackfulOnlyResumable<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulWorkerSystem> BasicStackfulOnlyResumable<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     pub const fn new() -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc {
         BasicStackfulOnlyResumable { cont: AtomicSlot::empty(), _marker: PhantomData }
     }
 }
 
-impl<S: StackfulSchedulerSystem> StackfulOnlyResumableCore for BasicStackfulOnlyResumable<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {
-    type StackfulSchedulerSystem = S;
+impl<S: StackfulWorkerSystem> StackfulOnlyResumableCore for BasicStackfulOnlyResumable<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+    type StackfulWorkerSystem = S;
     fn cont(&self) -> &AtomicSlot<SuspendedTaskToken<S::Desc>> where <S as PoolSystem>::Desc: StackfulTaskDesc { &self.cont }
 }

@@ -4,7 +4,7 @@ use crate::spin::SpinLock;
 use crate::traits::{BarrierWaitResult, Resumable, StackfulBarrier, StackfulResumable};
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::system::PoolSystem;
-use crate::resumable::stackful::system::StackfulSchedulerSystem;
+use crate::resumable::stackful::system::{StackfulSchedulerSystem, StackfulWorkerSystem};
 
 // ---------------------------------------------------------------------------
 // BarrierCore
@@ -46,7 +46,7 @@ impl<M: BarrierCore> StackfulBarrier for M {
             return BarrierWaitResult { is_leader: true };
         }
         s.waiters.push_back(Default::default());
-        let sth: *const <<Self as BarrierCore>::StackfulSchedulerSystem as StackfulSchedulerSystem>::SuspendedThread = s.waiters.back().unwrap();
+        let sth: *const <<Self as BarrierCore>::StackfulSchedulerSystem as StackfulWorkerSystem>::SuspendedThread = s.waiters.back().unwrap();
         unsafe { &*sth }.wait_with(move || drop(s));
         BarrierWaitResult { is_leader: false }
     }
