@@ -480,7 +480,7 @@ impl<S: WorkerSystem> LocalQueue<S> for UltWorker<S> {
 
 // --- WorkerOps ---
 
-impl<S: DescScheduler> WorkerOps<S> for UltWorker<S> {
+impl<S: WorkerSystem<Worker = UltWorker<S>>> WorkerOps<S> for UltWorker<S> {
     fn current() -> Option<&'static Self> {
         <S::Lookup as crate::resumable::common::lookup::CurrentLookup<S>>::current()
     }
