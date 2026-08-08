@@ -78,7 +78,7 @@ use crate::resumable::common::external_queue::ExternalQueue;
 use crate::resumable::common::pool::{DescPool, DynamicPool};
 use crate::resumable::common::scheduler::{recursion_pool_threshold, worker_idle_loop, worker_loop, Scheduler};
 use crate::resumable::common::stack::{StackAlloc as _, StackMem, UltStackMemory as _};
-use crate::resumable::common::thread::align_down;
+use crate::resumable::common::thread::{align_down, JoinHandle};
 use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
 use crate::resumable::stackful::desc::{HasCtx, StackfulTaskDesc};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
@@ -135,6 +135,14 @@ where
 {
     shared: Arc<Scheduler<S>>,
     state: Arc<InitState<S>>,
+    /// `S::ExternalQueue::run_service`, spawned as an ordinary task once
+    /// `NEEDS_SERVICE` says it's needed (e.g. `PollerUltQueue`'s poller
+    /// ULT) — `None` when the external queue has no service to run (e.g.
+    /// the default `StealPathQueue`). `Drop` stops and joins it *before*
+    /// the rest of teardown, so the closure below can safely hold a strong
+    /// `Arc<Scheduler<S>>` with no cycle: by the time the scheduler itself
+    /// could be dropped, this handle is already gone.
+    service_handle: Option<JoinHandle<S, ()>>,
 }
 
 /// Standalone init: bring up `num_workers` workers, then return with the
@@ -170,7 +178,6 @@ where
     for w in shared.workers.iter() {
         w.shared.set(Arc::as_ptr(&shared));
     }
-    shared.external_queue.on_start(&shared);
 
     // Build the calling native stack's own pseudo-descriptor — see
     // `InitState::caller_desc`'s doc comment for why this can't just be
@@ -283,7 +290,25 @@ where
     // moment the C++ initializer's own constructor comment describes. May
     // be running on a different worker (migration) than the one `init` was
     // called on.
-    StackfulInit { shared, state }
+    //
+    // *Now* — and only now — is `spawn` available: it needs `UltWorker::
+    // current()`, which is exactly what the switch above just established.
+    // If the external queue needs a service task (`PollerUltQueue`'s
+    // poller ULT), spawn it as an ordinary, stealable task like any other.
+    // The closure captures a clone of `shared` rather than reaching it
+    // through a `Weak` — safe because `Drop` below joins this handle before
+    // the scheduler can ever be torn down, so the strong `Arc` never
+    // outlives it.
+    let service_handle = if <S::ExternalQueue as ExternalQueue<S>>::NEEDS_SERVICE {
+        let shared_for_service = Arc::clone(&shared);
+        Some(crate::resumable::stackful::thread::spawn::<S, (), _>(move || {
+            shared_for_service.external_queue.run_service();
+        }))
+    } else {
+        None
+    };
+
+    StackfulInit { shared, state, service_handle }
 }
 
 impl<S> Drop for StackfulInit<S>
@@ -309,6 +334,18 @@ where
                  if the panic needs to propagate to the caller."
             );
             std::process::abort();
+        }
+
+        // Stop and join the external queue's service task (if any) before
+        // anything else: this is what makes the strong `Arc<Scheduler<S>>`
+        // the spawn closure in `init` captured safe to hold — by the time
+        // `finished` is set and the rest of teardown runs below, that
+        // closure (and its `Arc`) is already gone, so there is no cycle to
+        // worry about. A panic inside `run_service` propagates from here
+        // the same way any other spawned task's panic would.
+        self.shared.external_queue.stop_service();
+        if let Some(h) = self.service_handle.take() {
+            JoinHandleLike::join(h);
         }
 
         self.shared.finished.store(true, Ordering::Release);

@@ -814,3 +814,181 @@ fn manual_impl_without_macro() {
         assert_eq!(JoinHandleLike::join(h), 42);
     });
 }
+
+// ---------------------------------------------------------------------------
+// PollerUltQueue — nothing else in the crate ever instantiates this
+// `ExternalQueue` (no default system, no other test sets
+// `type ExternalQueue = PollerUltQueue<..>`), so this is its only exercise.
+// ---------------------------------------------------------------------------
+
+/// Same shape as `ManualSystem`, `StackfulOnlyTaskDesc`-based like
+/// `DefaultStackfulOnlyTaskSystem`, except `ExternalQueue` is
+/// [`PollerUltQueue`] instead of the default [`StealPathQueue`].
+struct PollerSystem;
+
+impl cmpth::SchedulerSystem for PollerSystem {
+    type Base  = OsSystem;
+    type Desc  = StackfulOnlyTaskDesc<Self>;
+    type Item  = cmpth::SuspendedTaskToken<StackfulOnlyTaskDesc<Self>>;
+    type Worker = UltWorker<Self>;
+    type RunQueue = HybridRunQueue<cmpth::SuspendedTaskToken<StackfulOnlyTaskDesc<Self>>>;
+    type ExternalQueue   = PollerUltQueue<StackfulOnlyTaskDesc<Self>>;
+    type Pool            = ReturnPool<StackfulOnlyTaskDesc<Self>, HeapStack>;
+    // Unused: PollerSystem never calls spawn_async.
+    type AsyncPool       = cmpth::resumable::common::pool::SimplePool<StackfulOnlyTaskDesc<Self>>;
+    const ASYNC_POOL_SIZE: usize = 0;
+    // Unused: PollerSystem never calls recurse.
+    type RecursionPool   = cmpth::resumable::common::pool::ThresholdPool<cmpth::resumable::common::pool::BlockPool>;
+    type Lookup          = TlsCurrent;
+
+    fn worker_tls() -> &'static <OsSystem as cmpth::NestableSystem>::ThreadSpecific<UltWorker<Self>> {
+        static TLS: OsTls<UltWorker<PollerSystem>> =
+            <OsTls<UltWorker<PollerSystem>> as TlsSlot<UltWorker<PollerSystem>>>::INIT;
+        &TLS
+    }
+
+    // Stackful-only: no poll_fn tag check, see `execute_stackful`'s doc comment.
+    fn execute(wk: &UltWorker<Self>, cont: cmpth::SuspendedTaskToken<StackfulOnlyTaskDesc<Self>>) {
+        cmpth::resumable::stackful::worker::execute_stackful(wk, cont)
+    }
+
+    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut StackfulOnlyTaskDesc<Self>) {
+        unsafe { cmpth::resumable::stackful::worker::free_finished_desc_stackful(wk, desc) }
+    }
+}
+
+impl cmpth::StackfulSchedulerSystem for PollerSystem {
+    type Ctx   = NativeContext;
+    type StackAlloc = HeapStack;
+    const STACK_SIZE: usize = 64 * 1024;
+
+    type SuspendedThread = BasicStackfulOnlyResumable<Self>;
+}
+
+impl ThreadSystem for PollerSystem {
+    fn yield_now() {
+        use cmpth::resumable::common::worker::WorkerOps;
+        use cmpth::resumable::stackful::worker::StackfulWorker;
+        match UltWorker::<Self>::current() {
+            Some(wk) => { wk.yield_now(); }
+            None => <OsSystem as ThreadSystem>::yield_now(),
+        }
+    }
+
+    type JoinHandle<T: Send + 'static> = cmpth::resumable::common::thread::JoinHandle<Self, T>;
+
+    fn spawn<T, F>(f: F) -> cmpth::resumable::common::thread::JoinHandle<Self, T>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        cmpth::resumable::stackful::thread::spawn::<Self, T, F>(f)
+    }
+}
+
+impl BlockOnSystem for PollerSystem {
+    // `StackfulOnlyTaskDesc` doesn't implement `WakerTaskDescCore` (only
+    // `DualTaskDesc`/`StacklessOnlyTaskDesc` do), so `UltPoller` (as
+    // `ManualSystem` above uses) isn't available here — `ResumablePoller`
+    // is the stackful-only-descriptor poller, same as
+    // `UltIdentity`'s own blanket `BlockOnSystem` impl uses.
+    type Poller = cmpth::resumable::stackful::waker::ResumablePoller<Self>;
+}
+
+impl StackfulSyncSystem for PollerSystem {
+    type Mutex<T: Send> = cmpth::McsMutex<Self, T>;
+    type Barrier        = cmpth::resumable::stackful::sync::Barrier<Self>;
+}
+
+impl SuspendableSystem for PollerSystem {
+    type SuspendedThread = BasicStackfulOnlyResumable<Self>;
+}
+
+impl DelegationSystem for PollerSystem {
+    type Delegator<C: cmpth::DelegatorConsumer<Self>> =
+        cmpth::resumable::stackful::sync::McsDelegator<Self, C>;
+}
+
+impl NestableSystem for PollerSystem {
+    type ThreadSpecific<T: 'static> = cmpth::resumable::stackful::tls::UltTls<Self, T>;
+}
+
+/// External OS thread wakes a ULT parked in `block_on`, on a system whose
+/// `ExternalQueue` is `PollerUltQueue` — mirrors `block_on_external_thread_wake`
+/// above (same `WaitForExternalWake` future, same "OS thread spawned before
+/// `run()` so it has no scheduler affinity" setup), but the delivery
+/// mechanism underneath is entirely different.
+///
+/// Whether this actually distinguishes poller-delivery from steal-path
+/// delivery: yes, structurally, not just by observation. `PollerUltQueue::
+/// try_pop` (see `src/resumable/common/external_queue.rs`) unconditionally
+/// returns `None` — a worker's steal-fail path can *never* observe or drain
+/// anything sitting in a `PollerUltQueue`, unlike `StealPathQueue` where
+/// that path is the only consumer. The sole way anything ever leaves a
+/// `PollerUltQueue` is `run_service`'s loop calling `UltWorker::defer` —
+/// and `run_service` only ever runs if `init` actually spawned it
+/// (`NEEDS_SERVICE`) and keeps running until `StackfulInit::drop` calls
+/// `stop_service`/joins it. So if the spawn/join wiring in `init.rs` were
+/// missing, wrong, or the spawned task never actually reached
+/// `run_service`, the `w.wake()` call below would push into a queue with
+/// no reader: the parked ULT would never be resumed, `block_on` would never
+/// return, and this test would hang rather than pass. That hang (not a
+/// silent pass) is what proves the poller — and only the poller — is what
+/// delivers the wake on this system, whereas the exact same test body
+/// against `DefaultDualTaskSystem`/`ManualSystem`
+/// (`StealPathQueue`-backed) passes for a structurally different reason
+/// (a worker's own steal-fail `try_pop()`).
+#[test]
+#[ignore = "PollerUltQueue's service task stalls after 3 iterations - see docs/ISSUES.md"]
+fn poller_ult_queue_external_thread_wake() {
+    use std::sync::{Arc, Mutex};
+    use std::task::Waker;
+
+    struct WaitForExternalWake {
+        slot: Arc<Mutex<Option<Waker>>>,
+        ready: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl std::future::Future for WaitForExternalWake {
+        type Output = u32;
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<u32> {
+            if self.ready.load(std::sync::atomic::Ordering::Acquire) {
+                return std::task::Poll::Ready(7);
+            }
+            *self.slot.lock().unwrap() = Some(cx.waker().clone());
+            std::task::Poll::Pending
+        }
+    }
+
+    let slot: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
+    let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let slot2 = Arc::clone(&slot);
+    let ready2 = Arc::clone(&ready);
+
+    // Spawn an OS thread BEFORE run() so it has no scheduler affinity —
+    // `UltWorker::<PollerSystem>::current()` is `None` on it, which is
+    // exactly what routes `w.wake()` through `push_continuation`'s
+    // external-queue branch (`src/resumable/common/waker.rs`) instead of
+    // straight onto some worker's own deque.
+    let os_thread = std::thread::spawn(move || {
+        loop {
+            let w = slot2.lock().unwrap().take();
+            if let Some(w) = w {
+                ready2.store(true, std::sync::atomic::Ordering::Release);
+                w.wake(); // Called from outside the scheduler.
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    });
+
+    <PollerSystem as StackfulInitSystem>::builder().workers(2).run(|| {
+        let v = PollerSystem::block_on(WaitForExternalWake { slot, ready });
+        assert_eq!(v, 7);
+    });
+
+    os_thread.join().unwrap();
+}

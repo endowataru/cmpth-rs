@@ -1,6 +1,5 @@
-//! Stackful thread functions: fork (child-first and parent-first), exit,
-//! blocking `.join()`. See
-//! [`common::thread`](crate::resumable::common::thread) for the shared
+//! Stackful thread functions: child-first fork, exit, blocking `.join()`.
+//! See [`common::thread`](crate::resumable::common::thread) for the shared
 //! [`JoinHandle`] type both
 //! this and [`stackless::thread`](crate::resumable::stackless::thread)
 //! produce.
@@ -9,17 +8,14 @@ use std::any::Any;
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use crate::traits::stackful::{ContextPolicy, HandoffTaskDesc, JoinHandleLike, Transfer};
+use crate::traits::stackful::{HandoffTaskDesc, JoinHandleLike};
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::desc::{HasScheduler, SuspendedTaskToken, TaskDesc, TaskDescAlloc, TaskDescCore, TaskExitSink};
+use crate::resumable::common::desc::{HasScheduler, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskExitSink};
 use crate::resumable::stackful::desc::{HasCtx, StackfulTaskDesc};
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, WorkerOps};
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulWorker};
-
-// Still needed for fork_parent_first (root task entry).
-pub(crate) type ErasedBody = Box<dyn FnOnce() -> Box<dyn Any + Send> + Send>;
 
 // ---------------------------------------------------------------------------
 // spawn (child-first fork)
@@ -95,70 +91,13 @@ where
     JoinHandle { desc, result_ptr, result_drop: drop_stack_result::<T>, _marker: PhantomData }
 }
 
-/// Parent-first fork: package `body` as a ready continuation without running
-/// it.  Used for the root task of `run` and by [`PollerUltQueue::on_start`].
-///
-/// `scheduler` is stored on the descriptor for external-thread wake support.
-pub(crate) fn fork_parent_first<S: StackfulSchedulerSystem>(body: ErasedBody, scheduler: *const crate::resumable::common::scheduler::Scheduler<S>) -> SuspendedTaskToken<S::Desc>
-where
-    <S as SchedulerSystem>::Desc: StackfulTaskDesc,
-{
-    use crate::resumable::common::stack::StackAlloc as _;
-    // Allocated directly (not through S::Pool), like `fork_async_parent_first`'s
-    // one-off root async descriptor: this runs once per `run`/`PollerUltQueue::on_start`
-    // call, so pooling it has nothing to gain. Still wrapped via `Node::wrap_fresh`
-    // (not a bare `Box::new`) and marked `oversized` unconditionally, so its
-    // eventual dealloc (through the pool, like any other finished task) can
-    // recover the node via `Node::node_of` and always raw-frees it.
-    //
-    // SAFETY: `scheduler` points at a `Scheduler<S>` kept alive by the caller
-    // (an `Arc` it holds or derives from) for at least as long as this call —
-    // same precondition `set_scheduler` below already relies on for this
-    // exact pointer.
-    let stack_size = unsafe { (*scheduler).stack_size };
-    let payload = S::Desc::alloc_with(S::StackAlloc::alloc_stack(stack_size).into(), false);
-    let desc = crate::resumable::common::pool::Node::wrap_fresh(0, true, payload);
-    // SAFETY: `desc` was just freshly allocated above and has never been
-    // wrapped in a token before — trivially exclusive.
-    let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
-    token.commit_as_ctx();
-    token.set_scheduler(scheduler);
-    let arg = Box::into_raw(Box::new(body));
-    let ctx = unsafe {
-        S::Ctx::make_context(token.as_desc().stack_top(), task_entry::<S>, arg as *mut ())
-    };
-    token.init_saved_context(ctx.0);
-    token
-}
-
-unsafe extern "C" fn task_entry<S: StackfulSchedulerSystem>(transfer: Transfer, arg: *mut ()) -> ! where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
-    let wk = unsafe { &*(transfer.0 as *const UltWorker<S>) };
-    let desc = wk.cur_task();
-    let body = *unsafe { Box::from_raw(arg as *mut ErasedBody) };
-    let result = catch_unwind(AssertUnwindSafe(body));
-    // See spawn: the body may have suspended and resumed on a different
-    // worker, so re-derive which one we're on now.
-    let wk = UltWorker::<S>::current().expect("cmpth: worker vanished");
-    debug_assert!(std::ptr::eq(wk.cur_task(), desc));
-    // `task_entry` only ever runs a `fork_parent_first` body (`run`'s root
-    // task, `PollerUltQueue`'s poller ULT) — both always detached (no
-    // `JoinHandle`, see `fork_parent_first`'s `has_handle: false`), so
-    // nobody is ever positioned to collect this result. Drop it here rather
-    // than storing it on the descriptor only to have `reinit`/`free_task`
-    // drop it later unread.
-    drop(result);
-    exit(wk, wk.cur_task_ref())
-}
-
 // ---------------------------------------------------------------------------
 // exit helpers
 // ---------------------------------------------------------------------------
 
 /// [`TaskExitSink`] for [`exit_with_result`]: a dropped `JoinHandle`'s
 /// result lives on the exiting task's own (still-allocated) stack, so
-/// `reclaim` must drop it in place before freeing the descriptor — unlike
-/// [`ExitSink`] (used by [`exit`], whose task never had a result anyone
-/// could observe).
+/// `reclaim` must drop it in place before freeing the descriptor.
 struct ExitWithResultSink<'a, S: StackfulSchedulerSystem, T> {
     wk: &'a UltWorker<S>,
     desc_ptr: *mut S::Desc,
@@ -181,28 +120,6 @@ where
             self.result_ptr.drop_in_place();
             self.wk.free_task(self.desc_ptr);
         }
-    }
-}
-
-/// [`TaskExitSink`] for [`exit`] (parent-first/detached-only tasks): no
-/// result was ever written for anyone to observe (`task_entry` already
-/// dropped it before calling this), so `reclaim` only needs to free the
-/// descriptor.
-struct ExitSink<'a, S: StackfulSchedulerSystem> {
-    wk: &'a UltWorker<S>,
-    desc_ptr: *mut S::Desc,
-}
-
-impl<'a, S: StackfulSchedulerSystem> TaskExitSink<S::Desc> for ExitSink<'a, S>
-where
-    <S as SchedulerSystem>::Desc: StackfulTaskDesc,
-{
-    fn resume(&self, cont: <S::Desc as TaskDesc>::Suspended) {
-        self.wk.push(cont);
-    }
-
-    fn reclaim(&self) {
-        unsafe { self.wk.free_task(self.desc_ptr) };
     }
 }
 
@@ -241,28 +158,6 @@ fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
         unsafe { result_ptr.write(sr) };
         wk.exit_to_sched(move |wk| {
             let sink = ExitWithResultSink { wk, desc_ptr, result_ptr };
-            desc.finish_and_settle(&sink);
-        })
-    }
-}
-
-/// Exit for parent-first tasks (`fork_parent_first`): `task_entry` already
-/// dropped the result before calling this (see its own comment) — every
-/// `fork_parent_first` task starts, and stays, abandoned, so the
-/// handoff-target/running-with-a-handle paths below are unreachable in
-/// practice for this caller, kept only because this shares the same state
-/// machine as `exit_with_result`.
-fn exit<S: StackfulSchedulerSystem>(wk: &UltWorker<S>, desc: &S::Desc) -> ! where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
-    let desc_ptr = desc as *const S::Desc as *mut S::Desc;
-    if let Some(j_token) = desc.try_take_handoff_target() {
-        wk.exit_to_cont(j_token, move |_wk| {
-            desc.commit_finished();
-        })
-    } else if desc.is_abandoned() {
-        wk.exit_to_sched(move |wk| unsafe { wk.free_task(desc_ptr) })
-    } else {
-        wk.exit_to_sched(move |wk| {
-            let sink = ExitSink { wk, desc_ptr };
             desc.finish_and_settle(&sink);
         })
     }
