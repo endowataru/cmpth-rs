@@ -14,7 +14,7 @@ use crate::resumable::common::desc::HasDescOwned;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::system::PoolSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::worker::{UltWorker, WorkerOps};
+use crate::resumable::common::worker::WorkerOps;
 
 static NEXT_ULT_TLS_KEY: AtomicUsize = AtomicUsize::new(0);
 
@@ -70,7 +70,7 @@ impl<S: StackfulSchedulerSystem, T: 'static> TlsSlot<T> for UltTls<S, T> where <
     const INIT: Self = UltTls::new();
 
     fn get(&self) -> *mut T where <S as PoolSystem>::Desc: StackfulTaskDesc {
-        let wk = UltWorker::<S>::current()
+        let wk = S::Worker::current()
             .expect("cmpth: ULT-local storage accessed outside a worker");
         let map = &wk.cur_task_token_mut().desc_owned().tls;
         map.as_ref()
@@ -80,7 +80,7 @@ impl<S: StackfulSchedulerSystem, T: 'static> TlsSlot<T> for UltTls<S, T> where <
     }
 
     fn set(&self, p: *mut T) where <S as PoolSystem>::Desc: StackfulTaskDesc {
-        let wk = UltWorker::<S>::current()
+        let wk = S::Worker::current()
             .expect("cmpth: ULT-local storage accessed outside a worker");
         let map = &mut wk.cur_task_token_mut().desc_owned_mut().tls;
         map.get_or_insert_with(HashMap::new).insert(self.key(), p.cast());

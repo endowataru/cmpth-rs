@@ -28,7 +28,7 @@
 //! # Wake from outside the scheduler
 //!
 //! `wake()` in PARKED state requires finding a worker deque to push the
-//! continuation.  Currently, this uses `UltWorker::<S>::current()` and
+//! continuation.  Currently, this uses `S::Worker::current()` and
 //! therefore requires that `wake()` is called from a thread running this
 //! scheduler.  Calling `wake()` from an OS thread that is not a ULT worker
 //! will panic.
@@ -48,7 +48,7 @@ use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::system::PoolSystem;
 use crate::resumable::common::waker::{self, WakeOutcome, desc_from_erased, drop_shared, push_continuation};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::worker::{UltWorker, WorkerOps};
+use crate::resumable::common::worker::WorkerOps;
 use crate::resumable::stackful::worker::StackfulWorker;
 
 // ---------------------------------------------------------------------------
@@ -106,9 +106,13 @@ pub struct UltPoller<S: StackfulSchedulerSystem> where <S as PoolSystem>::Desc: 
     _marker: PhantomData<S>,
 }
 
-impl<S: StackfulSchedulerSystem> Poller for UltPoller<S> where <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+impl<S: StackfulSchedulerSystem> Poller for UltPoller<S>
+where
+    <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc,
+    S::Worker: StackfulWorker<S>,
+{
     fn new() -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
-        match UltWorker::<S>::current() {
+        match S::Worker::current() {
             Some(wk) => {
                 let desc = wk.cur_task();
                 wk.cur_task_ref().mark_polling();
@@ -136,7 +140,7 @@ impl<S: StackfulSchedulerSystem> Poller for UltPoller<S> where <S as PoolSystem>
         match self.desc {
             Some(desc) => {
                 let desc: &S::Desc = unsafe { desc.as_ref() };
-                UltWorker::<S>::current()
+                S::Worker::current()
                     .expect("UltPoller::wait called from outside scheduler")
                     .cond_suspend_to_sched(|_wk, prev_opt| {
                         // wake() fired during poll(): decide_park cancels
@@ -256,7 +260,11 @@ pub struct ResumablePoller<S: StackfulSchedulerSystem> where <S as PoolSystem>::
     _marker: PhantomData<S>,
 }
 
-impl<S: StackfulSchedulerSystem> Poller for ResumablePoller<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem> Poller for ResumablePoller<S>
+where
+    <S as PoolSystem>::Desc: StackfulTaskDesc,
+    S::Worker: StackfulWorker<S>,
+{
     fn new() -> Self {
         match S::Worker::current() {
             Some(_wk) => {
@@ -281,7 +289,7 @@ impl<S: StackfulSchedulerSystem> Poller for ResumablePoller<S> where <S as PoolS
     fn wait(&self) {
         match &self.slot {
             Some(slot) => {
-                UltWorker::<S>::current()
+                S::Worker::current()
                     .expect("ResumablePoller::wait called from outside scheduler")
                     .cond_suspend_to_sched(|_wk, prev| {
                         // Release: publishes both the context saved just

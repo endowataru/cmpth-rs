@@ -139,6 +139,38 @@ pub trait WorkerOps<S: WorkerSystem>: TaskPool<S> + LocalQueue<S> + Send + Sync 
     fn current() -> Option<&'static Self>
     where
         Self: Sized;
+
+    /// Raw pointer to the task currently running on this worker, without
+    /// taking ownership; null if nothing is running. Crate-internal —
+    /// lets call sites generic over `S::Worker` reach
+    /// [`UltWorker::cur_task`], which they cannot name directly. `#[doc(hidden)]`
+    /// because a trait method can't be narrowed below its trait's own
+    /// visibility (same pattern as
+    /// [`StackAlloc::alloc_stack`](crate::resumable::common::stack::StackAlloc::alloc_stack)) —
+    /// this is `pub` only because `WorkerOps` itself is, not because it's
+    /// meant to be called outside this crate.
+    #[doc(hidden)]
+    fn cur_task(&self) -> *mut S::Desc;
+
+    /// Safe counterpart to [`cur_task`](Self::cur_task): panics instead of
+    /// risking a null deref if nothing is running. Crate-internal, see
+    /// [`UltWorker::cur_task_ref`]; `#[doc(hidden)]` for the same reason as
+    /// [`cur_task`](Self::cur_task).
+    #[doc(hidden)]
+    fn cur_task_ref(&self) -> &S::Desc;
+
+    /// Mutable peek at the currently-running task's token, for callers with
+    /// no explicit `RunningTaskToken` in scope. Crate-internal, see
+    /// [`UltWorker::cur_task_token_mut`]; `#[doc(hidden)]` for the same
+    /// reason as [`cur_task`](Self::cur_task).
+    #[doc(hidden)]
+    fn cur_task_token_mut(&self) -> &mut RunningTaskToken<S::Desc>;
+
+    /// Where an off-pool `wake()` for a task created on this worker will
+    /// deliver. Crate-internal, see [`UltWorker::external_queue`];
+    /// `#[doc(hidden)]` for the same reason as [`cur_task`](Self::cur_task).
+    #[doc(hidden)]
+    fn external_queue(&self) -> &S::ExternalQueue;
 }
 
 // ---------------------------------------------------------------------------
@@ -313,16 +345,7 @@ impl<S: WorkerSystem> UltWorker<S> {
         self.root_cont.take()
             .unwrap_or_else(|| panic!("no runnable continuation on worker {}", self.num))
     }
-}
 
-// Split from the main inherent `impl` block above: `cur_task_token_mut`
-// calls `Self::current()` (`Worker::current`), which needs the same
-// `DescScheduler` bound `Worker`'s own impl for `UltWorker<S>` needs (see
-// that impl's comment) -- keeping it out of the main block lets everything
-// else there (in particular `UltWorker::new`, called from base-level
-// scheduler setup with no such bound available) keep working for any bare
-// `S: WorkerSystem`.
-impl<S: DescScheduler> UltWorker<S> {
     /// Mutable peek at the currently-running task's token, for callers with
     /// no explicit `RunningTaskToken` in scope (e.g. `UltTls::get`/`set`,
     /// reached through the generic `TlsSlot` trait) that still need
@@ -339,10 +362,19 @@ impl<S: DescScheduler> UltWorker<S> {
     /// `&self` signature alone (it would need proof "no second live
     /// `&mut`/`&` from this same `&self` exists," which the single-caller
     /// discipline above provides but the type system doesn't express).
+    ///
+    /// The `debug_assert` compares thin raw pointers erased to `*const ()`
+    /// rather than `self`/`cur` directly: `<S::Worker as
+    /// WorkerOps<S>>::current()` hands back `&S::Worker`, not `&Self`, and
+    /// nothing here needs those two types to be the same (that equality is
+    /// the very `DescScheduler` pin this method used to require solely to
+    /// make `std::ptr::eq` typecheck) — identity is still fully decided by
+    /// comparing the two addresses.
     #[allow(clippy::mut_from_ref)]
     pub(crate) fn cur_task_token_mut(&self) -> &mut RunningTaskToken<S::Desc> {
         debug_assert!(
-            Self::current().is_some_and(|cur| std::ptr::eq(cur, self)),
+            <S::Worker as WorkerOps<S>>::current()
+                .is_some_and(|cur| cur as *const S::Worker as *const () == self as *const Self as *const ()),
             "cmpth: cur_task_token_mut called from a thread not currently running as this worker"
         );
         let opt: &mut Option<RunningTaskToken<S::Desc>> = unsafe { &mut *self.cur_task_cell.as_ptr() };
@@ -451,6 +483,22 @@ impl<S: WorkerSystem> LocalQueue<S> for UltWorker<S> {
 impl<S: DescScheduler> WorkerOps<S> for UltWorker<S> {
     fn current() -> Option<&'static Self> {
         <S::Lookup as crate::resumable::common::lookup::CurrentLookup<S>>::current()
+    }
+
+    fn cur_task(&self) -> *mut S::Desc {
+        UltWorker::cur_task(self)
+    }
+
+    fn cur_task_ref(&self) -> &S::Desc {
+        UltWorker::cur_task_ref(self)
+    }
+
+    fn cur_task_token_mut(&self) -> &mut RunningTaskToken<S::Desc> {
+        UltWorker::cur_task_token_mut(self)
+    }
+
+    fn external_queue(&self) -> &S::ExternalQueue {
+        UltWorker::external_queue(self)
     }
 }
 

@@ -12,7 +12,7 @@ use crate::interchange::{AtomicTaggedSlot, TaggedPtr};
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::stackless::desc::AsyncTaskDesc;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
+use crate::resumable::common::worker::{LocalQueue, WorkerOps};
 use crate::resumable::stackful::worker::ContextSwitcher;
 
 const ASYNC_TAG: usize = 1;
@@ -21,7 +21,7 @@ const ASYNC_TAG: usize = 1;
 /// continuation *or* a registered async [`Waker`] — chosen
 /// per wait attempt by whichever entry point (sync or async) the caller
 /// used. Internally a single tagged word (bit 0 = async), matching
-/// `cmpth-rs`'s own existing "task" vocabulary (`UltWorker::cur_task`
+/// `cmpth-rs`'s own existing "task" vocabulary (`WorkerOps::cur_task`
 /// already means "whichever kind is running").
 ///
 /// `enter`/`swap` (via [`StackfulResumable`]) fall back to a plain wake when
@@ -50,7 +50,7 @@ impl<S: StackfulSchedulerSystem> Default for DualResumable<S> where S::Desc: Sta
 /// See `docs/sync-async-unification.md` for why this replaces an explicit
 /// capability-token parameter: `cur_task` already carries exactly this
 /// information, correctly maintained by the context-switch shims.
-fn assert_on_real_ult<S: StackfulSchedulerSystem>(wk: &UltWorker<S>)
+fn assert_on_real_ult<S: StackfulSchedulerSystem>(wk: &S::Worker)
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -98,11 +98,15 @@ impl<S: StackfulSchedulerSystem> Resumable<S> for DualResumable<S> where S::Desc
     }
 }
 
-impl<S: StackfulSchedulerSystem> StackfulResumable<S> for DualResumable<S> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
+impl<S: StackfulSchedulerSystem> StackfulResumable<S> for DualResumable<S>
+where
+    S::Desc: StackfulTaskDesc + AsyncTaskDesc,
+    S::Worker: StackfulWorker<S>,
+{
     fn wait_with<F: FnOnce()>(&self, f: F) {
-        let wk = UltWorker::<S>::current()
+        let wk = S::Worker::current()
             .expect("cmpth: DualResumable::wait_with called outside a worker");
-        assert_on_real_ult(wk);
+        assert_on_real_ult::<S>(wk);
         let slot = &self.state as *const AtomicTaggedSlot<1>;
         wk.suspend_to_sched(move |_wk, prev| {
             // Release: publishes the context saved just before this
@@ -115,9 +119,9 @@ impl<S: StackfulSchedulerSystem> StackfulResumable<S> for DualResumable<S> where
     }
 
     fn wait_with_cond<F: FnOnce() -> bool>(&self, f: F) {
-        let wk = UltWorker::<S>::current()
+        let wk = S::Worker::current()
             .expect("cmpth: DualResumable::wait_with_cond called outside a worker");
-        assert_on_real_ult(wk);
+        assert_on_real_ult::<S>(wk);
         let slot = &self.state as *const AtomicTaggedSlot<1>;
         wk.cond_suspend_to_sched(move |_wk, prev| {
             // SAFETY: `slot` outlives this callback.
@@ -136,9 +140,9 @@ impl<S: StackfulSchedulerSystem> StackfulResumable<S> for DualResumable<S> where
     }
 
     fn enter(&self) {
-        let wk = UltWorker::<S>::current()
+        let wk = S::Worker::current()
             .expect("cmpth: DualResumable::enter called outside a worker");
-        assert_on_real_ult(wk);
+        assert_on_real_ult::<S>(wk);
         match self.state.take(Ordering::AcqRel) {
             Some((tag, raw)) if tag != ASYNC_TAG => {
                 // SAFETY: `tag != ASYNC_TAG` means a `SuspendedTaskToken`
@@ -154,9 +158,9 @@ impl<S: StackfulSchedulerSystem> StackfulResumable<S> for DualResumable<S> where
 
     fn swap(&self, next: &Self) {
         debug_assert!(!self.is_set(), "DualResumable::swap: self must be empty");
-        let wk = UltWorker::<S>::current()
+        let wk = S::Worker::current()
             .expect("cmpth: DualResumable::swap called outside a worker");
-        assert_on_real_ult(wk);
+        assert_on_real_ult::<S>(wk);
         match next.state.take(Ordering::AcqRel) {
             Some((tag, raw)) if tag != ASYNC_TAG => {
                 // SAFETY: same provenance as `enter` above.
