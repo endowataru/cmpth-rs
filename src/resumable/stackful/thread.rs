@@ -35,13 +35,13 @@ where
     <S as SchedulerSystem>::Desc: StackfulTaskDesc,
 {
     let wk = UltWorker::<S>::current().expect("cmpth: spawn called outside a worker");
-    let desc = wk.alloc_task(true, wk.shared().stack_size);
+    let desc = wk.alloc_task(true);
     let stack_top = {
         // SAFETY: `desc` was just freshly allocated by `alloc_task` and has
         // never been wrapped in a token before — trivially exclusive.
         let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
         token.commit_as_ctx();
-        token.set_external_queue(&wk.shared().external_queue as *const _);
+        token.set_external_queue(wk.external_queue() as *const _);
         let stack_top = token.as_desc().stack_top() as usize;
         let _ = token.into_raw();
         stack_top

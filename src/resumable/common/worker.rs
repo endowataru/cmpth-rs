@@ -12,11 +12,12 @@
 //! [`StackfulWorker`](crate::resumable::stackful::worker::StackfulWorker))
 //! live in `stackful::worker`.
 
+use std::alloc::Layout;
 use std::cell::Cell;
 use std::ptr;
 
 use crate::resumable::common::deque::{RunQueueStealer, Steal, WorkerRunQueue};
-use crate::resumable::common::pool::DescPool;
+use crate::resumable::common::pool::{DescPool, DynamicPool};
 use crate::resumable::common::scheduler::Scheduler;
 use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
 use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, TaskDescAlloc};
@@ -27,18 +28,63 @@ use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, TaskD
 
 /// Task-descriptor allocation with a per-worker free list.
 pub trait TaskPool<S: SchedulerSystem> {
-    /// Allocate a descriptor with storage for at least `size` bytes (see
-    /// [`DescPool::alloc`] — `spawn`
-    /// always requests the same fixed `S::STACK_SIZE`, but the size
-    /// parameter is here so a future per-task custom stack size needs no
-    /// further interface change).
-    fn alloc_task(&self, has_handle: bool, size: usize) -> *mut S::Desc;
+    /// Allocate a descriptor for a ULT stack. The size comes from the
+    /// pool's own configuration (`Scheduler::stack_size`, set by
+    /// [`StackfulBuilder::stack_size`](crate::traits::system::stackful::StackfulBuilder::stack_size)),
+    /// not from the caller — callers neither know nor pass it.
+    fn alloc_task(&self, has_handle: bool) -> *mut S::Desc;
 
     /// Return a dead descriptor to the pool.
     ///
     /// # Safety
     /// No other references to `desc` may exist after this call.
     unsafe fn free_task(&self, desc: *mut S::Desc);
+}
+
+// ---------------------------------------------------------------------------
+// AsyncTaskPool (base)
+// ---------------------------------------------------------------------------
+
+/// `spawn_async`-descriptor allocation with a per-worker free list. Separate
+/// from [`TaskPool`]: a `spawn_async` slot comes from
+/// [`SchedulerSystem::AsyncPool`], a different pool from the ULT-stack
+/// `S::Pool` `TaskPool` allocates from (a dual system needs both live at
+/// once — see [`SchedulerSystem::AsyncPool`]'s doc comment) — and this trait
+/// is stackless-only, unlike `TaskPool`, which every system needs.
+pub trait AsyncTaskPool<S: SchedulerSystem> {
+    /// Allocate a descriptor with storage for at least `size` bytes (see
+    /// [`DescPool::alloc`]).
+    fn alloc_async_task(&self, has_handle: bool, size: usize) -> *mut S::Desc;
+
+    /// Return a dead descriptor to the pool.
+    ///
+    /// # Safety
+    /// No other references to `desc` may exist after this call.
+    unsafe fn free_async_task(&self, desc: *mut S::Desc);
+}
+
+// ---------------------------------------------------------------------------
+// RecursionAlloc (base)
+// ---------------------------------------------------------------------------
+
+/// Per-worker free-list allocator backing
+/// [`stackless::thread::recurse`](crate::resumable::stackless::thread::recurse)'s
+/// per-frame storage. Unlike [`TaskPool`]/[`AsyncTaskPool`], this names no
+/// descriptor type in its signature — it is a plain sized allocator (see
+/// [`SchedulerSystem::RecursionPool`]),
+/// unrelated to descriptors, so it needs neither `S` nor `D` to spell out
+/// what it hands back.
+pub trait RecursionAlloc {
+    /// Allocate (or reuse a freed block for) `layout`.
+    fn alloc_recursion_frame(&self, layout: Layout) -> *mut u8;
+
+    /// Return a block to the pool.
+    ///
+    /// # Safety
+    /// `ptr` must have come from [`alloc_recursion_frame`](Self::alloc_recursion_frame)
+    /// on this same worker with this same `layout`, and no other references
+    /// to it may exist after this call.
+    unsafe fn free_recursion_frame(&self, ptr: *mut u8, layout: Layout);
 }
 
 // ---------------------------------------------------------------------------
@@ -114,7 +160,7 @@ pub struct UltWorker<S: SchedulerSystem> {
     root_desc: S::Desc,
     pub(crate) root_cont: Cell<Option<SuspendedTaskToken<S::Desc>>>,
     steal_seed: Cell<usize>,
-    pub(crate) shared: Cell<*const Scheduler<S>>,
+    shared: Cell<*const Scheduler<S>>,
     /// The descriptor currently being driven by `run_async_poll` on this
     /// worker, or null. Distinct from `cur_task` (which tracks real
     /// context-switch state and is meaningless for async polling): this is
@@ -236,8 +282,23 @@ impl<S: SchedulerSystem> UltWorker<S> {
         debug_assert!(old.is_none(), "cmpth: overwriting a live cur_task");
     }
 
-    pub(crate) fn shared(&self) -> &Scheduler<S> {
+    fn shared(&self) -> &Scheduler<S> {
         unsafe { &*self.shared.get() }
+    }
+
+    /// Called once per worker at pool construction, before any worker runs —
+    /// the only write to the `shared` field. Every other access goes through
+    /// a narrow accessor (e.g. [`external_queue`](Self::external_queue)) or
+    /// stays private to this module.
+    pub(crate) fn bind_scheduler(&self, sched: *const Scheduler<S>) {
+        self.shared.set(sched);
+    }
+
+    /// The one component a task-creation path needs out of the scheduler:
+    /// where an off-pool `wake()` for the task being created will deliver —
+    /// see [`HasExternalQueue`](crate::resumable::common::desc::HasExternalQueue).
+    pub(crate) fn external_queue(&self) -> &S::ExternalQueue {
+        &self.shared().external_queue
     }
 
     /// Take the stored root (scheduler-loop) continuation. Shared by
@@ -286,12 +347,37 @@ impl<S: DescScheduler> UltWorker<S> {
 // --- TaskPool ---
 
 impl<S: SchedulerSystem> TaskPool<S> for UltWorker<S> {
-    fn alloc_task(&self, has_handle: bool, size: usize) -> *mut S::Desc {
-        self.shared().task_pool.alloc(self.num, has_handle, size)
+    fn alloc_task(&self, has_handle: bool) -> *mut S::Desc {
+        let shared = self.shared();
+        shared.task_pool.alloc(self.num, has_handle, shared.stack_size)
     }
 
     unsafe fn free_task(&self, desc: *mut S::Desc) {
         unsafe { self.shared().task_pool.dealloc(self.num, desc) };
+    }
+}
+
+// --- AsyncTaskPool ---
+
+impl<S: SchedulerSystem> AsyncTaskPool<S> for UltWorker<S> {
+    fn alloc_async_task(&self, has_handle: bool, size: usize) -> *mut S::Desc {
+        self.shared().async_task_pool.alloc(self.num, has_handle, size)
+    }
+
+    unsafe fn free_async_task(&self, desc: *mut S::Desc) {
+        unsafe { self.shared().async_task_pool.dealloc(self.num, desc) };
+    }
+}
+
+// --- RecursionAlloc ---
+
+impl<S: SchedulerSystem> RecursionAlloc for UltWorker<S> {
+    fn alloc_recursion_frame(&self, layout: Layout) -> *mut u8 {
+        self.shared().recursion_pool.alloc(self.num, layout)
+    }
+
+    unsafe fn free_recursion_frame(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { self.shared().recursion_pool.dealloc(self.num, ptr, layout) };
     }
 }
 
