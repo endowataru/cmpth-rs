@@ -939,7 +939,7 @@ impl NestableSystem for PollerSystem {
 /// (`StealPathQueue`-backed) passes for a structurally different reason
 /// (a worker's own steal-fail `try_pop()`).
 #[test]
-#[ignore = "PollerUltQueue's service task stalls after 3 iterations - see docs/ISSUES.md"]
+#[ignore = "flaky under CPU oversubscription: busy-poll ULT + non-yielding spinlock, see docs/ISSUES.md"]
 fn poller_ult_queue_external_thread_wake() {
     use std::sync::{Arc, Mutex};
     use std::task::Waker;
