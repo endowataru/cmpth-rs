@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Waker};
 
 use crate::resumable::common::desc::{DescOwned, HasDescOwned, HasExternalQueue, JoinState, RunningTaskToken, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskDescAlloc, decode_join_state, JS_ASYNC_JOINER_TAG, JS_ASYNC_TAG, JS_DETACHED, JS_FINISHED, JS_RUNNING};
-use crate::resumable::common::system::SchedulerSystem;
+use crate::resumable::common::system::PoolSystem;
 use crate::resumable::common::waker::{self, WakeOutcome, EVER_SHARED, STATE_MASK};
 
 pub use crate::traits::stackless::WakerTaskDesc;
@@ -256,26 +256,26 @@ impl<D: TaskDescCore<Owned: HasPollFn<D>>> RunningTaskToken<D> {
 /// Owner-exclusive fields for [`StacklessOnlyTaskDesc`]: [`DescOwned`] plus
 /// the poll_fn entry point (no `ctx` slot — this flavor never does a real
 /// context switch).
-pub struct StacklessOnlyOwned<S: SchedulerSystem> {
+pub struct StacklessOnlyOwned<S: PoolSystem> {
     desc_owned: DescOwned,
     external_queue: *const S::ExternalQueue,
     poll_fn: Option<TaskPollFn<StacklessOnlyTaskDesc<S>>>,
 }
 
-impl<S: SchedulerSystem> HasDescOwned for StacklessOnlyOwned<S> {
+impl<S: PoolSystem> HasDescOwned for StacklessOnlyOwned<S> {
     fn desc_owned(&self) -> &DescOwned { &self.desc_owned }
     fn desc_owned_mut(&mut self) -> &mut DescOwned { &mut self.desc_owned }
 }
 
 // See `StackfulOnlyOwned`'s matching impl for why `Desc =
 // StacklessOnlyTaskDesc<S>` is pinned here — identical reasoning.
-impl<S: SchedulerSystem<Desc = StacklessOnlyTaskDesc<S>>> HasExternalQueue<StacklessOnlyTaskDesc<S>> for StacklessOnlyOwned<S> {
+impl<S: PoolSystem<Desc = StacklessOnlyTaskDesc<S>>> HasExternalQueue<StacklessOnlyTaskDesc<S>> for StacklessOnlyOwned<S> {
     type Queue = S::ExternalQueue;
     fn external_queue(&self) -> *const S::ExternalQueue { self.external_queue }
     fn set_external_queue(&mut self, queue: *const S::ExternalQueue) { self.external_queue = queue; }
 }
 
-impl<S: SchedulerSystem> HasPollFn<StacklessOnlyTaskDesc<S>> for StacklessOnlyOwned<S> {
+impl<S: PoolSystem> HasPollFn<StacklessOnlyTaskDesc<S>> for StacklessOnlyOwned<S> {
     fn poll_fn(&self) -> Option<TaskPollFn<StacklessOnlyTaskDesc<S>>> { self.poll_fn }
     fn set_poll_fn(&mut self, f: Option<TaskPollFn<StacklessOnlyTaskDesc<S>>>) { self.poll_fn = f; }
 }
@@ -283,7 +283,7 @@ impl<S: SchedulerSystem> HasPollFn<StacklessOnlyTaskDesc<S>> for StacklessOnlyOw
 /// Concrete descriptor for `UltAsyncIdentity`-based (stackless-only)
 /// systems: a `spawn_async` task with no real context switch, so no `ctx`
 /// slot exists at all.
-pub struct StacklessOnlyTaskDesc<S: SchedulerSystem> {
+pub struct StacklessOnlyTaskDesc<S: PoolSystem> {
     owned: UnsafeCell<StacklessOnlyOwned<S>>,
     join_state: AtomicUsize,
     is_root: bool,
@@ -291,10 +291,10 @@ pub struct StacklessOnlyTaskDesc<S: SchedulerSystem> {
     stack: crate::resumable::common::stack::StackMem,
 }
 
-unsafe impl<S: SchedulerSystem> Send for StacklessOnlyTaskDesc<S> {}
-unsafe impl<S: SchedulerSystem> Sync for StacklessOnlyTaskDesc<S> {}
+unsafe impl<S: PoolSystem> Send for StacklessOnlyTaskDesc<S> {}
+unsafe impl<S: PoolSystem> Sync for StacklessOnlyTaskDesc<S> {}
 
-impl<S: SchedulerSystem> TaskDescCore for StacklessOnlyTaskDesc<S> {
+impl<S: PoolSystem> TaskDescCore for StacklessOnlyTaskDesc<S> {
     fn join_state(&self) -> &AtomicUsize { &self.join_state }
     fn is_root(&self) -> bool { self.is_root }
     fn stack_top(&self) -> *mut u8 { self.stack.top() }
@@ -311,11 +311,11 @@ impl<S: SchedulerSystem> TaskDescCore for StacklessOnlyTaskDesc<S> {
     }
 }
 
-impl<S: SchedulerSystem> WakerTaskDescCore for StacklessOnlyTaskDesc<S> {
+impl<S: PoolSystem> WakerTaskDescCore for StacklessOnlyTaskDesc<S> {
     fn waker_refs(&self) -> &AtomicUsize { &self.waker_refs }
 }
 
-impl<S: SchedulerSystem> TaskDescAlloc for StacklessOnlyTaskDesc<S> {
+impl<S: PoolSystem> TaskDescAlloc for StacklessOnlyTaskDesc<S> {
     fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> Self {
         StacklessOnlyTaskDesc::alloc_with(stack, has_handle)
     }
@@ -333,7 +333,7 @@ impl<S: SchedulerSystem> TaskDescAlloc for StacklessOnlyTaskDesc<S> {
     }
 }
 
-impl<S: SchedulerSystem> StacklessOnlyTaskDesc<S> {
+impl<S: PoolSystem> StacklessOnlyTaskDesc<S> {
     /// Construct a descriptor value with a heap stack. Used by
     /// `spawn_async` (whose "stack" only stores the future — no code runs
     /// on it, but it's allocated the same way regardless).

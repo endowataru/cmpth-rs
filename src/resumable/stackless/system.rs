@@ -147,7 +147,8 @@ impl<S: StacklessSchedulerSystem> crate::traits::stackless::StacklessInitSystem 
 /// `StackfulSchedulerSystem`, this trait has no associated types of its own
 /// to assemble — it exists solely as a fold point for this bound.
 pub trait StacklessSchedulerSystem:
-    DescScheduler<
+    SchedulerSystem
+    + DescScheduler<
         Desc: AsyncTaskDesc
                   + crate::resumable::common::desc::TaskDescCore<
                       Owned: crate::resumable::common::desc::HasExternalQueue<Self::Desc, Queue = Self::ExternalQueue>,
@@ -156,7 +157,7 @@ pub trait StacklessSchedulerSystem:
 {
 }
 
-impl<S: DescScheduler> StacklessSchedulerSystem for S
+impl<S: SchedulerSystem + DescScheduler> StacklessSchedulerSystem for S
 where
     S::Desc: AsyncTaskDesc,
     <S::Desc as crate::resumable::common::desc::TaskDescCore>::Owned:
@@ -199,9 +200,10 @@ where
 /// `spawn`, no `block_on`, no `ThreadSystem` impl at all for it (that
 /// requires stackful capability this system deliberately doesn't have).
 ///
-/// `Worker::execute`'s dispatch is [`crate::resumable::stackful::worker::execute_stackful`]
-/// -shaped in spirit but for polling instead of switching: it always polls,
-/// with no `poll_fn`-tag branch, because every task on this system is one.
+/// This system's `RunnableItem` impl (`resumable::stackless::worker`) is
+/// shaped in spirit like the stackful-only one but for polling instead of
+/// switching: it always polls, with no `poll_fn`-tag branch, because every
+/// task on this system is one.
 ///
 /// `ASYNC_POOL_SIZE` defaults to 512. [`InlineTlsCurrent`](crate::resumable::stackless::lookup::InlineTlsCurrent)
 /// is the natural `Lookup` choice — sound specifically because this system
@@ -244,9 +246,19 @@ pub trait UltAsyncIdentity: Sized + Send + Sync + 'static {
     /// (no unused `ctx` slot); a system that also needs stackful `spawn`/
     /// dual capability on the same tasks wants
     /// [`DualTaskDesc<UltAsyncSystem<Self>>`](crate::resumable::dual::desc::DualTaskDesc)
-    /// instead. `where UltAsyncSystem<Self>: SchedulerSystem` for the same
-    /// reason `Lookup`/`worker_tls_anchor` need it (see this trait's own
-    /// doc comment).
+    /// instead. `where UltAsyncSystem<Self>: PoolSystem` — the lowest rung
+    /// that makes the bound below well-formed (`Owned: HasExternalQueue<_,
+    /// Queue = <UltAsyncSystem<Self> as PoolSystem>::ExternalQueue>` needs
+    /// that projection nameable). Deliberately **not**
+    /// `UltAsyncSystem<Self>: SchedulerSystem`: `SchedulerSystem` is now
+    /// blanket-derived from `Desc`'s own identity (`Desc:
+    /// ReclaimableDesc<_>`, `Item: RunnableItem<_>` — see `common::system`),
+    /// so gating `Desc` itself on `SchedulerSystem` would be circular
+    /// (`Desc` needs `SchedulerSystem` needs `Desc`, verified as a real
+    /// `E0275` overflow before this bound was lowered). `PoolSystem` is
+    /// safe because [`PoolSystem for UltAsyncSystem<M>`](struct@UltAsyncSystem)'s
+    /// impl below is unconditional — it never routes back through
+    /// `SchedulerSystem`.
     type Desc: crate::resumable::common::desc::TaskDescAlloc
         + AsyncTaskDesc
         + crate::resumable::common::desc::TaskDescCore<
@@ -256,7 +268,7 @@ pub trait UltAsyncIdentity: Sized + Send + Sync + 'static {
             >,
         >
     where
-        UltAsyncSystem<Self>: SchedulerSystem;
+        UltAsyncSystem<Self>: PoolSystem;
 
     /// Work-stealing run queue implementation.
     type RunQueue: WorkerRunQueue<crate::resumable::common::desc::SuspendedTaskToken<Self::Desc>> + Default;
@@ -264,18 +276,26 @@ pub trait UltAsyncIdentity: Sized + Send + Sync + 'static {
     /// Fixed slot size for the `spawn_async` descriptor pool.
     const ASYNC_POOL_SIZE: usize = 512;
 
-    /// Current-worker lookup policy.
+    /// Current-worker lookup policy. `where UltAsyncSystem<Self>:
+    /// WorkerSystem` — the lowest rung that makes `CurrentLookup<_>`
+    /// well-formed (that trait's own declaration is `CurrentLookup<S:
+    /// WorkerSystem>`); same not-`SchedulerSystem` reasoning as
+    /// [`Desc`](Self::Desc). `WorkerSystem for UltAsyncSystem<M>`'s impl
+    /// below is likewise unconditional.
     type Lookup: CurrentLookup<UltAsyncSystem<Self>>
     where
-        UltAsyncSystem<Self>: SchedulerSystem;
+        UltAsyncSystem<Self>: WorkerSystem;
 
     /// The per-system TLS anchor backing [`WorkerSystem::worker_tls`].
     /// Named in terms of [`UltAsyncSystem<Self>`] — the actual final
     /// system type — not bare `Self`, since `Self` here is just the config
-    /// marker; see this trait's own doc comment for why.
+    /// marker; see this trait's own doc comment for why. `where
+    /// UltAsyncSystem<Self>: WorkerSystem` — `UltWorker<_>` itself requires
+    /// it structurally (`UltWorker<S: WorkerSystem>`); same
+    /// not-`SchedulerSystem` reasoning as [`Desc`](Self::Desc).
     fn worker_tls_anchor() -> &'static <<Self as UltAsyncIdentity>::Base as NestableSystem>::ThreadSpecific<UltWorker<UltAsyncSystem<Self>>>
     where
-        UltAsyncSystem<Self>: SchedulerSystem;
+        UltAsyncSystem<Self>: WorkerSystem;
 }
 
 /// The actual stackless-only system type: call `run_async`/`spawn` on
@@ -309,14 +329,8 @@ impl<M: UltAsyncIdentity> WorkerSystem for UltAsyncSystem<M> {
     }
 }
 
-impl<M: UltAsyncIdentity> SchedulerSystem for UltAsyncSystem<M> {
-    // Stackless-only: always poll, never switch — no poll_fn tag check,
-    // because every task on this system is a poll_fn task.
-    fn execute(wk: &UltWorker<Self>, cont: crate::resumable::common::desc::SuspendedTaskToken<M::Desc>) {
-        crate::resumable::stackless::worker::execute_async(wk, cont)
-    }
-
-    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut M::Desc) {
-        unsafe { crate::resumable::stackless::worker::free_finished_desc_async(wk, desc) }
-    }
-}
+// `SchedulerSystem for UltAsyncSystem<M>` is no longer hand-written here: it
+// is blanket-derived (`common::system`) once `Item: RunnableItem<_>` and
+// `Desc: ReclaimableDesc<_>` hold, which they do for any real `Desc` choice
+// (`StacklessOnlyTaskDesc<Self>` or `DualTaskDesc<Self>` — see those types'
+// `RunnableItem`/`ReclaimableDesc` impls in `stackless::worker`/`dual::worker`).

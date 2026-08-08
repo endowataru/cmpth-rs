@@ -10,8 +10,8 @@ use crate::traits::common::TlsSlot;
 use crate::traits::stackful::ThreadSystem;
 use crate::resumable::common::deque::{Steal, WorkerRunQueue};
 use crate::resumable::common::external_queue::ExternalQueue;
-use crate::resumable::common::system::{DescScheduler, SchedulerSystem, WorkerSystem};
-use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
+use crate::resumable::common::system::{DescScheduler, RunnableItem, SchedulerSystem, WorkerSystem};
+use crate::resumable::common::worker::{LocalQueue, UltWorker};
 
 /// State shared by all workers of one scheduler instance. Worker-layer
 /// (`S: WorkerSystem`): only the pools/run-queue/external-queue axis, no
@@ -72,7 +72,7 @@ unsafe impl<S: SchedulerSystem> Sync for Scheduler<S> {}
 /// caller already holds the `Scheduler<S>` it just built or was handed.
 pub(crate) fn worker_loop<S>(wk: &UltWorker<S>, shared: &Scheduler<S>)
 where
-    S: DescScheduler,
+    S: DescScheduler + SchedulerSystem,
 {
     S::worker_tls().set(wk as *const UltWorker<S> as *mut UltWorker<S>);
     // SAFETY: `root_desc` is embedded by value in `UltWorker` and only ever
@@ -104,12 +104,12 @@ where
 /// caller already holds the `Scheduler<S>` it just built or was handed.
 pub(crate) fn worker_idle_loop<S>(wk: &UltWorker<S>, shared: &Scheduler<S>)
 where
-    S: DescScheduler,
+    S: DescScheduler + SchedulerSystem,
 {
     let mut idle_rounds = 0u32;
     while !shared.finished.load(Ordering::Acquire) {
         if let Some(c) = wk.try_pop() {
-            wk.execute(c);
+            c.run_on(wk);
             idle_rounds = 0;
             continue;
         }
@@ -122,12 +122,12 @@ where
         // regression, not just noise.
         let steal = wk.try_steal();
         if let Steal::Success(c) = steal {
-            wk.execute(c);
+            c.run_on(wk);
             idle_rounds = 0;
             continue;
         }
         if let Some(c) = shared.external_queue.try_pop() {
-            wk.execute(c);
+            c.run_on(wk);
             idle_rounds = 0;
             continue;
         }

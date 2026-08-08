@@ -257,13 +257,13 @@ where
 // Bound carried on the struct itself (not just the impls) because it holds
 // a `JoinHandle<S, T>` field, and `JoinHandle` itself now requires
 // `DescScheduler` -- see that struct's own comment.
-pub struct SpawnAction<S: DescScheduler, T> {
+pub struct SpawnAction<S: DescScheduler + SchedulerSystem, T> {
     handle: Option<JoinHandle<S, T>>,
 }
 
-impl<S: DescScheduler, T> Unpin for SpawnAction<S, T> {}
+impl<S: DescScheduler + SchedulerSystem, T> Unpin for SpawnAction<S, T> {}
 
-impl<S: DescScheduler, T> Future for SpawnAction<S, T> {
+impl<S: DescScheduler + SchedulerSystem, T> Future for SpawnAction<S, T> {
     type Output = JoinHandle<S, T>;
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<JoinHandle<S, T>> {
@@ -292,7 +292,7 @@ struct PollSpawnedSink<S: SchedulerSystem, T> {
 
 impl<S, T: Send + 'static> TaskExitSink<S::Desc> for PollSpawnedSink<S, T>
 where
-    S: DescScheduler,
+    S: DescScheduler + SchedulerSystem,
     S::Desc: AsyncTaskDesc,
 {
     fn resume(&self, cont: <S::Desc as TaskDesc>::Suspended) {
@@ -334,7 +334,7 @@ unsafe fn poll_spawned_task<S, T, F>(
     cx: &mut Context<'_>,
 ) -> TaskPollResult<S::Desc>
 where
-    S: DescScheduler,
+    S: DescScheduler + SchedulerSystem,
     T: Send + 'static,
     F: Future<Output = T> + Send + 'static,
     S::Desc: AsyncTaskDesc,
@@ -442,7 +442,7 @@ where
 /// ```
 pub fn recurse<S, F, Mk>(mk: Mk) -> RecursionFrame<S, F>
 where
-    S: DescScheduler,
+    S: DescScheduler + SchedulerSystem,
     F: Future,
     Mk: FnOnce() -> F,
 {
@@ -465,18 +465,18 @@ where
 // below): `Drop` impls must restate exactly the bounds the type definition
 // has, so the bound has to live here regardless, and every real system
 // satisfies it anyway (see `DescScheduler`'s doc comment).
-pub struct RecursionFrame<S: DescScheduler, F> {
+pub struct RecursionFrame<S: DescScheduler + SchedulerSystem, F> {
     ptr: std::ptr::NonNull<F>,
     _marker: PhantomData<S>,
 }
 
-unsafe impl<S: DescScheduler, F: Send> Send for RecursionFrame<S, F> {}
+unsafe impl<S: DescScheduler + SchedulerSystem, F: Send> Send for RecursionFrame<S, F> {}
 // The pointee is never moved (only ever touched through the stable
 // pointer, exactly like `Pin<Box<F>>`), so the wrapper itself is Unpin
 // regardless of whether `F` is.
-impl<S: DescScheduler, F> Unpin for RecursionFrame<S, F> {}
+impl<S: DescScheduler + SchedulerSystem, F> Unpin for RecursionFrame<S, F> {}
 
-impl<S: DescScheduler, F: Future> Future for RecursionFrame<S, F> {
+impl<S: DescScheduler + SchedulerSystem, F: Future> Future for RecursionFrame<S, F> {
     type Output = F::Output;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
@@ -485,7 +485,7 @@ impl<S: DescScheduler, F: Future> Future for RecursionFrame<S, F> {
     }
 }
 
-impl<S: DescScheduler, F> Drop for RecursionFrame<S, F> {
+impl<S: DescScheduler + SchedulerSystem, F> Drop for RecursionFrame<S, F> {
     fn drop(&mut self) {
         unsafe { std::ptr::drop_in_place(self.ptr.as_ptr()) };
         let layout = Layout::new::<F>();

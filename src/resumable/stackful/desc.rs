@@ -6,7 +6,7 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::AtomicUsize;
 
 use crate::resumable::common::desc::{DescOwned, HasDescOwned, HasExternalQueue, RunningTaskToken, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskDescAlloc, JS_DETACHED, JS_RUNNING};
-use crate::resumable::common::system::SchedulerSystem;
+use crate::resumable::common::system::PoolSystem;
 use crate::traits::stackful::HandoffTaskDesc;
 
 /// Implemented by a [`TaskDescCore::Owned`] type that can hold a saved-context
@@ -134,13 +134,13 @@ impl<D: TaskDescCore<Owned: HasCtx>> RunningTaskToken<D> {
 /// Owner-exclusive fields for [`StackfulOnlyTaskDesc`]: [`DescOwned`] plus
 /// the real saved-context pointer (no `poll_fn` slot — this flavor never
 /// has one).
-pub struct StackfulOnlyOwned<S: SchedulerSystem> {
+pub struct StackfulOnlyOwned<S: PoolSystem> {
     desc_owned: DescOwned,
     external_queue: *const S::ExternalQueue,
     ctx: *mut u8,
 }
 
-impl<S: SchedulerSystem> HasDescOwned for StackfulOnlyOwned<S> {
+impl<S: PoolSystem> HasDescOwned for StackfulOnlyOwned<S> {
     fn desc_owned(&self) -> &DescOwned { &self.desc_owned }
     fn desc_owned_mut(&mut self) -> &mut DescOwned { &mut self.desc_owned }
 }
@@ -152,14 +152,14 @@ impl<S: SchedulerSystem> HasDescOwned for StackfulOnlyOwned<S> {
 // `StackfulOnlyTaskDesc<S>` itself to see that it satisfies
 // `ExternalWakeQueue<StackfulOnlyTaskDesc<S>>` — true at every real call
 // site (this `Owned` only ever backs `StackfulOnlyTaskDesc<S>`), just not
-// derivable from `S: SchedulerSystem` alone.
-impl<S: SchedulerSystem<Desc = StackfulOnlyTaskDesc<S>>> HasExternalQueue<StackfulOnlyTaskDesc<S>> for StackfulOnlyOwned<S> {
+// derivable from `S: PoolSystem` alone.
+impl<S: PoolSystem<Desc = StackfulOnlyTaskDesc<S>>> HasExternalQueue<StackfulOnlyTaskDesc<S>> for StackfulOnlyOwned<S> {
     type Queue = S::ExternalQueue;
     fn external_queue(&self) -> *const S::ExternalQueue { self.external_queue }
     fn set_external_queue(&mut self, queue: *const S::ExternalQueue) { self.external_queue = queue; }
 }
 
-impl<S: SchedulerSystem> HasCtx for StackfulOnlyOwned<S> {
+impl<S: PoolSystem> HasCtx for StackfulOnlyOwned<S> {
     fn ctx(&self) -> *mut u8 { self.ctx }
     fn set_ctx(&mut self, ptr: *mut u8) { self.ctx = ptr; }
 }
@@ -168,17 +168,17 @@ impl<S: SchedulerSystem> HasCtx for StackfulOnlyOwned<S> {
 /// real ULT with no `spawn_async` capability, so no `poll_fn` slot exists
 /// at all (contrast [`DualTaskDesc`](crate::resumable::dual::desc::DualTaskDesc),
 /// which needs both on the same struct).
-pub struct StackfulOnlyTaskDesc<S: SchedulerSystem> {
+pub struct StackfulOnlyTaskDesc<S: PoolSystem> {
     owned: UnsafeCell<StackfulOnlyOwned<S>>,
     join_state: AtomicUsize,
     is_root: bool,
     stack: crate::resumable::common::stack::StackMem,
 }
 
-unsafe impl<S: SchedulerSystem> Send for StackfulOnlyTaskDesc<S> {}
-unsafe impl<S: SchedulerSystem> Sync for StackfulOnlyTaskDesc<S> {}
+unsafe impl<S: PoolSystem> Send for StackfulOnlyTaskDesc<S> {}
+unsafe impl<S: PoolSystem> Sync for StackfulOnlyTaskDesc<S> {}
 
-impl<S: SchedulerSystem> TaskDescCore for StackfulOnlyTaskDesc<S> {
+impl<S: PoolSystem> TaskDescCore for StackfulOnlyTaskDesc<S> {
     fn join_state(&self) -> &AtomicUsize { &self.join_state }
     fn is_root(&self) -> bool { self.is_root }
     fn stack_top(&self) -> *mut u8 { self.stack.top() }
@@ -192,7 +192,7 @@ impl<S: SchedulerSystem> TaskDescCore for StackfulOnlyTaskDesc<S> {
     // `TaskDescCore`'s no-op default rather than overriding it.
 }
 
-impl<S: SchedulerSystem> TaskDescAlloc for StackfulOnlyTaskDesc<S> {
+impl<S: PoolSystem> TaskDescAlloc for StackfulOnlyTaskDesc<S> {
     fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> Self {
         StackfulOnlyTaskDesc::alloc_with(stack, has_handle)
     }
@@ -210,7 +210,7 @@ impl<S: SchedulerSystem> TaskDescAlloc for StackfulOnlyTaskDesc<S> {
     }
 }
 
-impl<S: SchedulerSystem> StackfulOnlyTaskDesc<S> {
+impl<S: PoolSystem> StackfulOnlyTaskDesc<S> {
     /// Construct a descriptor value with a heap stack.
     pub(crate) fn alloc(stack_size: usize, has_handle: bool) -> StackfulOnlyTaskDesc<S> {
         use crate::resumable::common::stack::{HeapStack, StackAlloc as _};

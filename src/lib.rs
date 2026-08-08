@@ -103,19 +103,10 @@ impl resumable::common::system::WorkerSystem for DefaultDualTaskSystem {
     }
 }
 
-impl resumable::common::system::SchedulerSystem for DefaultDualTaskSystem {
-    // Dual system: a popped continuation may be either a real ULT or an
-    // async task, so dispatch needs the poll_fn check (see execute_dual's
-    // doc comment / StackfulWorkerSystem::pop_or_root below for why this
-    // can't just be the stackful-only default).
-    fn execute(wk: &UltWorker<Self>, cont: SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>) {
-        resumable::dual::worker::execute_dual(wk, cont)
-    }
-
-    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut resumable::dual::desc::DualTaskDesc<Self>) {
-        unsafe { resumable::dual::worker::free_finished_desc_dual(wk, desc) }
-    }
-}
+// `SchedulerSystem for DefaultDualTaskSystem` is no longer hand-written:
+// it is blanket-derived (`resumable::common::system`) from the
+// `RunnableItem`/`ReclaimableDesc` impls for `DualTaskDesc<Self>`
+// (`resumable::dual::worker`).
 
 impl resumable::stackful::system::StackfulWorkerSystem for DefaultDualTaskSystem {
     type Ctx   = NativeContext;
@@ -195,15 +186,7 @@ impl resumable::common::system::WorkerSystem for DefaultNestedDualTaskSystem {
     }
 }
 
-impl resumable::common::system::SchedulerSystem for DefaultNestedDualTaskSystem {
-    fn execute(wk: &UltWorker<Self>, cont: SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>) {
-        resumable::dual::worker::execute_dual(wk, cont)
-    }
-
-    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut resumable::dual::desc::DualTaskDesc<Self>) {
-        unsafe { resumable::dual::worker::free_finished_desc_dual(wk, desc) }
-    }
-}
+// `SchedulerSystem for DefaultNestedDualTaskSystem` is likewise blanket-derived.
 
 impl resumable::stackful::system::StackfulWorkerSystem for DefaultNestedDualTaskSystem {
     type Ctx   = NativeContext;

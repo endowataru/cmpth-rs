@@ -1,23 +1,24 @@
 //! Stackless-only/dual dispatch: driving a `spawn_async` task's poll loop,
-//! and the stackless-only `SchedulerSystem::execute`/`free_finished_desc`
-//! bodies. See [`common::worker`](crate::resumable::common::worker) for the
-//! base traits and [`UltWorker<S>`](crate::resumable::common::worker::UltWorker)
-//! itself.
+//! and the [`RunnableItem`]/[`ReclaimableDesc`] impls for
+//! [`StacklessOnlyTaskDesc`]. See
+//! [`common::worker`](crate::resumable::common::worker) for the base traits
+//! and [`UltWorker<S>`](crate::resumable::common::worker::UltWorker) itself.
 
 use std::task::{RawWaker, Waker};
 
 use crate::resumable::common::worker::{AsyncTaskPool, LocalQueue, UltWorker};
-use crate::resumable::common::system::SchedulerSystem;
+use crate::resumable::common::system::{DescScheduler, ReclaimableDesc, RunnableItem};
 use crate::resumable::stackless::system::StacklessSchedulerSystem;
 use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken};
-use crate::resumable::stackless::desc::WakerTaskDesc;
+use crate::resumable::stackless::desc::{StacklessOnlyTaskDesc, WakerTaskDesc};
 use crate::resumable::stackless::desc::{TaskPollFn, TaskPollResult};
 
 /// Drive one async task's poll to completion or a suspend point. Called
-/// from `execute_dual` (when `desc.poll_fn` is `Some`) and from
-/// [`execute_async`] (always). Base-level (`S: SchedulerSystem`): polling a
-/// `spawn_async` task never touches context-switch machinery, so a
-/// stackless-only system needs this exactly as much as a dual one does.
+/// from the dual `RunnableItem` impl (`resumable::dual::worker`, when
+/// `desc.poll_fn` is `Some`) and from the stackless-only one below
+/// (always). Needs `S: StacklessSchedulerSystem`: polling a `spawn_async`
+/// task never touches context-switch machinery, so a stackless-only system
+/// needs this exactly as much as a dual one does.
 ///
 /// A `loop`, not a single poll: when a completion reports
 /// [`TaskPollResult::ReadyAndContinue`] (its completion directly claimed a
@@ -131,36 +132,36 @@ pub(crate) fn run_async_poll<S>(
     }
 }
 
-/// `execute` body for stackless-only systems: every popped continuation is
-/// a `spawn_async` task, so always poll — no `poll_fn` tag check, because
-/// there is nothing else it could be.
-pub fn execute_async<S>(wk: &UltWorker<S>, cont: SuspendedTaskToken<S::Desc>)
-where
-    S: StacklessSchedulerSystem,
+/// Every popped continuation is a `spawn_async` task, so always poll — no
+/// `poll_fn` tag check, because there is nothing else it could be.
+///
+/// Bound: plain [`DescScheduler`] — strictly below `SchedulerSystem`.
+/// `run_async_poll` needs `S: StacklessSchedulerSystem`, which becomes
+/// derivable for `S` from this same bound once this impl (plus the matching
+/// `ReclaimableDesc` impl below) exist, so it doesn't need to be named here.
+impl<S: DescScheduler<Desc = StacklessOnlyTaskDesc<S>>>
+    RunnableItem<S> for SuspendedTaskToken<StacklessOnlyTaskDesc<S>>
 {
-    let desc = cont.desc();
-    let poll_fn = cont.poll_fn()
-        .expect("cmpth: execute_async called on a continuation with no poll_fn (not a spawn_async task)");
-    let _ = cont.into_raw(); // consumed; no context switch
-    run_async_poll(wk, desc, poll_fn);
+    fn run_on(self, wk: &UltWorker<S>) {
+        let desc = self.desc();
+        let poll_fn = self.poll_fn()
+            .expect("cmpth: execute_async called on a continuation with no poll_fn (not a spawn_async task)");
+        let _ = self.into_raw(); // consumed; no context switch
+        run_async_poll(wk, desc, poll_fn);
+    }
 }
 
-/// `free_finished_desc` body for stackless-only systems: every descriptor
-/// is a `spawn_async` allocation, so always route it through `S::AsyncPool`
-/// (which itself decides pool-return vs. raw-free based on whether the
-/// descriptor's `Node` wrapper was marked oversized at allocation time).
+/// Every descriptor is a `spawn_async` allocation, so always route it
+/// through `S::AsyncPool` (which itself decides pool-return vs. raw-free
+/// based on whether the descriptor's `Node` wrapper was marked oversized at
+/// allocation time).
 ///
-/// # Safety
-/// No other references to `desc` may exist after this call (same contract
-/// as [`AsyncTaskPool::free_async_task`]).
-///
-/// Lowest rung: plain [`SchedulerSystem`] — `wk.free_async_task` only needs
-/// `AsyncTaskPool<S>` (`SchedulerSystem`-gated); `desc` is a raw `*mut
-/// S::Desc`, never `S::Item`, so this doesn't need the `Item`/`Worker`
-/// pinning `DescScheduler` adds.
-pub unsafe fn free_finished_desc_async<S>(wk: &UltWorker<S>, desc: *mut S::Desc)
-where
-    S: SchedulerSystem,
-{
-    unsafe { wk.free_async_task(desc) };
+/// Bound: plain [`DescScheduler`] — `wk.free_async_task` only needs
+/// `AsyncTaskPool<S>`, itself only `WorkerSystem`-gated; `desc` is a raw
+/// `*mut Self`, never `S::Item`, so `DescScheduler` here is only needed to
+/// pin `Desc = StacklessOnlyTaskDesc<S>` so `Self` resolves.
+impl<S: DescScheduler<Desc = StacklessOnlyTaskDesc<S>>> ReclaimableDesc<S> for StacklessOnlyTaskDesc<S> {
+    unsafe fn reclaim(wk: &UltWorker<S>, desc: *mut Self) {
+        unsafe { wk.free_async_task(desc) };
+    }
 }

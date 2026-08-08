@@ -3,11 +3,11 @@
 //! stackless-only, or dual system alike, no context-switch machinery named
 //! anywhere here.
 //!
-//! [`WorkerOps::execute`] forwards to [`SchedulerSystem::execute`] — see that
-//! method's doc comment for why the dispatch body lives on the system
-//! trait rather than here (a required hook, monomorphized per concrete
-//! system, not runtime dispatch). The stackful extension traits
-//! ([`ContextSwitcher`](crate::resumable::stackful::worker::ContextSwitcher)/
+//! Running a popped item is now [`RunnableItem::run_on`](crate::resumable::common::system::RunnableItem::run_on),
+//! implemented directly on the item type per descriptor flavor — see that
+//! trait's doc comment. `WorkerOps` here only locates the current worker;
+//! it no longer has a dispatch method of its own. The stackful extension
+//! traits ([`ContextSwitcher`](crate::resumable::stackful::worker::ContextSwitcher)/
 //! [`StackfulLocalQueue`](crate::resumable::stackful::worker::StackfulLocalQueue)/
 //! [`StackfulWorker`](crate::resumable::stackful::worker::StackfulWorker))
 //! live in `stackful::worker`.
@@ -19,7 +19,7 @@ use std::ptr;
 use crate::resumable::common::deque::{RunQueueStealer, Steal, WorkerRunQueue};
 use crate::resumable::common::pool::{DescPool, DynamicPool};
 use crate::resumable::common::scheduler::Scheduler;
-use crate::resumable::common::system::{DescScheduler, SchedulerSystem, WorkerSystem};
+use crate::resumable::common::system::{DescScheduler, WorkerSystem};
 use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, TaskDescAlloc};
 
 // ---------------------------------------------------------------------------
@@ -97,8 +97,10 @@ pub trait RecursionAlloc {
 /// Speaks [`WorkerSystem::Item`], never `SuspendedTaskToken<S::Desc>`:
 /// this layer moves work around without looking inside it, so naming the
 /// descriptor here would be a claim it does not need to make. The item stops
-/// being opaque exactly one method later, in
-/// [`WorkerOps::execute`].
+/// being opaque exactly one step later, when a caller with a concrete token
+/// in hand calls
+/// [`RunnableItem::run_on`](crate::resumable::common::system::RunnableItem::run_on)
+/// on it directly.
 pub trait LocalQueue<S: WorkerSystem> {
     /// Run `c` next on this worker (will run before anything already
     /// queued).
@@ -137,11 +139,6 @@ pub trait WorkerOps<S: WorkerSystem>: TaskPool<S> + LocalQueue<S> + Send + Sync 
     fn current() -> Option<&'static Self>
     where
         Self: Sized;
-
-    /// Run one task to its next suspension point (scheduler-loop side).
-    /// Forwards to [`SchedulerSystem::execute`] — see that method for why
-    /// the dispatch body lives on the system trait, not here.
-    fn execute(&self, cont: S::Item);
 }
 
 // ---------------------------------------------------------------------------
@@ -200,11 +197,13 @@ pub struct UltWorker<S: WorkerSystem> {
 }
 
 // `Cell` fields are only accessed by the owning base thread; `deque` is
-// internally synchronized; `shared` is read-only after init.
-unsafe impl<S: SchedulerSystem> Send for UltWorker<S> {}
-unsafe impl<S: SchedulerSystem> Sync for UltWorker<S> {}
+// internally synchronized; `shared` is read-only after init. None of this
+// (nor the inherent methods below) touches dispatch, so `WorkerSystem` is
+// enough — no need for `SchedulerSystem`.
+unsafe impl<S: WorkerSystem> Send for UltWorker<S> {}
+unsafe impl<S: WorkerSystem> Sync for UltWorker<S> {}
 
-impl<S: SchedulerSystem> UltWorker<S> {
+impl<S: WorkerSystem> UltWorker<S> {
     pub(crate) fn new(num: usize) -> Self {
         UltWorker {
             num,
@@ -322,7 +321,7 @@ impl<S: SchedulerSystem> UltWorker<S> {
 // that impl's comment) -- keeping it out of the main block lets everything
 // else there (in particular `UltWorker::new`, called from base-level
 // scheduler setup with no such bound available) keep working for any bare
-// `S: SchedulerSystem`.
+// `S: WorkerSystem`.
 impl<S: DescScheduler> UltWorker<S> {
     /// Mutable peek at the currently-running task's token, for callers with
     /// no explicit `RunningTaskToken` in scope (e.g. `UltTls::get`/`set`,
@@ -353,7 +352,7 @@ impl<S: DescScheduler> UltWorker<S> {
 
 // --- TaskPool ---
 
-impl<S: SchedulerSystem> TaskPool<S> for UltWorker<S> {
+impl<S: WorkerSystem> TaskPool<S> for UltWorker<S> {
     fn alloc_task(&self, has_handle: bool) -> *mut S::Desc {
         let shared = self.shared();
         shared.task_pool.alloc(self.num, has_handle, shared.stack_size)
@@ -366,7 +365,7 @@ impl<S: SchedulerSystem> TaskPool<S> for UltWorker<S> {
 
 // --- AsyncTaskPool ---
 
-impl<S: SchedulerSystem> AsyncTaskPool<S> for UltWorker<S> {
+impl<S: WorkerSystem> AsyncTaskPool<S> for UltWorker<S> {
     fn alloc_async_task(&self, has_handle: bool, size: usize) -> *mut S::Desc {
         self.shared().async_task_pool.alloc(self.num, has_handle, size)
     }
@@ -378,7 +377,7 @@ impl<S: SchedulerSystem> AsyncTaskPool<S> for UltWorker<S> {
 
 // --- RecursionAlloc ---
 
-impl<S: SchedulerSystem> RecursionAlloc for UltWorker<S> {
+impl<S: WorkerSystem> RecursionAlloc for UltWorker<S> {
     fn alloc_recursion_frame(&self, layout: Layout) -> *mut u8 {
         self.shared().recursion_pool.alloc(self.num, layout)
     }
@@ -390,15 +389,15 @@ impl<S: SchedulerSystem> RecursionAlloc for UltWorker<S> {
 
 // --- LocalQueue ---
 
-// Bounded by bare `SchedulerSystem`, not `DescScheduler`: now that
-// `LocalQueue` speaks `S::Item` rather than `SuspendedTaskToken<S::Desc>`,
-// nothing here needs the two to be equal. `self.deque` is already
-// `S::RunQueue: WorkerRunQueue<S::Item>` and `shared.stealers` already
-// yields `Steal<S::Item>`, so every body below type-checks against the
+// Bounded by bare `WorkerSystem`, not `DescScheduler`/`SchedulerSystem`: now
+// that `LocalQueue` speaks `S::Item` rather than `SuspendedTaskToken<S::Desc>`,
+// nothing here needs the two to be equal, nor dispatch capability. `self.deque`
+// is already `S::RunQueue: WorkerRunQueue<S::Item>` and `shared.stealers`
+// already yields `Steal<S::Item>`, so every body below type-checks against the
 // opaque item alone. The equality is still needed one layer up, wherever a
 // caller hands a concrete token to these methods — but that is the task
 // layer, which legitimately knows the descriptor type.
-impl<S: SchedulerSystem> LocalQueue<S> for UltWorker<S> {
+impl<S: WorkerSystem> LocalQueue<S> for UltWorker<S> {
     fn push(&self, c: S::Item) {
         self.deque.push(c);
     }
@@ -452,10 +451,6 @@ impl<S: SchedulerSystem> LocalQueue<S> for UltWorker<S> {
 impl<S: DescScheduler> WorkerOps<S> for UltWorker<S> {
     fn current() -> Option<&'static Self> {
         <S::Lookup as crate::resumable::common::lookup::CurrentLookup<S>>::current()
-    }
-
-    fn execute(&self, cont: S::Item) {
-        S::execute(self, cont);
     }
 }
 

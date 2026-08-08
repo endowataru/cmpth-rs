@@ -8,7 +8,7 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::AtomicUsize;
 
 use crate::resumable::common::desc::{DescOwned, HasDescOwned, HasExternalQueue, SuspendedTaskToken, TaskDescCore, TaskDescAlloc, JS_DETACHED, JS_RUNNING};
-use crate::resumable::common::system::SchedulerSystem;
+use crate::resumable::common::system::PoolSystem;
 use crate::resumable::stackless::desc::{TaskPollFn, WakerTaskDesc, WakerTaskDescCore};
 
 /// A dual task is never both a real ULT and a `spawn_async` future — this
@@ -34,26 +34,26 @@ enum TaskDispatch<D> {
 /// `spawn_async` future at once, but which one it is isn't known until the
 /// allocating call site commits (see [`HasCtx::commit_as_ctx`](crate::resumable::stackful::desc::HasCtx::commit_as_ctx)/
 /// [`HasPollFn::commit_as_poll_fn`](crate::resumable::stackless::desc::HasPollFn::commit_as_poll_fn)).
-pub struct DualOwned<S: SchedulerSystem> {
+pub struct DualOwned<S: PoolSystem> {
     desc_owned: DescOwned,
     external_queue: *const S::ExternalQueue,
     dispatch: TaskDispatch<DualTaskDesc<S>>,
 }
 
-impl<S: SchedulerSystem> HasDescOwned for DualOwned<S> {
+impl<S: PoolSystem> HasDescOwned for DualOwned<S> {
     fn desc_owned(&self) -> &DescOwned { &self.desc_owned }
     fn desc_owned_mut(&mut self) -> &mut DescOwned { &mut self.desc_owned }
 }
 
 // See `stackful::desc::StackfulOnlyOwned`'s matching impl for why `Desc =
 // DualTaskDesc<S>` is pinned here — identical reasoning.
-impl<S: SchedulerSystem<Desc = DualTaskDesc<S>>> HasExternalQueue<DualTaskDesc<S>> for DualOwned<S> {
+impl<S: PoolSystem<Desc = DualTaskDesc<S>>> HasExternalQueue<DualTaskDesc<S>> for DualOwned<S> {
     type Queue = S::ExternalQueue;
     fn external_queue(&self) -> *const S::ExternalQueue { self.external_queue }
     fn set_external_queue(&mut self, queue: *const S::ExternalQueue) { self.external_queue = queue; }
 }
 
-impl<S: SchedulerSystem> crate::resumable::stackful::desc::HasCtx for DualOwned<S> {
+impl<S: PoolSystem> crate::resumable::stackful::desc::HasCtx for DualOwned<S> {
     fn ctx(&self) -> *mut u8 {
         match self.dispatch {
             TaskDispatch::Ctx(ctx) => ctx,
@@ -79,7 +79,7 @@ impl<S: SchedulerSystem> crate::resumable::stackful::desc::HasCtx for DualOwned<
     }
 }
 
-impl<S: SchedulerSystem> crate::resumable::stackless::desc::HasPollFn<DualTaskDesc<S>> for DualOwned<S> {
+impl<S: PoolSystem> crate::resumable::stackless::desc::HasPollFn<DualTaskDesc<S>> for DualOwned<S> {
     fn poll_fn(&self) -> Option<TaskPollFn<DualTaskDesc<S>>> {
         match self.dispatch {
             TaskDispatch::PollFn(poll_fn) => poll_fn,
@@ -113,7 +113,7 @@ impl<S: SchedulerSystem> crate::resumable::stackless::desc::HasPollFn<DualTaskDe
 /// implements every trait at once, since a stackful sync joiner and a
 /// stackless async waker can race to register on the *same* task
 /// regardless of which one the task itself turns out to be.
-pub struct DualTaskDesc<S: SchedulerSystem> {
+pub struct DualTaskDesc<S: PoolSystem> {
     owned: UnsafeCell<DualOwned<S>>,
     join_state: AtomicUsize,
     is_root: bool,
@@ -121,10 +121,10 @@ pub struct DualTaskDesc<S: SchedulerSystem> {
     stack: crate::resumable::common::stack::StackMem,
 }
 
-unsafe impl<S: SchedulerSystem> Send for DualTaskDesc<S> {}
-unsafe impl<S: SchedulerSystem> Sync for DualTaskDesc<S> {}
+unsafe impl<S: PoolSystem> Send for DualTaskDesc<S> {}
+unsafe impl<S: PoolSystem> Sync for DualTaskDesc<S> {}
 
-impl<S: SchedulerSystem> TaskDescCore for DualTaskDesc<S> {
+impl<S: PoolSystem> TaskDescCore for DualTaskDesc<S> {
     fn join_state(&self) -> &AtomicUsize { &self.join_state }
     fn is_root(&self) -> bool { self.is_root }
     fn stack_top(&self) -> *mut u8 { self.stack.top() }
@@ -141,11 +141,11 @@ impl<S: SchedulerSystem> TaskDescCore for DualTaskDesc<S> {
     }
 }
 
-impl<S: SchedulerSystem> WakerTaskDescCore for DualTaskDesc<S> {
+impl<S: PoolSystem> WakerTaskDescCore for DualTaskDesc<S> {
     fn waker_refs(&self) -> &AtomicUsize { &self.waker_refs }
 }
 
-impl<S: SchedulerSystem> TaskDescAlloc for DualTaskDesc<S> {
+impl<S: PoolSystem> TaskDescAlloc for DualTaskDesc<S> {
     fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> Self {
         DualTaskDesc::alloc_with(stack, has_handle)
     }
@@ -163,7 +163,7 @@ impl<S: SchedulerSystem> TaskDescAlloc for DualTaskDesc<S> {
     }
 }
 
-impl<S: SchedulerSystem> DualTaskDesc<S> {
+impl<S: PoolSystem> DualTaskDesc<S> {
     /// Construct a descriptor value with a heap stack. Used (among other
     /// things) by `spawn_async` (whose "stack" only stores the future — no
     /// code runs on it, but it's allocated the same way regardless).
