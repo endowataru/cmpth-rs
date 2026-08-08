@@ -25,7 +25,7 @@ use crate::traits::stackful::{
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
-use crate::resumable::common::desc::{HasScheduler, SuspendedTaskToken, TaskDescCore};
+use crate::resumable::common::desc::{HasExternalQueue, SuspendedTaskToken, TaskDescCore};
 use crate::resumable::common::stack::StackAlloc;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::stackful::suspended::StackfulOnlyResumableCore;
@@ -45,20 +45,20 @@ pub use crate::traits::stackful::StackfulTaskSystem;
 /// trait at all, which is exactly the point: it makes "this system can run
 /// real ULTs" a checkable, compile-time fact instead of a convention.
 ///
-/// Both `Desc: StackfulTaskDesc` and `Owned: HasScheduler<System = Self>`
-/// are nested directly in the supertrait bound list (`DescScheduler<Desc:
-/// ...>`), not a separate `where`-clause — that's what lets every function
-/// merely bounded `S: StackfulSchedulerSystem` get both for free, with no
-/// need to restate either. A `where`-clause form (`SchedulerSystem where
-/// Self::Desc: ...`) does *not* propagate this way (verified empirically,
-/// both for a `where`-clause on this trait's own declaration and for one on
-/// `SchedulerSystem::Desc`'s declaration in a different trait) — only
-/// associated-type bounds nested in a supertrait's own bound list are
-/// treated as real implied bounds. [`DescScheduler`] itself is one such
-/// supertrait, folding in `Item`/`Worker` once so this trait doesn't have
-/// to restate them.
+/// Both `Desc: StackfulTaskDesc` and `Owned: HasExternalQueue<Self::Desc,
+/// Queue = Self::ExternalQueue>` are nested directly in the supertrait bound
+/// list (`DescScheduler<Desc: ...>`), not a separate `where`-clause — that's
+/// what lets every function merely bounded `S: StackfulSchedulerSystem` get
+/// both for free, with no need to restate either. A `where`-clause form
+/// (`SchedulerSystem where Self::Desc: ...`) does *not* propagate this way
+/// (verified empirically, both for a `where`-clause on this trait's own
+/// declaration and for one on `SchedulerSystem::Desc`'s declaration in a
+/// different trait) — only associated-type bounds nested in a supertrait's
+/// own bound list are treated as real implied bounds. [`DescScheduler`]
+/// itself is one such supertrait, folding in `Item`/`Worker` once so this
+/// trait doesn't have to restate them.
 pub trait StackfulSchedulerSystem:
-    DescScheduler<Desc: StackfulTaskDesc + TaskDescCore<Owned: HasScheduler<System = Self>>>
+    DescScheduler<Desc: StackfulTaskDesc + TaskDescCore<Owned: HasExternalQueue<Self::Desc, Queue = Self::ExternalQueue>>>
 {
     /// Context-switch implementation.
     type Ctx: ContextPolicy;
@@ -214,13 +214,13 @@ pub trait UltIdentity: Sized + Send + Sync + 'static {
     /// [`DualTaskDesc<Self>`](crate::resumable::dual::desc::DualTaskDesc)
     /// instead. `where Self: SchedulerSystem` for the same reason `Lookup`/
     /// `worker_tls_anchor` need it (see this trait's own doc comment) —
-    /// `StackfulOnlyTaskDesc<Self>`'s `Owned: HasCtx + HasScheduler` bound
-    /// would otherwise require `Self: SchedulerSystem` to typecheck the
+    /// `StackfulOnlyTaskDesc<Self>`'s `Owned: HasCtx + HasExternalQueue<Self::Desc>`
+    /// bound would otherwise require `Self: SchedulerSystem` to typecheck the
     /// associated type itself, before the blanket impl proving it is done
     /// being checked.
     type Desc: crate::resumable::common::desc::TaskDescAlloc
         + StackfulTaskDesc
-        + TaskDescCore<Owned: HasScheduler<System = Self>>
+        + TaskDescCore<Owned: HasExternalQueue<<Self as UltIdentity>::Desc, Queue = Self::ExternalQueue>>
     where
         Self: SchedulerSystem;
 
@@ -283,7 +283,8 @@ impl<M: UltIdentity> SchedulerSystem for M {
 impl<M: UltIdentity> StackfulSchedulerSystem for M
 where
     <M as SchedulerSystem>::Desc: StackfulTaskDesc,
-    <<M as SchedulerSystem>::Desc as TaskDescCore>::Owned: HasScheduler<System = M>,
+    <<M as SchedulerSystem>::Desc as TaskDescCore>::Owned:
+        HasExternalQueue<<M as SchedulerSystem>::Desc, Queue = <M as SchedulerSystem>::ExternalQueue>,
 {
     type Ctx = M::Ctx;
     type StackAlloc = M::Alloc;

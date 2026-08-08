@@ -73,7 +73,7 @@ use crate::traits::common::TlsSlot;
 use crate::traits::stackful::{JoinHandleLike, ThreadSystem};
 use crate::traits::system::stackful::{StackfulBuilder, StackfulInitSystem};
 use crate::resumable::common::deque::WorkerRunQueue;
-use crate::resumable::common::desc::{HasScheduler, RunningTaskToken, SuspendedTaskToken, TaskDescAlloc};
+use crate::resumable::common::desc::{HasExternalQueue, RunningTaskToken, SuspendedTaskToken, TaskDescAlloc};
 use crate::resumable::common::external_queue::ExternalQueue;
 use crate::resumable::common::pool::{DescPool, DynamicPool};
 use crate::resumable::common::scheduler::{recursion_pool_threshold, worker_idle_loop, worker_loop, Scheduler};
@@ -181,8 +181,8 @@ where
 
     // Build the calling native stack's own pseudo-descriptor — see
     // `InitState::caller_desc`'s doc comment for why this can't just be
-    // `wk0.root_desc()`. `commit_as_ctx`/`set_scheduler` mirror `spawn`'s/
-    // `fork_parent_first`'s identical setup for any freshly built
+    // `wk0.root_desc()`. `commit_as_ctx`/`set_external_queue` mirror
+    // `spawn`'s/`fork_parent_first`'s identical setup for any freshly built
     // ctx-bearing descriptor (a no-op for a plain stackful-only `Owned`,
     // load-bearing for a dual system's ctx/poll_fn union).
     let mut caller_desc = S::Desc::alloc_with(StackMem::None, false);
@@ -191,7 +191,7 @@ where
         // pointer to yet — trivially exclusive.
         let mut token = unsafe { SuspendedTaskToken::from_raw(&mut caller_desc as *mut S::Desc) };
         token.commit_as_ctx();
-        token.set_scheduler(Arc::as_ptr(&shared));
+        token.set_external_queue(&shared.external_queue as *const _);
         let _ = token.into_raw();
     }
     let state = Arc::new(InitState { caller_desc, dest_cont: Cell::new(None) });

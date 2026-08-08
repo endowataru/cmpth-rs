@@ -15,7 +15,7 @@
 //! (implementors supply accessors; scheduler code only ever calls the
 //! trait) — a concrete descriptor type is a contract to implement, not a
 //! fixed struct to match byte-for-byte. Owner-exclusive fields
-//! (`tls`/`scheduler`, plus each flavor's own `ctx`/`poll_fn`) live
+//! (`tls`/`external_queue`, plus each flavor's own `ctx`/`poll_fn`) live
 //! in a per-flavor [`TaskDesc::Owned`] struct, reached only through a
 //! [`SuspendedTaskToken`]/[`RunningTaskToken`]'s `Deref`/`DerefMut` — see
 //! [`DescOwned`]/[`HasDescOwned`]'s doc comments for why.
@@ -153,52 +153,79 @@ impl DescOwned {
     }
 }
 
-/// Implemented by a [`TaskDescCore::Owned`] type that can hold a pointer
-/// back to the [`Scheduler<S>`](crate::resumable::common::scheduler::Scheduler)
-/// that owns this task — genuinely per-`S`-instance, not per-`S`-type: a
-/// system's `run::<S>()` can have multiple live `Scheduler<S>` instances at
-/// once (nothing prevents two independent `run::<S>()` calls on different
-/// threads), so this can't be resolved through a single `S`-keyed static the
-/// way `S::worker_tls()` is. Set at task-creation time (`spawn`/
-/// `spawn_async`/`fork_parent_first`, regardless of task flavor) so `wake()`
-/// called from an external OS thread — with no worker TLS to consult at all —
-/// can still reach the right instance's `ExternalQueue`. Null for root
-/// pseudo-descriptors.
+/// Implemented by a [`TaskDescCore::Owned`] type that records the capability
+/// "this task can be woken by a thread that is not one of its own pool's
+/// workers" — the descriptor remembers where such a wake should deliver its
+/// continuation.
+///
+/// The target is the queue, not the whole
+/// [`Scheduler<S>`](crate::resumable::common::scheduler::Scheduler): the
+/// only reader, `push_continuation`, only ever pushes onto it. Naming
+/// `Scheduler<S>` here — as this used to (`HasScheduler`) — forced the
+/// descriptor layer to depend on the scheduler layer for no reason beyond
+/// reaching one field, and forced an extra `System` associated type that
+/// existed purely so `Scheduler<Self::System>` had something to name. A
+/// pointer straight to the
+/// [`ExternalWakeQueue`](crate::resumable::common::external_queue::ExternalWakeQueue)
+/// the descriptor is actually allowed to see removes both: the descriptor
+/// layer never needs to know `Scheduler` exists at all.
+///
+/// A raw pointer, not a reference: the queue outlives the descriptor, but
+/// that is an invariant of the pool's lifecycle (the queue lives in the
+/// `Scheduler`, which outlives every task it schedules), not something the
+/// borrow checker can carry across a token whose own lifetime is tied to the
+/// pool, not to this field. A reference would also be the wrong shape at the
+/// one read site regardless: `push_continuation` must copy the pointer out
+/// *before* it moves the token that borrows it (the push consumes the
+/// token), so a borrow that outlived the copy would be self-defeating.
+/// Null for root pseudo-descriptors, and for any task never handed to an
+/// external waker.
+///
+/// Set at task-creation time (`spawn`/`spawn_async`/`fork_parent_first`/
+/// `init`, regardless of task flavor) rather than resolved through a single
+/// `S`-keyed static the way `S::worker_tls()` is: a system's `run::<S>()`
+/// can have multiple live `Scheduler<S>` instances at once (nothing
+/// prevents two independent `run::<S>()` calls on different threads, each
+/// with its own external queue), so a process-wide per-`S` static would
+/// pick the wrong instance's queue as often as the right one.
 ///
 /// Same shape as [`HasCtx`](crate::resumable::stackful::desc::HasCtx)/
 /// [`HasPollFn`](crate::resumable::stackless::desc::HasPollFn): a capability
-/// trait implemented by each flavor's own `Owned` struct. `System` (not a
-/// generic parameter) names which `SchedulerSystem` this `Owned` belongs to
-/// — this crate's three concrete `Owned` types are each already
-/// parameterized by their own `S`, so `System = S` is a trivial projection,
-/// not an extra type to track.
+/// trait implemented by each flavor's own `Owned` struct, parameterized by
+/// `D` (not a generic type parameter of `Self`) for the same reason
+/// [`HasPollFn<D>`](crate::resumable::stackless::desc::HasPollFn) is — this
+/// crate's three concrete `Owned` types are each already parameterized by
+/// their own `S`, so naming `D` here is what lets the *equality*
+/// (`Queue = S::ExternalQueue`) be pinned independently of which `Owned`
+/// happens to implement the trait.
 ///
-/// Folded in as a supertrait bound (unpinned `Owned: HasScheduler`, no
-/// `System` equality yet) on
+/// Folded in as a supertrait bound (unpinned `Owned: HasExternalQueue<Self>`,
+/// no `Queue` equality yet) on
 /// [`StackfulTaskDesc`](crate::resumable::stackful::desc::StackfulTaskDesc)
 /// and [`AsyncTaskDesc`](crate::resumable::stackless::desc::AsyncTaskDesc).
 /// The equality that actually matters for call sites —
-/// `HasScheduler<System = S>` for the exact `S` in scope — is instead pinned
-/// on [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem)/
+/// `HasExternalQueue<S::Desc, Queue = S::ExternalQueue>` for the exact `S` in
+/// scope — is instead pinned on
+/// [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem)/
 /// [`StacklessSchedulerSystem`](crate::resumable::stackless::system::StacklessSchedulerSystem)
 /// (each `S`-aware, unlike the `D`-only marker traits above), nested
-/// directly in their own supertrait bound list
-/// (`SchedulerSystem<Desc: ... + TaskDescCore<Owned: HasScheduler<System =
-/// Self>>>`), not a separate `where`-clause. This distinction is load-bearing,
-/// not stylistic: a `where`-clause attached to an associated type's own
-/// declaration (whether on `SchedulerSystem::Desc` itself, or as a
-/// *separate* `where`-clause on `StackfulSchedulerSystem`'s trait
-/// declaration) is *not* an implied bound at call sites merely bounded by
-/// the trait — verified empirically, twice, the hard way. Only an
+/// directly in their own supertrait bound list (`SchedulerSystem<Desc: ... +
+/// TaskDescCore<Owned: HasExternalQueue<Self::Desc, Queue =
+/// Self::ExternalQueue>>>`), not a separate `where`-clause. This distinction
+/// is load-bearing, not stylistic: a `where`-clause attached to an
+/// associated type's own declaration (whether on `SchedulerSystem::Desc`
+/// itself, or as a *separate* `where`-clause on `StackfulSchedulerSystem`'s
+/// trait declaration) is *not* an implied bound at call sites merely bounded
+/// by the trait — verified empirically, twice, the hard way. Only an
 /// associated-type bound nested inside a supertrait's own bound list
 /// propagates as a real implied bound. `push_continuation` is the one
-/// genuine leaf that reads `scheduler` without either flavor trait in scope
-/// (it's only ever bounded on bare `SchedulerSystem`), so it restates
-/// `HasScheduler<System = S>` explicitly instead.
-pub trait HasScheduler {
-    type System: crate::resumable::common::system::SchedulerSystem;
-    fn scheduler(&self) -> *const crate::resumable::common::scheduler::Scheduler<Self::System>;
-    fn set_scheduler(&mut self, scheduler: *const crate::resumable::common::scheduler::Scheduler<Self::System>);
+/// genuine leaf that reads `external_queue` without either flavor trait in
+/// scope (it's only ever bounded on bare `SchedulerSystem`), so it restates
+/// `HasExternalQueue<S::Desc>` explicitly instead.
+pub trait HasExternalQueue<D: TaskDescCore> {
+    type Queue: crate::resumable::common::external_queue::ExternalWakeQueue<D>;
+    fn external_queue(&self) -> *const Self::Queue;
+    fn set_external_queue(&mut self, queue: *const Self::Queue);
 }
 
 /// Implemented by every [`TaskDesc::Owned`] type: gives generic code access

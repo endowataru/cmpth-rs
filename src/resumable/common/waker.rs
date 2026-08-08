@@ -18,8 +18,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::resumable::common::system::DescScheduler;
 use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
-use crate::resumable::common::desc::{HasScheduler, SuspendedTaskToken};
-use crate::resumable::common::external_queue::ExternalQueue;
+use crate::resumable::common::desc::{HasExternalQueue, SuspendedTaskToken};
+use crate::resumable::common::external_queue::ExternalWakeQueue;
 
 /// Outcome of a wake attempt against a POLLING/PARKED/NOTIFIED state
 /// machine — the return type of [`try_wake_state`]. Crate-private: the only
@@ -173,19 +173,25 @@ pub(crate) fn try_wake_state(state: &AtomicUsize) -> WakeOutcome {
 /// it — one `from_raw` per genuine ownership transfer, not two.
 pub(crate) fn push_continuation<S: DescScheduler>(token: SuspendedTaskToken<S::Desc>)
 where
-    <S::Desc as crate::resumable::common::desc::TaskDescCore>::Owned: HasScheduler<System = S>,
+    <S::Desc as crate::resumable::common::desc::TaskDescCore>::Owned: HasExternalQueue<S::Desc>,
 {
     match UltWorker::<S>::current() {
         Some(wk) => wk.push(token),
         None => {
-            let scheduler = token.scheduler();
+            // Copy the pointer out before `push` below consumes `token`
+            // (and with it, the borrow `external_queue()` would otherwise
+            // need).
+            let queue = token.external_queue();
             assert!(
-                !scheduler.is_null(),
+                !queue.is_null(),
                 "cmpth: wake() called from outside ULT scheduler \
-                 and task has no scheduler reference"
+                 and task has no external queue reference"
             );
-            let scheduler = unsafe { &*scheduler };
-            scheduler.external_queue.push(token);
+            // SAFETY: non-null (asserted above) means task creation stored
+            // this pool's external queue here, and the queue lives in the
+            // `Scheduler` that outlives every task it schedules — including
+            // this one, whose continuation we still hold.
+            unsafe { &*queue }.push(token);
         }
     }
 }

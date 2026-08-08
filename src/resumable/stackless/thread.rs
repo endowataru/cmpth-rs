@@ -14,7 +14,7 @@ use std::task::{Context, Poll};
 use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
 use crate::resumable::stackless::system::StacklessSchedulerSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
-use crate::resumable::common::desc::{HasScheduler, SuspendedTaskToken, TaskDesc, TaskDescAlloc, TaskDescCore, TaskExitSink};
+use crate::resumable::common::desc::{HasExternalQueue, SuspendedTaskToken, TaskDesc, TaskDescAlloc, TaskDescCore, TaskExitSink};
 use crate::resumable::stackless::desc::WakerTaskDesc;
 use crate::resumable::stackless::desc::{AsyncTaskDesc, HasPollFn, TaskPollResult};
 use crate::resumable::common::pool::{DescPool, DynamicPool};
@@ -228,7 +228,7 @@ where
     // and has never been wrapped in a token before — trivially exclusive.
     let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
     token.commit_as_poll_fn();
-    token.set_scheduler(wk.shared.get());
+    token.set_external_queue(&wk.shared().external_queue as *const _);
 
     let stack_top = token.as_desc().stack_top() as usize;
     let result_addr = align_down(stack_top - result_layout.size(), result_layout.align());
@@ -514,7 +514,7 @@ impl<S: DescScheduler, F> Drop for RecursionFrame<S, F> {
 /// stackful root. `has_handle = false` (no `JoinHandle` is produced), so
 /// completion runs the same abandoned/`reclaim` path as the stackful
 /// root's `exit()` — reuses [`poll_spawned_task`] directly with `T = ()`.
-pub(crate) fn fork_async_parent_first<S, F>(f: F, scheduler: *const crate::resumable::common::scheduler::Scheduler<S>) -> SuspendedTaskToken<S::Desc>
+pub(crate) fn fork_async_parent_first<S, F>(f: F, external_queue: *const S::ExternalQueue) -> SuspendedTaskToken<S::Desc>
 where
     S: StacklessSchedulerSystem,
     F: Future<Output = ()> + Send + 'static,
@@ -542,7 +542,7 @@ where
     // wrapped in a token before — trivially exclusive.
     let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
     token.commit_as_poll_fn();
-    token.set_scheduler(scheduler);
+    token.set_external_queue(external_queue);
 
     let stack_top = token.as_desc().stack_top() as usize;
     let result_addr = align_down(stack_top - result_layout.size(), result_layout.align());

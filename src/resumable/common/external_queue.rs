@@ -5,7 +5,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::traits::stackful::ThreadSystem;
-use crate::resumable::common::desc::SuspendedTaskToken;
+use crate::resumable::common::desc::{SuspendedTaskToken, TaskDescCore};
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
@@ -13,6 +13,17 @@ use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
 // ---------------------------------------------------------------------------
 // Trait
 // ---------------------------------------------------------------------------
+
+/// Producer side of the external queue: all an off-pool thread needs to
+/// hand a continuation back to a pool. Parameterized by the descriptor
+/// type alone — deliberately narrower than [`ExternalQueue`], whose
+/// consumer side (`try_pop`/`run_service`) needs the whole system. This is
+/// what a task descriptor is allowed to see (see
+/// [`HasExternalQueue`](crate::resumable::common::desc::HasExternalQueue)).
+pub trait ExternalWakeQueue<D: TaskDescCore>: Send + Sync + 'static {
+    /// Push a continuation from an external (non-worker) OS thread.
+    fn push(&self, cont: SuspendedTaskToken<D>);
+}
 
 /// How continuations pushed by external OS threads reach the ULT scheduler.
 /// Base-level (`S: SchedulerSystem`): a stackless-only system still needs a
@@ -32,10 +43,7 @@ use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
 ///   joins it, once the caller is already running as a schedulable ULT.
 ///
 /// [`NEEDS_SERVICE`]: ExternalQueue::NEEDS_SERVICE
-pub trait ExternalQueue<S: SchedulerSystem>: Default + Send + Sync + 'static {
-    /// Push a continuation from an external (non-worker) OS thread.
-    fn push(&self, cont: SuspendedTaskToken<S::Desc>);
-
+pub trait ExternalQueue<S: SchedulerSystem>: ExternalWakeQueue<S::Desc> + Default + Send + Sync + 'static {
     /// Drain one item from the queue in the worker steal-fail path.
     ///
     /// [`PollerUltQueue`] always returns `None`; the poller ULT handles
@@ -80,12 +88,14 @@ impl<D: crate::resumable::common::desc::TaskDescCore> Default for StealPathQueue
     }
 }
 
-impl<S: SchedulerSystem> ExternalQueue<S> for StealPathQueue<S::Desc> {
-    fn push(&self, cont: SuspendedTaskToken<S::Desc>) {
+impl<D: crate::resumable::common::desc::TaskDescCore> ExternalWakeQueue<D> for StealPathQueue<D> {
+    fn push(&self, cont: SuspendedTaskToken<D>) {
         self.inner.lock().unwrap().push(cont);
         self.non_empty.store(true, Ordering::Release);
     }
+}
 
+impl<S: SchedulerSystem> ExternalQueue<S> for StealPathQueue<S::Desc> {
     fn try_pop(&self) -> Option<SuspendedTaskToken<S::Desc>> {
         if !self.non_empty.load(Ordering::Acquire) {
             return None;
@@ -125,14 +135,16 @@ impl<D: crate::resumable::common::desc::TaskDescCore> Default for PollerUltQueue
     }
 }
 
+impl<D: crate::resumable::common::desc::TaskDescCore> ExternalWakeQueue<D> for PollerUltQueue<D> {
+    fn push(&self, cont: SuspendedTaskToken<D>) {
+        self.inner.lock().unwrap().push(cont);
+    }
+}
+
 impl<S: StackfulSchedulerSystem + ThreadSystem> ExternalQueue<S> for PollerUltQueue<S::Desc>
 where
     S::Desc: crate::resumable::stackful::desc::StackfulTaskDesc,
 {
-    fn push(&self, cont: SuspendedTaskToken<S::Desc>) {
-        self.inner.lock().unwrap().push(cont);
-    }
-
     fn try_pop(&self) -> Option<SuspendedTaskToken<S::Desc>> {
         None
     }

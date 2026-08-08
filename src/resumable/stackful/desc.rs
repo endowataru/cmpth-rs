@@ -5,8 +5,7 @@
 use std::cell::UnsafeCell;
 use std::sync::atomic::AtomicUsize;
 
-use crate::resumable::common::desc::{DescOwned, HasDescOwned, HasScheduler, RunningTaskToken, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskDescAlloc, JS_DETACHED, JS_RUNNING};
-use crate::resumable::common::scheduler::Scheduler;
+use crate::resumable::common::desc::{DescOwned, HasDescOwned, HasExternalQueue, RunningTaskToken, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskDescAlloc, JS_DETACHED, JS_RUNNING};
 use crate::resumable::common::system::SchedulerSystem;
 use crate::traits::stackful::HandoffTaskDesc;
 
@@ -75,7 +74,7 @@ pub trait HasCtx {
 ///
 /// Also pins `Suspended = SuspendedTaskToken<Self>` (nested in this trait's
 /// own supertrait bound list, so it propagates as a real implied bound at
-/// call sites merely bounded by `StackfulTaskDesc` — see [`HasScheduler`]'s
+/// call sites merely bounded by `StackfulTaskDesc` — see [`HasExternalQueue`]'s
 /// doc comment for why the nesting position matters): every call site in
 /// this crate that receives a `HandoffTaskDesc`/`TaskDesc::Suspended` token
 /// generic only over `S::Desc: StackfulTaskDesc` immediately hands it to
@@ -84,10 +83,10 @@ pub trait HasCtx {
 /// needs to be visible there, not just to this trait's own default-less
 /// methods.
 pub trait StackfulTaskDesc:
-    HandoffTaskDesc + TaskDesc<Suspended = SuspendedTaskToken<Self>> + TaskDescCore<Owned: HasCtx + HasScheduler>
+    HandoffTaskDesc + TaskDesc<Suspended = SuspendedTaskToken<Self>> + TaskDescCore<Owned: HasCtx + HasExternalQueue<Self>>
 {}
 
-impl<D: HandoffTaskDesc + TaskDesc<Suspended = SuspendedTaskToken<D>> + TaskDescCore<Owned: HasCtx + HasScheduler>> StackfulTaskDesc for D {}
+impl<D: HandoffTaskDesc + TaskDesc<Suspended = SuspendedTaskToken<D>> + TaskDescCore<Owned: HasCtx + HasExternalQueue<D>>> StackfulTaskDesc for D {}
 
 impl<D: TaskDescCore<Owned: HasCtx>> SuspendedTaskToken<D> {
     /// Claim this task's saved context before switching into it (swap to
@@ -137,7 +136,7 @@ impl<D: TaskDescCore<Owned: HasCtx>> RunningTaskToken<D> {
 /// has one).
 pub struct StackfulOnlyOwned<S: SchedulerSystem> {
     desc_owned: DescOwned,
-    scheduler: *const Scheduler<S>,
+    external_queue: *const S::ExternalQueue,
     ctx: *mut u8,
 }
 
@@ -146,10 +145,18 @@ impl<S: SchedulerSystem> HasDescOwned for StackfulOnlyOwned<S> {
     fn desc_owned_mut(&mut self) -> &mut DescOwned { &mut self.desc_owned }
 }
 
-impl<S: SchedulerSystem> HasScheduler for StackfulOnlyOwned<S> {
-    type System = S;
-    fn scheduler(&self) -> *const Scheduler<S> { self.scheduler }
-    fn set_scheduler(&mut self, scheduler: *const Scheduler<S>) { self.scheduler = scheduler; }
+// `Desc = StackfulOnlyTaskDesc<S>` pins down which `S::ExternalQueue`
+// this is: `S::ExternalQueue` is only known (via `ExternalQueue<S>`'s
+// `ExternalWakeQueue<S::Desc>` supertrait) to push `S::Desc`-typed
+// continuations, so the compiler needs `S::Desc` nailed down to
+// `StackfulOnlyTaskDesc<S>` itself to see that it satisfies
+// `ExternalWakeQueue<StackfulOnlyTaskDesc<S>>` — true at every real call
+// site (this `Owned` only ever backs `StackfulOnlyTaskDesc<S>`), just not
+// derivable from `S: SchedulerSystem` alone.
+impl<S: SchedulerSystem<Desc = StackfulOnlyTaskDesc<S>>> HasExternalQueue<StackfulOnlyTaskDesc<S>> for StackfulOnlyOwned<S> {
+    type Queue = S::ExternalQueue;
+    fn external_queue(&self) -> *const S::ExternalQueue { self.external_queue }
+    fn set_external_queue(&mut self, queue: *const S::ExternalQueue) { self.external_queue = queue; }
 }
 
 impl<S: SchedulerSystem> HasCtx for StackfulOnlyOwned<S> {
@@ -214,7 +221,7 @@ impl<S: SchedulerSystem> StackfulOnlyTaskDesc<S> {
     pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> StackfulOnlyTaskDesc<S> {
         let desc_owned = DescOwned::new();
         StackfulOnlyTaskDesc {
-            owned: UnsafeCell::new(StackfulOnlyOwned { desc_owned, scheduler: std::ptr::null(), ctx: std::ptr::null_mut() }),
+            owned: UnsafeCell::new(StackfulOnlyOwned { desc_owned, external_queue: std::ptr::null(), ctx: std::ptr::null_mut() }),
             is_root: false,
             join_state: AtomicUsize::new(if has_handle { JS_RUNNING } else { JS_DETACHED }),
             stack,
@@ -224,7 +231,7 @@ impl<S: SchedulerSystem> StackfulOnlyTaskDesc<S> {
     /// Pseudo-descriptor for a worker's scheduler-loop context.
     pub(crate) fn new_root() -> StackfulOnlyTaskDesc<S> {
         StackfulOnlyTaskDesc {
-            owned: UnsafeCell::new(StackfulOnlyOwned { desc_owned: DescOwned::new(), scheduler: std::ptr::null(), ctx: std::ptr::null_mut() }),
+            owned: UnsafeCell::new(StackfulOnlyOwned { desc_owned: DescOwned::new(), external_queue: std::ptr::null(), ctx: std::ptr::null_mut() }),
             is_root: true,
             join_state: AtomicUsize::new(JS_DETACHED),
             stack: crate::resumable::common::stack::StackMem::None,
