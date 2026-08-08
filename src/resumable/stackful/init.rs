@@ -23,7 +23,8 @@
 //! "child" here is the scheduler loop.
 //!
 //! One cmpth-rs-specific wrinkle the C++ side doesn't have to think about:
-//! [`crate::resumable::stackful::worker::execute_stackful`] unconditionally
+//! the stackful-only [`RunnableItem`](crate::resumable::common::system::RunnableItem)
+//! impl (`resumable::stackful::worker`) unconditionally
 //! records *whatever was running right before a switch* as the worker's
 //! `root_cont` (the fallback `pop_or_root`
 //! resumes when the local deque is empty) — C++'s equivalent

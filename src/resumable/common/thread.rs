@@ -9,7 +9,7 @@
 use std::any::Any;
 use std::marker::PhantomData;
 
-use crate::resumable::common::system::DescScheduler;
+use crate::resumable::common::system::{DescScheduler, ReclaimableDesc, SchedulerSystem};
 use crate::resumable::common::desc::TaskDesc;
 use crate::resumable::common::pool::free_desc;
 use crate::resumable::common::worker::{UltWorker, WorkerOps};
@@ -32,7 +32,7 @@ pub(crate) fn align_down(addr: usize, align: usize) -> usize {
 // `Worker::current()` and so needs this bound. Every real system satisfies
 // it (see `DescScheduler`'s doc comment), so this costs nothing beyond the
 // restatement.
-pub struct JoinHandle<S: DescScheduler, T> {
+pub struct JoinHandle<S: DescScheduler + SchedulerSystem, T> {
     pub(crate) desc: *mut S::Desc,
     pub(crate) result_ptr: *mut StackResult<T>,
     // Type-erased drop for the result slot; avoids a T: Send + 'static bound
@@ -45,11 +45,11 @@ pub(crate) unsafe fn drop_stack_result<T>(ptr: *mut ()) {
     unsafe { std::ptr::drop_in_place(ptr as *mut StackResult<T>) };
 }
 
-unsafe impl<S: DescScheduler, T: Send> Send for JoinHandle<S, T> {}
+unsafe impl<S: DescScheduler + SchedulerSystem, T: Send> Send for JoinHandle<S, T> {}
 // JoinHandle holds only raw pointers; it is safe to move at any time.
-impl<S: DescScheduler, T> Unpin for JoinHandle<S, T> {}
+impl<S: DescScheduler + SchedulerSystem, T> Unpin for JoinHandle<S, T> {}
 
-impl<S: DescScheduler, T> JoinHandle<S, T> {
+impl<S: DescScheduler + SchedulerSystem, T> JoinHandle<S, T> {
     /// Safe access to the descriptor's own `&self` methods. `self.desc` can
     /// be null (see [`Drop`] below — the "already consumed by
     /// `Future::poll`" state) so this must only be called where that's
@@ -62,13 +62,13 @@ impl<S: DescScheduler, T> JoinHandle<S, T> {
     }
 }
 
-impl<S: DescScheduler, T: Send + 'static> JoinHandle<S, T> {
+impl<S: DescScheduler + SchedulerSystem, T: Send + 'static> JoinHandle<S, T> {
     pub(crate) fn take_result(self, wk: &UltWorker<S>) -> Result<T, Box<dyn Any + Send>> {
         let desc = self.desc;
         let result_ptr = self.result_ptr;
         std::mem::forget(self);
         let sr = unsafe { result_ptr.read() };
-        S::free_finished_desc(wk, desc);
+        unsafe { <S::Desc as ReclaimableDesc<S>>::reclaim(wk, desc) };
         match sr {
             StackResult::Ok(val) => Ok(val),
             StackResult::Err(e) => Err(e),
@@ -90,7 +90,7 @@ impl<S: DescScheduler, T: Send + 'static> JoinHandle<S, T> {
 
 impl<S, T> Drop for JoinHandle<S, T>
 where
-    S: DescScheduler,
+    S: DescScheduler + SchedulerSystem,
 {
     // The common case (already consumed by `Future::poll`, `desc` null) is a
     // single branch; without this hint the compiler was leaving the whole
@@ -112,7 +112,7 @@ where
         if self.desc_ref().try_abandon() {
             unsafe { result_drop(result_ptr) };
             match UltWorker::<S>::current() {
-                Some(wk) => S::free_finished_desc(wk, desc),
+                Some(wk) => unsafe { <S::Desc as ReclaimableDesc<S>>::reclaim(wk, desc) },
                 None => unsafe { free_desc(desc) },
             }
         }

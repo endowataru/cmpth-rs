@@ -68,9 +68,9 @@ pub trait PoolSystem: Sized + Send + Sync + 'static {
 /// base, the run-queue/item types, current-worker lookup, and the TLS slot
 /// that anchors it. Split out as its own supertrait so this axis — "how do I
 /// find/drive a worker" — can be named independently of dispatch
-/// ([`SchedulerSystem::execute`]/[`SchedulerSystem::free_finished_desc`]),
-/// which a later step moves off `SchedulerSystem` entirely into capability
-/// traits that must not require it.
+/// ([`RunnableItem::run_on`]/[`ReclaimableDesc::reclaim`]), which now lives
+/// off `SchedulerSystem` entirely, on capability traits that must not
+/// require it.
 pub trait WorkerSystem: PoolSystem {
     /// The threading system this scheduler runs on.
     type Base: ThreadSystem + NestableSystem;
@@ -105,48 +105,52 @@ pub trait WorkerSystem: PoolSystem {
     fn worker_tls() -> &'static <Self::Base as NestableSystem>::ThreadSpecific<Self::Worker>;
 }
 
+/// Execution capability of a scheduling item: what it means to run one.
+/// Replaces the former `SchedulerSystem::execute` — the body was never a
+/// choice the system author made, it was fully determined by the descriptor
+/// flavor, so it belongs on the item type. Implemented on
+/// `SuspendedTaskToken<Desc>` once per descriptor flavor (stackful-only,
+/// dual, stackless-only) — see `resumable::stackful::worker`,
+/// `resumable::dual::worker`, `resumable::stackless::worker` for the bodies.
+pub trait RunnableItem<S: WorkerSystem> {
+    fn run_on(self, wk: &S::Worker);
+}
+
+/// Reclamation capability of a finished descriptor. Replaces the former
+/// `SchedulerSystem::free_finished_desc`, for the same reason: which pool
+/// (if any) a finished descriptor returns to is fully determined by the
+/// descriptor flavor, not a per-system choice.
+pub trait ReclaimableDesc<S: WorkerSystem> {
+    /// # Safety
+    /// No other references to `desc` may exist after this call.
+    unsafe fn reclaim(wk: &S::Worker, desc: *mut Self);
+}
+
 /// Dispatch subset of the base scheduler-system trait shared by every
 /// flavor (stackful, stackless, dual): running a popped continuation and
 /// freeing a finished descriptor.  Independent of whether tasks are stackful
 /// ULTs, stackless `spawn_async` futures, or both.
 ///
+/// A pure fold point, not implemented directly by concrete systems: the
+/// dispatch bodies formerly required here as `execute`/`free_finished_desc`
+/// methods now live on [`RunnableItem`]/[`ReclaimableDesc`], implemented per
+/// descriptor flavor rather than per system — see those traits. Blanket-derived
+/// for any `WorkerSystem` whose `Item`/`Desc` satisfy those capabilities, with
+/// both bounds nested directly in this trait's own supertrait bound list (not
+/// a separate `where`-clause): that is what lets every function merely
+/// bounded `S: SchedulerSystem` get `Self::Item: RunnableItem<Self>` and
+/// `Self::Desc: ReclaimableDesc<Self>` for free, with no need to restate
+/// either (verified empirically — a `where`-clause form does not propagate
+/// this way; see [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem)'s
+/// doc comment for the same rule applied to its own nested bounds).
+///
 /// Deliberately does **not** name a context-switch policy or stack
 /// allocator: a stackless-only system has no real stack to switch into, so
 /// requiring one here would force it to name machinery it never uses. See
 /// [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem) for the stackful extension.
-pub trait SchedulerSystem: WorkerSystem {
-    /// Run one continuation popped off a deque/root/external-queue.
-    ///
-    /// Required, with **no default**: the correct body depends entirely on
-    /// which task flavors this system supports, and a base `SchedulerSystem`
-    /// can't know that. Every concrete system supplies this directly by
-    /// calling exactly one of the free functions in `worker.rs`:
-    ///
-    /// - stackful-only: [`crate::resumable::stackful::worker::execute_stackful`] (always a
-    ///   real context switch — `Self::Desc` need not even implement
-    ///   `AsyncTaskDesc`, so there is no tag to check).
-    /// - dual: [`crate::resumable::dual::worker::execute_dual`] (today's poll_fn check).
-    /// - stackless-only (added when that flavor lands): always polls.
-    ///
-    /// This is ordinary trait-method overriding, not specialization: each
-    /// concrete marker struct gets exactly one `impl SchedulerSystem for
-    /// Self` block, so the compiler picks the right body statically.
-    fn execute(wk: &UltWorker<Self>, cont: SuspendedTaskToken<Self::Desc>);
+pub trait SchedulerSystem: WorkerSystem<Item: RunnableItem<Self>, Desc: ReclaimableDesc<Self>> {}
 
-    /// Free a finished task's descriptor once its `JoinHandle` is done with
-    /// it (`take_result`/`Drop`, both in `thread.rs`).
-    ///
-    /// Required, with **no default**, for the same reason as [`execute`]:
-    /// stackful-only frees always go through the pool
-    /// ([`crate::resumable::stackful::worker::free_finished_desc_stackful`]); stackless-only
-    /// descriptors always bypass the pool (variable-size `spawn_async`
-    /// allocations — [`crate::resumable::stackless::worker::free_finished_desc_async`]); dual
-    /// systems check `poll_fn` first
-    /// ([`crate::resumable::dual::worker::free_finished_desc_dual`]).
-    ///
-    /// [`execute`]: Self::execute
-    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut Self::Desc);
-}
+impl<S: WorkerSystem<Item: RunnableItem<S>, Desc: ReclaimableDesc<S>>> SchedulerSystem for S {}
 
 // ---------------------------------------------------------------------------
 // DescScheduler — the "engine's own token/worker" assumption, named once
@@ -163,14 +167,14 @@ pub trait SchedulerSystem: WorkerSystem {
 /// UltWorker<..>` on every generic function that touches both the abstract
 /// associated types and the concrete ones.
 pub trait DescScheduler:
-    SchedulerSystem + WorkerSystem<Item = SuspendedTaskToken<<Self as PoolSystem>::Desc>, Worker = UltWorker<Self>>
+    WorkerSystem<Item = SuspendedTaskToken<<Self as PoolSystem>::Desc>, Worker = UltWorker<Self>>
 {
 }
 
-impl<S: SchedulerSystem + WorkerSystem<Item = SuspendedTaskToken<<S as PoolSystem>::Desc>, Worker = UltWorker<S>>> DescScheduler for S {}
+impl<S: WorkerSystem<Item = SuspendedTaskToken<<S as PoolSystem>::Desc>, Worker = UltWorker<S>>> DescScheduler for S {}
 
 // ---------------------------------------------------------------------------
-// Blanket TaskSystem for every SchedulerSystem
+// Blanket TaskSystem for every DescScheduler
 // ---------------------------------------------------------------------------
 
 /// Every `resumable`-backed system (stackful, stackless, or dual alike)
@@ -178,10 +182,11 @@ impl<S: SchedulerSystem + WorkerSystem<Item = SuspendedTaskToken<<S as PoolSyste
 /// blanket-derived here rather than implemented per flavor — one impl
 /// covers `ThreadSystem`'s (stackful) and `StacklessTaskSystem`'s
 /// (stackless) supertrait requirement alike, since
-/// [`UltWorker::current`](crate::resumable::common::worker::WorkerOps::current)
-/// needs no bound beyond `SchedulerSystem` itself. Only the true base case
-/// (`OsSystem`, which isn't a `SchedulerSystem` at all — no managed worker
-/// pool) needs its own hand-written impl, in `os.rs`.
+/// [`UltWorker::current`](crate::resumable::common::worker::WorkerOps::current)/
+/// `num`/`num_workers` need no dispatch capability, just `DescScheduler`'s
+/// `Item`/`Worker` pinning. Only the true base case (`OsSystem`, which isn't
+/// even a `DescScheduler` — no managed worker pool) needs its own
+/// hand-written impl, in `os.rs`.
 impl<S: DescScheduler> TaskSystem for S {
     fn worker_num() -> usize {
         match UltWorker::<S>::current() {

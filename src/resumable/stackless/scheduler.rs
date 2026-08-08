@@ -30,11 +30,11 @@ use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
 /// stack or context from (this function only requires `S: SchedulerSystem`,
 /// not `S: StackfulSchedulerSystem`), and no current worker exists yet to call
 /// `spawn_async` through. The worker dispatch loop is reused unchanged from
-/// `run` — `Worker::execute` already dispatches through
-/// [`SchedulerSystem::execute`](crate::resumable::common::system::SchedulerSystem::execute),
-/// so a stackless-only system's override
-/// (always poll, never switch) is exercised automatically, with no separate
-/// dispatch loop needed here.
+/// `run` — a popped item's own
+/// [`RunnableItem::run_on`](crate::resumable::common::system::RunnableItem::run_on)
+/// impl already dispatches correctly, so a stackless-only system's
+/// `RunnableItem` impl (always poll, never switch) is exercised
+/// automatically, with no separate dispatch loop needed here.
 pub fn run_async<S, F>(num_workers: usize, root: F)
 where
     S: StacklessSchedulerSystem,

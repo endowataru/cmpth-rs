@@ -43,12 +43,31 @@ pub use crate::traits::stackful::StackfulTaskSystem;
 /// system run real ULTs" — can be named independently; [`StackfulSchedulerSystem`]
 /// below folds the two back together for callers that need both.
 ///
-/// Only implementable when `Self::Desc: StackfulTaskDesc` — a stackless-only
-/// descriptor type (no saved context to switch into) cannot satisfy this
-/// trait at all, which is exactly the point: it makes "this system can run
-/// real ULTs" a checkable, compile-time fact instead of a convention.
-pub trait StackfulWorkerSystem:
-    WorkerSystem<Desc: StackfulTaskDesc + TaskDescCore<Owned: HasExternalQueue<Self::Desc, Queue = Self::ExternalQueue>>>
+/// "This system can run real ULTs" is checked at [`StackfulSchedulerSystem`]
+/// (via its `DescScheduler<Desc: StackfulTaskDesc + ...>` nest), not here.
+///
+/// Deliberately does **not** nest ANY bound on `WorkerSystem::Desc` here —
+/// not `StackfulTaskDesc`, and not `TaskDescCore<Owned:
+/// HasExternalQueue<Self::Desc, Queue = Self::ExternalQueue>>` (which an
+/// earlier version of this trait nested alongside it). Nesting *any* bound
+/// on `Desc` here is fine as long as `Desc` stays abstract — it is then
+/// just an implied bound nobody has to discharge — but the moment any impl
+/// pins `Desc` to a concrete type — exactly what the `RunnableItem`/
+/// `ReclaimableDesc` impls in `stackful::worker`/`dual::worker` do — every
+/// unrelated fact this crate needs about that same concrete `Desc`
+/// (`HasExternalQueue`, but empirically also `HasPollFn` reached via
+/// `AsyncTaskDesc` for the dual flavor, and almost certainly anything else
+/// projected through the same `WorkerSystem::Desc` slot) stops normalizing
+/// — not just the nested bound itself. Verified directly: removing only the
+/// `HasExternalQueue` nest left a real `E0277` on `HasPollFn` for the dual
+/// `RunnableItem` impl, which disappeared only once `StackfulTaskDesc` was
+/// removed too. No amount of restating either bound as a `where`-clause
+/// rescues it — the clause is not assumed while its own well-formedness is
+/// checked. So this trait now carries no opinion at all about `Desc`'s
+/// shape; every real requirement on it lives on [`StackfulSchedulerSystem`]
+/// instead — the fold trait, never named directly by an impl that must
+/// itself stay below `SchedulerSystem`.
+pub trait StackfulWorkerSystem: WorkerSystem
 {
     /// Context-switch implementation.
     type Ctx: ContextPolicy;
@@ -59,8 +78,20 @@ pub trait StackfulWorkerSystem:
     /// Stack size for each ULT (in bytes).
     const STACK_SIZE: usize;
 
-    /// Parked-continuation type for this system.
-    type SuspendedThread: StackfulOnlyResumableCore<StackfulWorkerSystem = Self>;
+    /// Parked-continuation type for this system. `where Self::Desc:
+    /// StackfulTaskDesc` lives on this one associated type's own
+    /// declaration, not on the trait's supertrait bound list: unlike a
+    /// supertrait-list nest, a `where`-clause here doesn't propagate as an
+    /// implied bound to callers merely bounded `S: StackfulWorkerSystem`
+    /// (deliberately — see this trait's own doc comment for why nesting it
+    /// unconditionally there is exactly the poisoning problem), but it
+    /// keeps this associated type itself well-formed to declare, and every
+    /// real caller that actually names `Self::SuspendedThread` already
+    /// carries `StackfulTaskDesc` independently (via
+    /// [`StackfulSchedulerSystem`] or a concrete `Desc` pin).
+    type SuspendedThread: StackfulOnlyResumableCore<StackfulWorkerSystem = Self>
+    where
+        Self::Desc: StackfulTaskDesc;
 
     /// Resolve what a suspending/exiting ULT switches into when its local
     /// deque is empty: the worker's own root (scheduler-loop) continuation.
@@ -115,6 +146,16 @@ pub trait StackfulWorkerSystem:
 /// own bound list are treated as real implied bounds. [`DescScheduler`]
 /// itself is one such supertrait, folding in `Item`/`Worker` once so this
 /// trait doesn't have to restate them.
+///
+/// Both `StackfulTaskDesc` and `HasExternalQueue` live here now, not on
+/// [`StackfulWorkerSystem`] (see that trait's doc comment for why nesting
+/// *any* bound on `Desc` there breaks unrelated obligations on the same
+/// concrete descriptor once one is pinned): nesting them here, on the fold
+/// trait, means they only ever normalize against a concrete `Desc` at a
+/// point where `Desc`'s well-formedness is already independently
+/// established (via `DescScheduler`/`StackfulWorkerSystem` each
+/// individually holding), never while an impl's *own* bounds are still
+/// being checked.
 pub trait StackfulSchedulerSystem:
     SchedulerSystem
     + StackfulWorkerSystem
@@ -207,15 +248,14 @@ impl<
 /// exposing itself as a blanket-impl condition on an unrelated generic
 /// parameter would create a self-referential trait-resolution cycle
 /// through [`CurrentLookup`]'s own blanket impl
-/// (`impl<S: SchedulerSystem> CurrentLookup<S> for TlsCurrent`) — proving
-/// this trait's `SchedulerSystem` blanket impl would require re-entering
-/// that very impl (`error[E0275]: overflow evaluating the requirement`,
-/// reproduced directly). `worker_tls_anchor`'s `static` has the same
-/// requirement for an unrelated reason: a `static` declared inside a
-/// generic function body is one shared instance across every
-/// monomorphization, not one per instantiation (also verified directly) —
-/// every implementor needs its own `static`, anchored by its own function
-/// body.
+/// (`impl<S: WorkerSystem> CurrentLookup<S> for TlsCurrent`) — proving this
+/// trait's own `where Self: WorkerSystem` gate (see [`Lookup`](Self::Lookup))
+/// would require re-entering that very impl if `Lookup` weren't pinned to
+/// `Self` directly. `worker_tls_anchor`'s `static` has the same requirement
+/// for an unrelated reason: a `static` declared inside a generic function
+/// body is one shared instance across every monomorphization, not one per
+/// instantiation (also verified directly) — every implementor needs its
+/// own `static`, anchored by its own function body.
 ///
 /// ```
 /// use cmpth::{ThreadSystem, NestableSystem, StackfulBuilder, StackfulInitSystem, JoinHandleLike};
@@ -256,17 +296,22 @@ pub trait UltIdentity: Sized + Send + Sync + 'static {
     /// (no unused `poll_fn` slot); a system that also needs `spawn_async`/
     /// dual capability on the same tasks wants
     /// [`DualTaskDesc<Self>`](crate::resumable::dual::desc::DualTaskDesc)
-    /// instead. `where Self: SchedulerSystem` for the same reason `Lookup`/
-    /// `worker_tls_anchor` need it (see this trait's own doc comment) —
-    /// `StackfulOnlyTaskDesc<Self>`'s `Owned: HasCtx + HasExternalQueue<Self::Desc>`
-    /// bound would otherwise require `Self: SchedulerSystem` to typecheck the
-    /// associated type itself, before the blanket impl proving it is done
-    /// being checked.
+    /// instead. `where Self: PoolSystem` — the lowest rung that makes the
+    /// bound below well-formed (`Owned: HasExternalQueue<Self::Desc, Queue =
+    /// Self::ExternalQueue>` needs `Self::ExternalQueue`, a `PoolSystem`
+    /// associated type). Deliberately **not** `Self: SchedulerSystem`:
+    /// `SchedulerSystem` is now blanket-derived from `Desc`'s own identity
+    /// (`Desc: ReclaimableDesc<Self>`, `Item: RunnableItem<Self>` — see
+    /// `common::system`), so gating `Desc` itself on `SchedulerSystem` would
+    /// be circular (`Desc` needs `SchedulerSystem` needs `Desc`, verified as
+    /// a real `E0275` overflow before this bound was lowered). `PoolSystem`
+    /// is safe because [`PoolSystem for M`](trait@UltIdentity)'s impl below
+    /// is unconditional — it never routes back through `SchedulerSystem`.
     type Desc: crate::resumable::common::desc::TaskDescAlloc
         + StackfulTaskDesc
         + TaskDescCore<Owned: HasExternalQueue<<Self as UltIdentity>::Desc, Queue = Self::ExternalQueue>>
     where
-        Self: SchedulerSystem;
+        Self: PoolSystem;
 
     /// Work-stealing run queue implementation.
     type RunQueue: WorkerRunQueue<SuspendedTaskToken<Self::Desc>> + Default;
@@ -277,15 +322,22 @@ pub trait UltIdentity: Sized + Send + Sync + 'static {
     /// Stack size for each ULT (in bytes).
     const STACK_SIZE: usize = 64 * 1024;
 
-    /// Current-worker lookup policy.
+    /// Current-worker lookup policy. `where Self: WorkerSystem` — the lowest
+    /// rung that makes `CurrentLookup<Self>` well-formed (that trait's own
+    /// declaration is `CurrentLookup<S: WorkerSystem>`); same
+    /// not-`SchedulerSystem` reasoning as [`Desc`](Self::Desc). `WorkerSystem
+    /// for M`'s impl below is likewise unconditional.
     type Lookup: CurrentLookup<Self>
     where
-        Self: SchedulerSystem;
+        Self: WorkerSystem;
 
     /// The per-system TLS anchor backing [`WorkerSystem::worker_tls`].
+    /// `where Self: WorkerSystem` — `UltWorker<Self>` itself requires it
+    /// structurally (`UltWorker<S: WorkerSystem>`); same not-`SchedulerSystem`
+    /// reasoning as [`Desc`](Self::Desc).
     fn worker_tls_anchor() -> &'static <<Self as UltIdentity>::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>>
     where
-        Self: SchedulerSystem;
+        Self: WorkerSystem;
 }
 
 impl<M: UltIdentity> PoolSystem for M {
@@ -316,18 +368,12 @@ impl<M: UltIdentity> WorkerSystem for M {
     }
 }
 
-impl<M: UltIdentity> SchedulerSystem for M {
-    // Stackful-only: always a real context switch, no poll_fn tag check —
-    // `execute_stackful`'s whole point is that this bound never needs
-    // `AsyncTaskDesc` at all.
-    fn execute(wk: &UltWorker<Self>, cont: SuspendedTaskToken<M::Desc>) {
-        crate::resumable::stackful::worker::execute_stackful(wk, cont)
-    }
-
-    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut M::Desc) {
-        unsafe { crate::resumable::stackful::worker::free_finished_desc_stackful(wk, desc) }
-    }
-}
+// `SchedulerSystem for M` is no longer hand-written here: it is
+// blanket-derived (`common::system`) once `M::Item: RunnableItem<M>` and
+// `M::Desc: ReclaimableDesc<M>` hold, which they do for any real `Desc`
+// choice (`StackfulOnlyTaskDesc<Self>` or `DualTaskDesc<Self>` — see those
+// types' `RunnableItem`/`ReclaimableDesc` impls in `stackful::worker`/
+// `dual::worker`).
 
 impl<M: UltIdentity> StackfulWorkerSystem for M
 where

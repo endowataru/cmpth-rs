@@ -750,16 +750,9 @@ impl cmpth::WorkerSystem for ManualSystem {
     }
 }
 
-impl cmpth::SchedulerSystem for ManualSystem {
-    // Stackful-only: no poll_fn tag check, see `execute_stackful`'s doc comment.
-    fn execute(wk: &UltWorker<Self>, cont: cmpth::SuspendedTaskToken<DualTaskDesc<Self>>) {
-        cmpth::resumable::stackful::worker::execute_stackful(wk, cont)
-    }
-
-    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut DualTaskDesc<Self>) {
-        unsafe { cmpth::resumable::stackful::worker::free_finished_desc_stackful(wk, desc) }
-    }
-}
+// `SchedulerSystem for ManualSystem` is no longer hand-written: it is
+// blanket-derived (`cmpth::resumable::common::system`) from the
+// `RunnableItem`/`ReclaimableDesc` impls for `DualTaskDesc<Self>`.
 
 impl cmpth::StackfulWorkerSystem for ManualSystem {
     type Ctx   = NativeContext;
@@ -856,16 +849,8 @@ impl cmpth::WorkerSystem for PollerSystem {
     }
 }
 
-impl cmpth::SchedulerSystem for PollerSystem {
-    // Stackful-only: no poll_fn tag check, see `execute_stackful`'s doc comment.
-    fn execute(wk: &UltWorker<Self>, cont: cmpth::SuspendedTaskToken<StackfulOnlyTaskDesc<Self>>) {
-        cmpth::resumable::stackful::worker::execute_stackful(wk, cont)
-    }
-
-    fn free_finished_desc(wk: &UltWorker<Self>, desc: *mut StackfulOnlyTaskDesc<Self>) {
-        unsafe { cmpth::resumable::stackful::worker::free_finished_desc_stackful(wk, desc) }
-    }
-}
+// `SchedulerSystem for PollerSystem` is likewise blanket-derived, from the
+// `RunnableItem`/`ReclaimableDesc` impls for `StackfulOnlyTaskDesc<Self>`.
 
 impl cmpth::StackfulWorkerSystem for PollerSystem {
     type Ctx   = NativeContext;

@@ -1,7 +1,7 @@
 //! Stackful worker extension traits ([`ContextSwitcher`]/
-//! [`StackfulLocalQueue`]/[`StackfulWorker`]), the stackful-only/dual
-//! dispatch bodies for `SchedulerSystem::execute`/
-//! `StackfulSchedulerSystem::pop_or_root`/`SchedulerSystem::free_finished_desc`,
+//! [`StackfulLocalQueue`]/[`StackfulWorker`]),
+//! `StackfulSchedulerSystem::pop_or_root`'s stackful-only body, the
+//! [`RunnableItem`]/[`ReclaimableDesc`] impls for [`StackfulOnlyTaskDesc`],
 //! and the `extern "C"` context-switch shims. See
 //! [`common::worker`](crate::resumable::common::worker) for the base
 //! traits and [`UltWorker<S>`](crate::resumable::common::worker::UltWorker) itself.
@@ -12,11 +12,11 @@ use std::ptr;
 use crate::traits::stackful::{CondTransfer, Context, ContextPolicy, Transfer};
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, WorkerOps};
-use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
+use crate::resumable::common::system::{DescScheduler, ReclaimableDesc, RunnableItem};
 use crate::resumable::stackful::system::{StackfulSchedulerSystem, StackfulWorkerSystem};
 use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, TaskDescCore};
 use crate::interchange::Transferred;
-use crate::resumable::stackful::desc::StackfulTaskDesc;
+use crate::resumable::stackful::desc::{StackfulOnlyTaskDesc, StackfulTaskDesc};
 
 // ---------------------------------------------------------------------------
 // ContextSwitcher (stackful-only)
@@ -32,9 +32,10 @@ use crate::resumable::stackful::desc::StackfulTaskDesc;
 /// Only implementable when `S: StackfulWorkerSystem` (needs `S::Ctx`) — a
 /// stackless-only system has no context-switch policy to name. Worker-layer
 /// (`S: StackfulWorkerSystem`), not gated on dispatch (`SchedulerSystem`):
-/// switching contexts never touches `execute`/`free_finished_desc`. The
-/// concrete impl below (for [`UltWorker<S>`]) still needs `S: SchedulerSystem`
-/// too, since `UltWorker<S>` itself does.
+/// switching contexts never touches `RunnableItem`/`ReclaimableDesc`. The
+/// concrete impl below (for [`UltWorker<S>`]) needs `S: DescScheduler` too,
+/// for `cur_task_token_mut` — see that impl's own comment — but never
+/// `SchedulerSystem` itself.
 pub trait ContextSwitcher<S: StackfulWorkerSystem>: Sized
 where
     S::Desc: StackfulTaskDesc,
@@ -146,49 +147,18 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Dispatch bodies for SchedulerSystem::execute / StackfulSchedulerSystem::pop_or_root
-//
-// Plain functions, not trait defaults directly: each concrete system's
-// `impl SchedulerSystem`/`impl StackfulSchedulerSystem` block calls exactly one
-// of these from its own `execute`/`pop_or_root` method. No specialization is
-// involved — every concrete marker struct (DefaultDualTaskSystem, a
-// stackful-only `UltIdentity` implementor, ...) gets exactly one such
-// `impl` block, so this is ordinary static dispatch, monomorphized per
-// system.
+// StackfulWorkerSystem::pop_or_root's stackful-only body
 // ---------------------------------------------------------------------------
-
-/// `execute` body for stackful-only systems: `cont` is always a real ULT
-/// continuation (no `poll_fn` tag ever gets set, since `spawn_async` isn't
-/// reachable when `S::Desc` isn't `AsyncTaskDesc`), so this always performs
-/// a real context switch — no runtime check.
-///
-/// Lowest rung reachable: the fold trait [`StackfulSchedulerSystem`], not
-/// lower. `wk.suspend_to_cont`/`wk.set_root_cont` need `ContextSwitcher<S>`/
-/// `StackfulLocalQueue<S>` to be implemented for `UltWorker<S>`, and *that*
-/// impl (below) needs `DescScheduler` regardless — `cond_suspend_to_cont`'s
-/// shim calls `cur_task_token_mut`, which is only defined for `S:
-/// DescScheduler` (`common::worker`) — plus `StackfulWorkerSystem` for
-/// `S::Ctx`. `DescScheduler + StackfulWorkerSystem` together are exactly
-/// what the fold trait's blanket impl requires, so there is no narrower
-/// capability trait this can reach without first splitting `ContextSwitcher`
-/// itself (out of scope here).
-pub fn execute_stackful<S>(wk: &UltWorker<S>, cont: SuspendedTaskToken<S::Desc>)
-where
-    S: StackfulSchedulerSystem,
-{
-    let wk2 = wk.suspend_to_cont(cont, |wk, prev| wk.set_root_cont(prev));
-    debug_assert!(std::ptr::eq(wk2 as *const UltWorker<S>, wk as *const UltWorker<S>));
-}
 
 /// `pop_or_root` body for stackful-only systems: every popped item is a
 /// real, switchable continuation, so no requeue check is needed.
 ///
 /// Lowest rung: [`DescScheduler`] — `wk.deque.try_pop()` returns `S::Item`,
 /// which this function's `SuspendedTaskToken<S::Desc>` return type needs
-/// pinned equal to via `DescScheduler`; `wk.take_root_cont()` only needs
-/// `SchedulerSystem`, already implied. Does *not* need `StackfulWorkerSystem`
-/// (no context switch happens here, so `S::Ctx` is never named) or
-/// `S::Desc: StackfulTaskDesc`.
+/// pinned equal to via `DescScheduler`; `wk.take_root_cont()` is a plain
+/// `WorkerSystem`-level accessor, already implied. Does *not* need
+/// `StackfulWorkerSystem` (no context switch happens here, so `S::Ctx` is
+/// never named) or `S::Desc: StackfulTaskDesc`.
 pub fn pop_or_root_stackful<S>(wk: &UltWorker<S>) -> SuspendedTaskToken<S::Desc>
 where
     S: DescScheduler,
@@ -199,30 +169,64 @@ where
     wk.take_root_cont()
 }
 
-/// `free_finished_desc` body for stackful-only systems: every descriptor
-/// came from the pool (there is no `spawn_async` allocation path to bypass
-/// it), so always return it there.
+// ---------------------------------------------------------------------------
+// RunnableItem / ReclaimableDesc for StackfulOnlyTaskDesc
+// ---------------------------------------------------------------------------
+
+/// `cont` is always a real ULT continuation (no `poll_fn` tag ever gets
+/// set, since `spawn_async` isn't reachable when `S::Desc` isn't
+/// `AsyncTaskDesc`), so this always performs a real context switch — no
+/// runtime check.
 ///
-/// # Safety
-/// No other references to `desc` may exist after this call (same contract
-/// as [`TaskPool::free_task`]).
-pub unsafe fn free_finished_desc_stackful<S>(wk: &UltWorker<S>, desc: *mut S::Desc)
-where
-    S: SchedulerSystem,
+/// Bound: `StackfulWorkerSystem + DescScheduler<Desc = StackfulOnlyTaskDesc<S>>`
+/// — strictly below `SchedulerSystem`. `wk.suspend_to_cont`/`wk.set_root_cont`
+/// need `ContextSwitcher<S>`/`StackfulLocalQueue<S>` to be implemented for
+/// `UltWorker<S>`, and *those* impls (below) need `DescScheduler` regardless
+/// — `cond_suspend_to_cont`'s shim calls `cur_task_token_mut`, which is only
+/// defined for `S: DescScheduler` (`common::worker`) — plus
+/// `StackfulWorkerSystem` for `S::Ctx`. Neither `SchedulerSystem` nor any of
+/// its folds is needed: `SchedulerSystem` itself becomes derivable for `S`
+/// only *after* this impl (plus the matching `ReclaimableDesc` impl below)
+/// exist, not before.
+///
+/// `Desc` is pinned only via `DescScheduler<Desc = ...>`, not restated on
+/// `StackfulWorkerSystem` — `StackfulWorkerSystem` no longer carries any
+/// bound on `Desc` at all (see that trait's doc comment: nesting one there
+/// broke unrelated obligations on the same concrete descriptor, such as
+/// `DualTaskDesc`'s `HasPollFn`, once pinned), so there is nothing left to
+/// pin it *against*.
+impl<S: StackfulWorkerSystem + DescScheduler<Desc = StackfulOnlyTaskDesc<S>>>
+    RunnableItem<S> for SuspendedTaskToken<StackfulOnlyTaskDesc<S>>
 {
-    unsafe { wk.free_task(desc) };
+    fn run_on(self, wk: &UltWorker<S>) {
+        let wk2 = wk.suspend_to_cont(self, |wk, prev| wk.set_root_cont(prev));
+        debug_assert!(std::ptr::eq(wk2 as *const UltWorker<S>, wk as *const UltWorker<S>));
+    }
+}
+
+/// Every descriptor came from the pool (there is no `spawn_async`
+/// allocation path to bypass it), so always return it there.
+///
+/// Bound: plain [`WorkerSystem`](crate::resumable::common::system::WorkerSystem)
+/// (via [`DescScheduler`]) — `wk.free_task` only needs `TaskPool<S>`, itself
+/// only `WorkerSystem`-gated (`common::worker`), so this needs neither
+/// `StackfulWorkerSystem` nor any fold of `SchedulerSystem`.
+impl<S: DescScheduler<Desc = StackfulOnlyTaskDesc<S>>> ReclaimableDesc<S> for StackfulOnlyTaskDesc<S> {
+    unsafe fn reclaim(wk: &UltWorker<S>, desc: *mut Self) {
+        unsafe { wk.free_task(desc) };
+    }
 }
 
 // --- StackfulLocalQueue ---
 
-// `S: StackfulSchedulerSystem`, not the narrower `SchedulerSystem +
-// StackfulWorkerSystem` bound `StackfulLocalQueue`'s own trait declaration
-// uses: `pop_or_root` below calls `S::pop_or_root`, which (see
-// `StackfulWorkerSystem::pop_or_root`'s doc comment) needs `Self:
-// DescScheduler` — combined with `StackfulWorkerSystem`, that's exactly the
-// fold trait again (see `execute_stackful`'s doc comment for the same
-// dependency on `ContextSwitcher`'s impl just below).
-impl<S: StackfulSchedulerSystem> StackfulLocalQueue<S> for UltWorker<S>
+// `S: StackfulSchedulerSystem` was the old bound here; relaxed to
+// `StackfulWorkerSystem + DescScheduler` (strictly below `SchedulerSystem`):
+// `pop_or_root` below calls `S::pop_or_root`, whose default body (see
+// `StackfulWorkerSystem::pop_or_root`'s doc comment) needs only `Self:
+// DescScheduler`, not `SchedulerSystem` — so this impl doesn't need it
+// either. Same relaxation applies to `ContextSwitcher`'s impl just below,
+// for the same reason (see the `RunnableItem` impl above's doc comment).
+impl<S: StackfulWorkerSystem + DescScheduler> StackfulLocalQueue<S> for UltWorker<S>
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -239,7 +243,7 @@ where
 
 // --- ContextSwitcher ---
 
-impl<S: StackfulSchedulerSystem> ContextSwitcher<S> for UltWorker<S>
+impl<S: StackfulWorkerSystem + DescScheduler> ContextSwitcher<S> for UltWorker<S>
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -344,7 +348,7 @@ impl<S: StackfulSchedulerSystem> StackfulWorker<S> for UltWorker<S> where S::Des
 // anything that could allow the previous context to resume.
 // ---------------------------------------------------------------------------
 
-struct SuspendPayload<S: StackfulSchedulerSystem, F>
+struct SuspendPayload<S: StackfulWorkerSystem + DescScheduler, F>
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -355,7 +359,7 @@ where
 
 unsafe extern "C" fn suspend_shim<S, F>(prev: Context, a1: *mut (), _a2: *mut ()) -> Transfer
 where
-    S: StackfulSchedulerSystem,
+    S: StackfulWorkerSystem + DescScheduler,
     S::Desc: StackfulTaskDesc,
     F: FnOnce(&UltWorker<S>, SuspendedTaskToken<S::Desc>),
 {
@@ -372,7 +376,7 @@ where
     Transfer(wk as *const UltWorker<S> as *mut ())
 }
 
-struct CondSuspendPayload<S: StackfulSchedulerSystem, F>
+struct CondSuspendPayload<S: StackfulWorkerSystem + DescScheduler, F>
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -383,7 +387,7 @@ where
 
 unsafe extern "C" fn cond_suspend_shim<S, F>(prev: Context, a1: *mut (), _a2: *mut ()) -> CondTransfer
 where
-    S: StackfulSchedulerSystem,
+    S: StackfulWorkerSystem + DescScheduler,
     S::Desc: StackfulTaskDesc,
     F: FnOnce(&UltWorker<S>, &mut Option<SuspendedTaskToken<S::Desc>>),
 {
@@ -434,7 +438,7 @@ where
     }
 }
 
-struct ExitPayload<S: StackfulSchedulerSystem, F>
+struct ExitPayload<S: StackfulWorkerSystem + DescScheduler, F>
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -445,7 +449,7 @@ where
 
 unsafe extern "C" fn exit_shim<S, F>(a1: *mut (), _a2: *mut ()) -> Transfer
 where
-    S: StackfulSchedulerSystem,
+    S: StackfulWorkerSystem + DescScheduler,
     S::Desc: StackfulTaskDesc,
     F: FnOnce(&UltWorker<S>),
 {
