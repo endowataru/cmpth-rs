@@ -57,7 +57,7 @@ where
 
 /// `free_finished_desc` body for dual systems: async tasks go through
 /// `S::AsyncPool` (a separate pool from the ULT-stack `S::Pool`, see
-/// [`SchedulerSystem::AsyncPool`](crate::resumable::common::system::SchedulerSystem::AsyncPool));
+/// [`PoolSystem::AsyncPool`](crate::resumable::common::system::PoolSystem::AsyncPool));
 /// everything else goes through the ULT-stack pool as usual.
 ///
 /// # Safety

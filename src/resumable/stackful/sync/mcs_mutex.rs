@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 use crate::spin::SpinLock;
 use crate::traits::{Resumable, StackfulMutex, StackfulResumable};
 use crate::resumable::stackful::desc::StackfulTaskDesc;
-use crate::resumable::common::system::SchedulerSystem;
+use crate::resumable::common::system::PoolSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::stackful::worker::StackfulWorker;
 
@@ -15,35 +15,35 @@ use crate::resumable::stackful::worker::StackfulWorker;
 // McsMutex
 // ---------------------------------------------------------------------------
 
-struct McsNode<S: StackfulSchedulerSystem> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+struct McsNode<S: StackfulSchedulerSystem> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     next: AtomicPtr<McsNode<S>>,
     suspended: S::SuspendedThread,
 }
 
-pub struct McsMutex<S: StackfulSchedulerSystem, T: Send> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+pub struct McsMutex<S: StackfulSchedulerSystem, T: Send> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     tail: AtomicPtr<McsNode<S>>,
     data: UnsafeCell<T>,
 }
 
-unsafe impl<S: StackfulSchedulerSystem, T: Send> Send for McsMutex<S, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {}
-unsafe impl<S: StackfulSchedulerSystem, T: Send> Sync for McsMutex<S, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {}
+unsafe impl<S: StackfulSchedulerSystem, T: Send> Send for McsMutex<S, T> where <S as PoolSystem>::Desc: StackfulTaskDesc {}
+unsafe impl<S: StackfulSchedulerSystem, T: Send> Sync for McsMutex<S, T> where <S as PoolSystem>::Desc: StackfulTaskDesc {}
 
-pub struct McsMutexGuard<'a, S: StackfulSchedulerSystem, T: Send> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+pub struct McsMutexGuard<'a, S: StackfulSchedulerSystem, T: Send> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     mutex: &'a McsMutex<S, T>,
     node: Box<McsNode<S>>,
 }
 
-impl<S: StackfulSchedulerSystem, T: Send> Deref for McsMutexGuard<'_, S, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem, T: Send> Deref for McsMutexGuard<'_, S, T> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     type Target = T;
-    fn deref(&self) -> &T where <S as SchedulerSystem>::Desc: StackfulTaskDesc { unsafe { &*self.mutex.data.get() } }
+    fn deref(&self) -> &T where <S as PoolSystem>::Desc: StackfulTaskDesc { unsafe { &*self.mutex.data.get() } }
 }
 
-impl<S: StackfulSchedulerSystem, T: Send> DerefMut for McsMutexGuard<'_, S, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
-    fn deref_mut(&mut self) -> &mut T where <S as SchedulerSystem>::Desc: StackfulTaskDesc { unsafe { &mut *self.mutex.data.get() } }
+impl<S: StackfulSchedulerSystem, T: Send> DerefMut for McsMutexGuard<'_, S, T> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+    fn deref_mut(&mut self) -> &mut T where <S as PoolSystem>::Desc: StackfulTaskDesc { unsafe { &mut *self.mutex.data.get() } }
 }
 
-impl<S: StackfulSchedulerSystem, T: Send> Drop for McsMutexGuard<'_, S, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
-    fn drop(&mut self) where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem, T: Send> Drop for McsMutexGuard<'_, S, T> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+    fn drop(&mut self) where <S as PoolSystem>::Desc: StackfulTaskDesc {
         let node_ptr: *mut McsNode<S> = &mut *self.node;
         if self.mutex.tail
             .compare_exchange(node_ptr, null_mut(), Ordering::AcqRel, Ordering::Acquire)
@@ -74,14 +74,14 @@ impl<S: StackfulSchedulerSystem, T: Send> Drop for McsMutexGuard<'_, S, T> where
     }
 }
 
-impl<S: StackfulSchedulerSystem, T: Send> StackfulMutex<T> for McsMutex<S, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem, T: Send> StackfulMutex<T> for McsMutex<S, T> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     type Guard<'a> = McsMutexGuard<'a, S, T> where Self: 'a, T: 'a;
 
-    fn new(val: T) -> Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    fn new(val: T) -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc {
         McsMutex { tail: AtomicPtr::new(null_mut()), data: UnsafeCell::new(val) }
     }
 
-    fn lock(&self) -> McsMutexGuard<'_, S, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    fn lock(&self) -> McsMutexGuard<'_, S, T> where <S as PoolSystem>::Desc: StackfulTaskDesc {
         let mut node = Box::new(McsNode {
             next: AtomicPtr::new(null_mut()),
             suspended: S::SuspendedThread::default(),
@@ -101,18 +101,18 @@ impl<S: StackfulSchedulerSystem, T: Send> StackfulMutex<T> for McsMutex<S, T> wh
 // McsCondvar
 // ---------------------------------------------------------------------------
 
-pub struct McsCondvar<S: StackfulSchedulerSystem> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+pub struct McsCondvar<S: StackfulSchedulerSystem> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     waiters: SpinLock<VecDeque<S::SuspendedThread>>,
 }
 
-impl<S: StackfulSchedulerSystem> McsCondvar<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
-    pub fn new() -> Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem> McsCondvar<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+    pub fn new() -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc {
         McsCondvar { waiters: SpinLock::new(VecDeque::new()) }
     }
 
     /// Release `guard`, wait for a notification, then re-acquire and return
     /// a fresh guard.
-    pub fn wait<'a, T: Send>(&self, guard: McsMutexGuard<'a, S, T>) -> McsMutexGuard<'a, S, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    pub fn wait<'a, T: Send>(&self, guard: McsMutexGuard<'a, S, T>) -> McsMutexGuard<'a, S, T> where <S as PoolSystem>::Desc: StackfulTaskDesc {
         let mutex = guard.mutex;
         let mut waiters = self.waiters.lock();
         waiters.push_back(S::SuspendedThread::default());
@@ -124,11 +124,11 @@ impl<S: StackfulSchedulerSystem> McsCondvar<S> where <S as SchedulerSystem>::Des
         StackfulMutex::lock(mutex)
     }
 
-    pub fn notify_one(&self) where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    pub fn notify_one(&self) where <S as PoolSystem>::Desc: StackfulTaskDesc {
         if let Some(sth) = self.waiters.lock().pop_front() { sth.notify(); }
     }
 
-    pub fn notify_all(&self) where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    pub fn notify_all(&self) where <S as PoolSystem>::Desc: StackfulTaskDesc {
         let all: VecDeque<_> = std::mem::take(&mut *self.waiters.lock());
         for sth in all { sth.notify(); }
     }

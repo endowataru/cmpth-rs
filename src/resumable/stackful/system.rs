@@ -24,7 +24,7 @@ use crate::traits::stackful::{
 };
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::lookup::CurrentLookup;
-use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
+use crate::resumable::common::system::{DescScheduler, PoolSystem, SchedulerSystem};
 use crate::resumable::common::desc::{HasExternalQueue, SuspendedTaskToken, TaskDescCore};
 use crate::resumable::common::stack::StackAlloc;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
@@ -244,12 +244,8 @@ pub trait UltIdentity: Sized + Send + Sync + 'static {
         Self: SchedulerSystem;
 }
 
-impl<M: UltIdentity> SchedulerSystem for M {
-    type Base  = M::Base;
+impl<M: UltIdentity> PoolSystem for M {
     type Desc  = M::Desc;
-    type Item  = SuspendedTaskToken<M::Desc>;
-    type Worker = UltWorker<Self>;
-    type RunQueue = M::RunQueue;
     type ExternalQueue = crate::resumable::common::external_queue::StealPathQueue<M::Desc>;
     type Pool          = crate::resumable::common::pool::ReturnPool<M::Desc, M::Alloc>;
     // Never actually allocated through: nothing calls spawn_async on a
@@ -262,6 +258,13 @@ impl<M: UltIdentity> SchedulerSystem for M {
     // Never actually taken from: nothing calls `recurse` on a
     // stackful-only UltIdentity system either. Mirrors `AsyncPool` above.
     type RecursionPool = crate::resumable::common::pool::ThresholdPool<crate::resumable::common::pool::BlockPool>;
+}
+
+impl<M: UltIdentity> SchedulerSystem for M {
+    type Base  = M::Base;
+    type Item  = SuspendedTaskToken<M::Desc>;
+    type Worker = UltWorker<Self>;
+    type RunQueue = M::RunQueue;
     type Lookup = <M as UltIdentity>::Lookup;
 
     fn worker_tls() -> &'static <M::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
@@ -282,9 +285,9 @@ impl<M: UltIdentity> SchedulerSystem for M {
 
 impl<M: UltIdentity> StackfulSchedulerSystem for M
 where
-    <M as SchedulerSystem>::Desc: StackfulTaskDesc,
-    <<M as SchedulerSystem>::Desc as TaskDescCore>::Owned:
-        HasExternalQueue<<M as SchedulerSystem>::Desc, Queue = <M as SchedulerSystem>::ExternalQueue>,
+    <M as PoolSystem>::Desc: StackfulTaskDesc,
+    <<M as PoolSystem>::Desc as TaskDescCore>::Owned:
+        HasExternalQueue<<M as PoolSystem>::Desc, Queue = <M as PoolSystem>::ExternalQueue>,
 {
     type Ctx = M::Ctx;
     type StackAlloc = M::Alloc;
@@ -295,7 +298,7 @@ where
 
 impl<M: UltIdentity + StackfulSchedulerSystem> ThreadSystem for M
 where
-    <M as SchedulerSystem>::Desc: StackfulTaskDesc,
+    <M as PoolSystem>::Desc: StackfulTaskDesc,
 {
     fn yield_now() {
         use crate::resumable::common::worker::WorkerOps;
@@ -319,14 +322,14 @@ where
 
 impl<M: UltIdentity + StackfulSchedulerSystem> BlockOnSystem for M
 where
-    <M as SchedulerSystem>::Desc: StackfulTaskDesc,
+    <M as PoolSystem>::Desc: StackfulTaskDesc,
 {
     type Poller = crate::resumable::stackful::waker::ResumablePoller<Self>;
 }
 
 impl<M: UltIdentity + StackfulSchedulerSystem> StackfulSyncSystem for M
 where
-    <M as SchedulerSystem>::Desc: StackfulTaskDesc,
+    <M as PoolSystem>::Desc: StackfulTaskDesc,
 {
     type Mutex<T: Send>  = crate::resumable::common::sync::DualMutex<Self, T, crate::resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>>;
     type Barrier         = crate::resumable::common::sync::DualBarrier<Self, crate::resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>>;
@@ -334,14 +337,14 @@ where
 
 impl<M: UltIdentity + StackfulSchedulerSystem> SuspendableSystem for M
 where
-    <M as SchedulerSystem>::Desc: StackfulTaskDesc,
+    <M as PoolSystem>::Desc: StackfulTaskDesc,
 {
     type SuspendedThread = crate::resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>;
 }
 
 impl<M: UltIdentity + StackfulSchedulerSystem> DelegationSystem for M
 where
-    <M as SchedulerSystem>::Desc: StackfulTaskDesc,
+    <M as PoolSystem>::Desc: StackfulTaskDesc,
 {
     type Delegator<C: crate::traits::stackful::DelegatorConsumer<Self>> =
         crate::resumable::stackful::sync::McsDelegator<Self, C>;
@@ -349,7 +352,7 @@ where
 
 impl<M: UltIdentity + StackfulSchedulerSystem> NestableSystem for M
 where
-    <M as SchedulerSystem>::Desc: StackfulTaskDesc,
+    <M as PoolSystem>::Desc: StackfulTaskDesc,
 {
     type ThreadSpecific<T: 'static> = crate::resumable::stackful::tls::UltTls<Self, T>;
 }

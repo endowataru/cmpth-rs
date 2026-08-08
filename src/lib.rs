@@ -51,7 +51,7 @@ pub use resumable::stackful::suspended::{BasicStackfulOnlyResumable, StackfulOnl
 pub use resumable::stackful::sync::{Barrier as UltBarrier, McsDelegator, McsMutex, McsMutexGuard, McsCondvar, BarrierCore, MutexCore};
 pub use resumable::common::sync::{DualBarrier as UltDualBarrier, DualMutex as UltDualMutex, DualMutexGuard as UltDualMutexGuard};
 pub use resumable::stackful::sync::{delegator, Producer as DelegatorProducer};
-pub use resumable::common::system::SchedulerSystem;
+pub use resumable::common::system::{PoolSystem, SchedulerSystem};
 pub use resumable::stackful::system::{StackfulSchedulerSystem, StackfulTaskSystem, UltIdentity};
 pub use resumable::stackless::system::{StacklessSchedulerSystem, StacklessTaskSystem, UltAsyncIdentity, UltAsyncSystem};
 pub use resumable::stackful::tls::UltTls;
@@ -81,17 +81,20 @@ pub use resumable::stackful::worker::ContextSwitcher;
 /// The default ULT system: runs on top of [`OsSystem`].
 pub struct DefaultDualTaskSystem;
 
-impl resumable::common::system::SchedulerSystem for DefaultDualTaskSystem {
-    type Base  = OsSystem;
+impl resumable::common::system::PoolSystem for DefaultDualTaskSystem {
     type Desc  = resumable::dual::desc::DualTaskDesc<Self>;
-    type Item  = SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>;
-    type Worker = UltWorker<Self>;
-    type RunQueue = HybridRunQueue<SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>>;
     type ExternalQueue   = resumable::common::external_queue::StealPathQueue<resumable::dual::desc::DualTaskDesc<Self>>;
     type Pool            = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc<Self>, resumable::common::stack::HeapStack>;
     type AsyncPool       = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc<Self>, resumable::common::stack::HeapStack>;
     const ASYNC_POOL_SIZE: usize = 512;
     type RecursionPool   = resumable::common::pool::ThresholdPool<resumable::common::pool::BlockPool>;
+}
+
+impl resumable::common::system::SchedulerSystem for DefaultDualTaskSystem {
+    type Base  = OsSystem;
+    type Item  = SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>;
+    type Worker = UltWorker<Self>;
+    type RunQueue = HybridRunQueue<SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>>;
     type Lookup          = resumable::common::lookup::TlsCurrent;
 
     fn worker_tls() -> &'static <OsSystem as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
@@ -168,17 +171,20 @@ impl NestableSystem for DefaultDualTaskSystem {
 /// A second-level ULT system: runs on top of [`DefaultDualTaskSystem`]'s ULTs.
 pub struct DefaultNestedDualTaskSystem;
 
-impl resumable::common::system::SchedulerSystem for DefaultNestedDualTaskSystem {
-    type Base  = DefaultDualTaskSystem;
+impl resumable::common::system::PoolSystem for DefaultNestedDualTaskSystem {
     type Desc  = resumable::dual::desc::DualTaskDesc<Self>;
-    type Item  = SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>;
-    type Worker = UltWorker<Self>;
-    type RunQueue = HybridRunQueue<SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>>;
     type ExternalQueue   = resumable::common::external_queue::StealPathQueue<resumable::dual::desc::DualTaskDesc<Self>>;
     type Pool            = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc<Self>, resumable::common::stack::HeapStack>;
     type AsyncPool       = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc<Self>, resumable::common::stack::HeapStack>;
     const ASYNC_POOL_SIZE: usize = 512;
     type RecursionPool   = resumable::common::pool::ThresholdPool<resumable::common::pool::BlockPool>;
+}
+
+impl resumable::common::system::SchedulerSystem for DefaultNestedDualTaskSystem {
+    type Base  = DefaultDualTaskSystem;
+    type Item  = SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>;
+    type Worker = UltWorker<Self>;
+    type RunQueue = HybridRunQueue<SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>>;
     type Lookup          = resumable::common::lookup::TlsCurrent;
 
     fn worker_tls() -> &'static <DefaultDualTaskSystem as NestableSystem>::ThreadSpecific<UltWorker<Self>> {

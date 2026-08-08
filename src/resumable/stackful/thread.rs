@@ -9,7 +9,7 @@ use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::traits::stackful::{HandoffTaskDesc, JoinHandleLike};
-use crate::resumable::common::system::SchedulerSystem;
+use crate::resumable::common::system::PoolSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::common::desc::{HasExternalQueue, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskExitSink};
@@ -32,7 +32,7 @@ where
     S: StackfulSchedulerSystem,
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
-    <S as SchedulerSystem>::Desc: StackfulTaskDesc,
+    <S as PoolSystem>::Desc: StackfulTaskDesc,
 {
     let wk = UltWorker::<S>::current().expect("cmpth: spawn called outside a worker");
     let desc = wk.alloc_task(true);
@@ -107,7 +107,7 @@ struct ExitWithResultSink<'a, S: StackfulSchedulerSystem, T> {
 impl<'a, S: StackfulSchedulerSystem, T: Send + 'static> TaskExitSink<S::Desc>
     for ExitWithResultSink<'a, S, T>
 where
-    <S as SchedulerSystem>::Desc: StackfulTaskDesc,
+    <S as PoolSystem>::Desc: StackfulTaskDesc,
 {
     fn resume(&self, cont: <S::Desc as TaskDesc>::Suspended) {
         self.wk.push(cont);
@@ -139,7 +139,7 @@ fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
     desc: &S::Desc,
     result_ptr: *mut StackResult<T>,
     val: Result<T, Box<dyn Any + Send>>,
-) -> ! where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+) -> ! where <S as PoolSystem>::Desc: StackfulTaskDesc {
     let desc_ptr = desc as *const S::Desc as *mut S::Desc;
     if let Some(j_token) = desc.try_take_handoff_target() {
         // Direct handoff: switch straight to the parked joiner.

@@ -159,7 +159,7 @@ where
 /// `mk()` runs exactly once, inside `spawn_now`, once the descriptor
 /// it writes into already exists.
 ///
-/// Storage comes from `S::AsyncPool` (see [`SchedulerSystem::AsyncPool`]):
+/// Storage comes from `S::AsyncPool` (see [`PoolSystem::AsyncPool`](crate::resumable::common::system::PoolSystem::AsyncPool)):
 /// futures that fit its configured slot size are served from its free list
 /// like any pooled ULT stack; larger ones fall back to a one-off
 /// allocation, freed directly rather than returned to the pool.

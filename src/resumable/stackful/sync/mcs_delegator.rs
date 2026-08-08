@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicPtr, Ordering};
 
 use crate::traits::DelegatorConsumer;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
-use crate::resumable::common::system::SchedulerSystem;
+use crate::resumable::common::system::PoolSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::traits::{ThreadSystem, SuspendableSystem};
 
@@ -13,7 +13,7 @@ use super::delegator::{Delegator, DelegatorNode, SyncQueue};
 // MCS queue node wrapper
 // ---------------------------------------------------------------------------
 
-struct McsEntry<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+struct McsEntry<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     next: AtomicPtr<McsEntry<S, C>>,
     node: DelegatorNode<S, C>,
 }
@@ -22,17 +22,17 @@ struct McsEntry<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C
 // McsQueue
 // ---------------------------------------------------------------------------
 
-pub struct McsQueue<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+pub struct McsQueue<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     tail: AtomicPtr<McsEntry<S, C>>,
     // head tracks the current lock holder's entry
     head: std::cell::Cell<*mut McsEntry<S, C>>,
 }
 
-unsafe impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>> Send for McsQueue<S, C> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {}
-unsafe impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>> Sync for McsQueue<S, C> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {}
+unsafe impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>> Send for McsQueue<S, C> where <S as PoolSystem>::Desc: StackfulTaskDesc {}
+unsafe impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>> Sync for McsQueue<S, C> where <S as PoolSystem>::Desc: StackfulTaskDesc {}
 
-impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>> Default for McsQueue<S, C> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
-    fn default() -> Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>> Default for McsQueue<S, C> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+    fn default() -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc {
         // No sentinel: `tail`/`head` start genuinely null, matching the C++
         // reference (`basic_mcs_core.hpp`: `tail_{nullptr}`, `head_` defaults
         // null). A prior version pre-allocated a sentinel and compared
@@ -49,8 +49,8 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
     }
 }
 
-impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>> Drop for McsQueue<S, C> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
-    fn drop(&mut self) where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>> Drop for McsQueue<S, C> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+    fn drop(&mut self) where <S as PoolSystem>::Desc: StackfulTaskDesc {
         // Free the sentinel (and any remaining nodes, though normally none).
         let mut ptr = self.head.get();
         while !ptr.is_null() {
@@ -61,10 +61,10 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
     }
 }
 
-impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>> SyncQueue<S, C> for McsQueue<S, C> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>> SyncQueue<S, C> for McsQueue<S, C> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     fn start_lock(
         &self,
-    ) -> (bool, *mut DelegatorNode<S, C>, *mut DelegatorNode<S, C>) where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    ) -> (bool, *mut DelegatorNode<S, C>, *mut DelegatorNode<S, C>) where <S as PoolSystem>::Desc: StackfulTaskDesc {
         let new_entry = Box::into_raw(Box::new(McsEntry {
             next: AtomicPtr::new(null_mut()),
             node: DelegatorNode::default(),
@@ -92,17 +92,17 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
         &self,
         prev: *mut DelegatorNode<S, C>,
         cur: *mut DelegatorNode<S, C>,
-    ) where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    ) where <S as PoolSystem>::Desc: StackfulTaskDesc {
         let prev_entry = entry_of(prev);
         let cur_entry = entry_of(cur);
         unsafe { (*prev_entry).next.store(cur_entry, Ordering::Release) };
     }
 
-    fn get_head(&self) -> *mut DelegatorNode<S, C> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    fn get_head(&self) -> *mut DelegatorNode<S, C> where <S as PoolSystem>::Desc: StackfulTaskDesc {
         unsafe { &mut (*self.head.get()).node }
     }
 
-    fn try_unlock(&self, head: *mut DelegatorNode<S, C>) -> bool where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    fn try_unlock(&self, head: *mut DelegatorNode<S, C>) -> bool where <S as PoolSystem>::Desc: StackfulTaskDesc {
         let head_entry = entry_of(head);
         // Standard MCS unlock (`basic_mcs_core.hpp::try_unlock`): CAS `tail`
         // from `head_entry` to *null* (not to `head_entry` again — a
@@ -132,7 +132,7 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
     fn try_follow_head(
         &self,
         head: *mut DelegatorNode<S, C>,
-    ) -> Option<*mut DelegatorNode<S, C>> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    ) -> Option<*mut DelegatorNode<S, C>> where <S as PoolSystem>::Desc: StackfulTaskDesc {
         let head_entry = entry_of(head);
         let next = unsafe { (*head_entry).next.load(Ordering::Acquire) };
         if next.is_null() {
@@ -148,7 +148,7 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
 
 fn entry_of<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>>(
     node: *mut DelegatorNode<S, C>,
-) -> *mut McsEntry<S, C> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+) -> *mut McsEntry<S, C> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     // DelegatorNode is the `node` field of McsEntry; compute the container ptr.
     let offset = std::mem::offset_of!(McsEntry<S, C>, node);
     (node as *mut u8).wrapping_sub(offset) as *mut McsEntry<S, C>

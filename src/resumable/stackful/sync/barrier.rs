@@ -3,14 +3,14 @@ use std::collections::VecDeque;
 use crate::spin::SpinLock;
 use crate::traits::{BarrierWaitResult, Resumable, StackfulBarrier, StackfulResumable};
 use crate::resumable::stackful::desc::StackfulTaskDesc;
-use crate::resumable::common::system::SchedulerSystem;
+use crate::resumable::common::system::PoolSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 
 // ---------------------------------------------------------------------------
 // BarrierCore
 // ---------------------------------------------------------------------------
 
-pub struct BarrierState<S: StackfulSchedulerSystem> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+pub struct BarrierState<S: StackfulSchedulerSystem> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     pub(super) count: usize,
     pub(super) waiters: VecDeque<S::SuspendedThread>,
 }
@@ -19,10 +19,10 @@ pub struct BarrierState<S: StackfulSchedulerSystem> where <S as SchedulerSystem>
 /// representation. Implementing this opts a type into [`StackfulBarrier`]
 /// for free via the blanket impl below — the same two-tier relationship as
 /// [`TaskDescCore`](crate::resumable::common::desc::TaskDescCore)/[`TaskDesc`](crate::resumable::common::desc::TaskDesc).
-pub trait BarrierCore: Send + Sync + Sized where <<Self as BarrierCore>::StackfulSchedulerSystem as SchedulerSystem>::Desc: StackfulTaskDesc {
+pub trait BarrierCore: Send + Sync + Sized where <<Self as BarrierCore>::StackfulSchedulerSystem as PoolSystem>::Desc: StackfulTaskDesc {
     type StackfulSchedulerSystem: StackfulSchedulerSystem;
 
-    fn new_core(count: usize) -> Self where <<Self as BarrierCore>::StackfulSchedulerSystem as SchedulerSystem>::Desc: StackfulTaskDesc;
+    fn new_core(count: usize) -> Self where <<Self as BarrierCore>::StackfulSchedulerSystem as PoolSystem>::Desc: StackfulTaskDesc;
     fn n(&self) -> usize;
     fn state(&self) -> &SpinLock<BarrierState<Self::StackfulSchedulerSystem>>;
 }
@@ -56,24 +56,24 @@ impl<M: BarrierCore> StackfulBarrier for M {
 // Barrier
 // ---------------------------------------------------------------------------
 
-pub struct Barrier<S: StackfulSchedulerSystem> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+pub struct Barrier<S: StackfulSchedulerSystem> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     n: usize,
     state: SpinLock<BarrierState<S>>,
 }
 
-unsafe impl<S: StackfulSchedulerSystem> Send for Barrier<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {}
-unsafe impl<S: StackfulSchedulerSystem> Sync for Barrier<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {}
+unsafe impl<S: StackfulSchedulerSystem> Send for Barrier<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {}
+unsafe impl<S: StackfulSchedulerSystem> Sync for Barrier<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {}
 
-impl<S: StackfulSchedulerSystem> Barrier<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
-    pub fn new(n: usize) -> Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem> Barrier<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+    pub fn new(n: usize) -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc {
         assert!(n > 0);
         Barrier { n, state: SpinLock::new(BarrierState { count: 0, waiters: VecDeque::new() }) }
     }
 }
 
-impl<S: StackfulSchedulerSystem> BarrierCore for Barrier<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem> BarrierCore for Barrier<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     type StackfulSchedulerSystem = S;
-    fn new_core(count: usize) -> Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc { Barrier::new(count) }
-    fn n(&self) -> usize where <S as SchedulerSystem>::Desc: StackfulTaskDesc { self.n }
-    fn state(&self) -> &SpinLock<BarrierState<S>> where <S as SchedulerSystem>::Desc: StackfulTaskDesc { &self.state }
+    fn new_core(count: usize) -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc { Barrier::new(count) }
+    fn n(&self) -> usize where <S as PoolSystem>::Desc: StackfulTaskDesc { self.n }
+    fn state(&self) -> &SpinLock<BarrierState<S>> where <S as PoolSystem>::Desc: StackfulTaskDesc { &self.state }
 }

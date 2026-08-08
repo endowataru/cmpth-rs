@@ -45,7 +45,7 @@ use crate::traits::component::stackful::noop_waker;
 use crate::traits::stackful::ThreadSystem;
 use crate::resumable::stackless::desc::WakerTaskDesc;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
-use crate::resumable::common::system::SchedulerSystem;
+use crate::resumable::common::system::PoolSystem;
 use crate::resumable::common::waker::{self, WakeOutcome, desc_from_erased, drop_shared, push_continuation};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::common::worker::{UltWorker, WorkerOps};
@@ -56,7 +56,7 @@ use crate::resumable::stackful::worker::StackfulWorker;
 // ---------------------------------------------------------------------------
 
 struct PrivateVtable<S>(PhantomData<S>);
-impl<S: StackfulSchedulerSystem> PrivateVtable<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+impl<S: StackfulSchedulerSystem> PrivateVtable<S> where <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     const VTABLE: RawWakerVTable = RawWakerVTable::new(
         clone_private::<S>,
         wake_private::<S>,
@@ -66,7 +66,7 @@ impl<S: StackfulSchedulerSystem> PrivateVtable<S> where <S as SchedulerSystem>::
 }
 
 struct SharedVtable<S>(PhantomData<S>);
-impl<S: StackfulSchedulerSystem> SharedVtable<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+impl<S: StackfulSchedulerSystem> SharedVtable<S> where <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     const VTABLE: RawWakerVTable = RawWakerVTable::new(
         clone_shared::<S>,
         wake_shared::<S>,
@@ -75,11 +75,11 @@ impl<S: StackfulSchedulerSystem> SharedVtable<S> where <S as SchedulerSystem>::D
     );
 }
 
-fn private_vtable<S: StackfulSchedulerSystem>() -> &'static RawWakerVTable where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+fn private_vtable<S: StackfulSchedulerSystem>() -> &'static RawWakerVTable where <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     &PrivateVtable::<S>::VTABLE
 }
 
-fn shared_vtable<S: StackfulSchedulerSystem>() -> &'static RawWakerVTable where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+fn shared_vtable<S: StackfulSchedulerSystem>() -> &'static RawWakerVTable where <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     &SharedVtable::<S>::VTABLE
 }
 
@@ -100,14 +100,14 @@ fn shared_vtable<S: StackfulSchedulerSystem>() -> &'static RawWakerVTable where 
 /// This type is `!Send`: it is bound to the same ULT.  In cmpth, `!Send`
 /// means "bound to the same ULT", not "bound to the same OS thread" — the
 /// scheduler moves the entire ULT stack atomically on steal.
-pub struct UltPoller<S: StackfulSchedulerSystem> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+pub struct UltPoller<S: StackfulSchedulerSystem> where <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     desc: Option<NonNull<S::Desc>>,
     waker: Waker,
     _marker: PhantomData<S>,
 }
 
-impl<S: StackfulSchedulerSystem> Poller for UltPoller<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
-    fn new() -> Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+impl<S: StackfulSchedulerSystem> Poller for UltPoller<S> where <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+    fn new() -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
         match UltWorker::<S>::current() {
             Some(wk) => {
                 let desc = wk.cur_task();
@@ -128,11 +128,11 @@ impl<S: StackfulSchedulerSystem> Poller for UltPoller<S> where <S as SchedulerSy
         }
     }
 
-    fn context<'a>(&'a self) -> Context<'a> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+    fn context<'a>(&'a self) -> Context<'a> where <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
         Context::from_waker(&self.waker)
     }
 
-    fn wait(&self) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+    fn wait(&self) where <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
         match self.desc {
             Some(desc) => {
                 let desc: &S::Desc = unsafe { desc.as_ref() };
@@ -152,8 +152,8 @@ impl<S: StackfulSchedulerSystem> Poller for UltPoller<S> where <S as SchedulerSy
     }
 }
 
-impl<S: StackfulSchedulerSystem> Drop for UltPoller<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
-    fn drop(&mut self) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+impl<S: StackfulSchedulerSystem> Drop for UltPoller<S> where <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+    fn drop(&mut self) where <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
         if let Some(desc) = self.desc {
             // Reset before self.waker drops, so racing wakers see IDLE.
             unsafe { desc.as_ref().mark_idle() };
@@ -176,7 +176,7 @@ impl<S: StackfulSchedulerSystem> Drop for UltPoller<S> where <S as SchedulerSyst
 /// written before the PARKED-committing CAS, read only by whichever
 /// `wake()` call wins the matching PARKED->POLLING CAS, so a plain `Cell`
 /// needs no atomicity of its own.
-struct ResumablePollerSlot<S: StackfulSchedulerSystem> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+struct ResumablePollerSlot<S: StackfulSchedulerSystem> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     state: AtomicUsize,
     cont: Cell<*mut S::Desc>,
     _marker: PhantomData<S>,
@@ -186,11 +186,11 @@ struct ResumablePollerSlot<S: StackfulSchedulerSystem> where <S as SchedulerSyst
 // despite raw-pointer/Cell fields: `cont`'s exclusive access is proven by
 // `state`'s own CAS, not by the type system, so `Cell` here is safe to
 // share across the threads that concurrently call `wake()`/`wake_by_ref()`.
-unsafe impl<S: StackfulSchedulerSystem> Send for ResumablePollerSlot<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {}
-unsafe impl<S: StackfulSchedulerSystem> Sync for ResumablePollerSlot<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {}
+unsafe impl<S: StackfulSchedulerSystem> Send for ResumablePollerSlot<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {}
+unsafe impl<S: StackfulSchedulerSystem> Sync for ResumablePollerSlot<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {}
 
 struct ResumableVtable<S>(PhantomData<S>);
-impl<S: StackfulSchedulerSystem> ResumableVtable<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem> ResumableVtable<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     const VTABLE: RawWakerVTable = RawWakerVTable::new(
         resumable_clone::<S>,
         resumable_wake::<S>,
@@ -208,17 +208,17 @@ impl<S: StackfulSchedulerSystem> ResumableVtable<S> where <S as SchedulerSystem>
 /// documented misuse, but one that must stay memory-safe, not become UB)
 /// still point at valid memory. `Arc::into_raw`/`from_raw` do the counting;
 /// no hand-rolled atomics needed here.
-unsafe fn resumable_clone<S: StackfulSchedulerSystem>(ptr: *const ()) -> RawWaker where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+unsafe fn resumable_clone<S: StackfulSchedulerSystem>(ptr: *const ()) -> RawWaker where <S as PoolSystem>::Desc: StackfulTaskDesc {
     unsafe { Arc::increment_strong_count(ptr as *const ResumablePollerSlot<S>) };
     RawWaker::new(ptr, &ResumableVtable::<S>::VTABLE)
 }
 
-unsafe fn resumable_wake<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+unsafe fn resumable_wake<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as PoolSystem>::Desc: StackfulTaskDesc {
     unsafe { resumable_wake_by_ref::<S>(ptr) };
     unsafe { resumable_drop::<S>(ptr) };
 }
 
-unsafe fn resumable_wake_by_ref<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+unsafe fn resumable_wake_by_ref<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as PoolSystem>::Desc: StackfulTaskDesc {
     let slot: &ResumablePollerSlot<S> = unsafe { desc_from_erased(ptr) };
     if let WakeOutcome::ClaimedParked = waker::try_wake_state(&slot.state) {
         let desc = slot.cont.get();
@@ -230,7 +230,7 @@ unsafe fn resumable_wake_by_ref<S: StackfulSchedulerSystem>(ptr: *const ()) wher
     }
 }
 
-unsafe fn resumable_drop<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+unsafe fn resumable_drop<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as PoolSystem>::Desc: StackfulTaskDesc {
     drop(unsafe { Arc::from_raw(ptr as *const ResumablePollerSlot<S>) });
 }
 
@@ -250,13 +250,13 @@ unsafe fn resumable_drop<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as
 /// to gate a fast path on (cloning is always just `Arc::increment_strong_count`).
 ///
 /// `!Send`: bound to the same ULT, matching `UltPoller`.
-pub struct ResumablePoller<S: StackfulSchedulerSystem> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+pub struct ResumablePoller<S: StackfulSchedulerSystem> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     slot: Option<Arc<ResumablePollerSlot<S>>>,
     waker: Waker,
     _marker: PhantomData<S>,
 }
 
-impl<S: StackfulSchedulerSystem> Poller for ResumablePoller<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem> Poller for ResumablePoller<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     fn new() -> Self {
         match UltWorker::<S>::current() {
             Some(_wk) => {
@@ -303,7 +303,7 @@ impl<S: StackfulSchedulerSystem> Poller for ResumablePoller<S> where <S as Sched
     }
 }
 
-impl<S: StackfulSchedulerSystem> Drop for ResumablePoller<S> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem> Drop for ResumablePoller<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     fn drop(&mut self) {
         if let Some(slot) = &self.slot {
             // Reset before self.waker drops, so racing wakers see IDLE
@@ -331,7 +331,7 @@ impl<S: StackfulSchedulerSystem> Drop for ResumablePoller<S> where <S as Schedul
 ///
 /// # Safety
 /// `desc` must point to a live `DualTaskDesc`.
-unsafe fn try_wake<S: StackfulSchedulerSystem>(desc: *const S::Desc) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+unsafe fn try_wake<S: StackfulSchedulerSystem>(desc: *const S::Desc) where <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     let desc: &S::Desc = unsafe { &*desc };
     if let Some(token) = desc.try_claim_parked() {
         // ctx is a plain field now (see HasCtx's doc comment) — this
@@ -349,7 +349,7 @@ unsafe fn try_wake<S: StackfulSchedulerSystem>(desc: *const S::Desc) where <S as
 // PRIVATE vtable functions
 // ---------------------------------------------------------------------------
 
-unsafe fn clone_private<S: StackfulSchedulerSystem>(ptr: *const ()) -> RawWaker where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+unsafe fn clone_private<S: StackfulSchedulerSystem>(ptr: *const ()) -> RawWaker where <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     let desc: &S::Desc = unsafe { desc_from_erased(ptr) };
     desc.note_waker_shared();
     // The clone uses the SHARED vtable; the original retains PRIVATE vtable
@@ -357,7 +357,7 @@ unsafe fn clone_private<S: StackfulSchedulerSystem>(ptr: *const ()) -> RawWaker 
     RawWaker::new(ptr, shared_vtable::<S>())
 }
 
-unsafe fn wake_private<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+unsafe fn wake_private<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     // wake() consumes the waker.  For PRIVATE, there is no ref count to
     // decrement (the waker is part of the block_on frame).  If EVER_SHARED
     // was set after construction, delegate to the SHARED path for the drop.
@@ -365,7 +365,7 @@ unsafe fn wake_private<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as S
     unsafe { drop_private::<S>(ptr) };
 }
 
-unsafe fn wake_by_ref_private<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+unsafe fn wake_by_ref_private<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     let desc: &S::Desc = unsafe { desc_from_erased(ptr) };
     if desc.is_waker_shared() {
         // Transitioned to SHARED after construction; use SHARED wake logic.
@@ -375,7 +375,7 @@ unsafe fn wake_by_ref_private<S: StackfulSchedulerSystem>(ptr: *const ()) where 
     }
 }
 
-unsafe fn drop_private<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+unsafe fn drop_private<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     let desc: &S::Desc = unsafe { desc_from_erased(ptr) };
     if desc.is_waker_shared() {
         // The original waker is being dropped; treat like a SHARED drop.
@@ -388,16 +388,16 @@ unsafe fn drop_private<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as S
 // SHARED vtable functions
 // ---------------------------------------------------------------------------
 
-unsafe fn clone_shared<S: StackfulSchedulerSystem>(ptr: *const ()) -> RawWaker where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+unsafe fn clone_shared<S: StackfulSchedulerSystem>(ptr: *const ()) -> RawWaker where <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     // No ref count to bump — see `common::waker::drop_shared`'s doc comment.
     RawWaker::new(ptr, shared_vtable::<S>())
 }
 
-unsafe fn wake_shared<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+unsafe fn wake_shared<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     unsafe { wake_by_ref_shared::<S>(ptr) };
     drop_shared(ptr);
 }
 
-unsafe fn wake_by_ref_shared<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as SchedulerSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
+unsafe fn wake_by_ref_shared<S: StackfulSchedulerSystem>(ptr: *const ()) where <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
     unsafe { try_wake::<S>(ptr as *const S::Desc) };
 }

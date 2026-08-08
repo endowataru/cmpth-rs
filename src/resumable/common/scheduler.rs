@@ -39,23 +39,23 @@ pub struct Scheduler<S: SchedulerSystem> {
     /// (default: `S::STACK_SIZE`) by [`init`](crate::resumable::stackful::init::init).
     /// `0` on a stackless-only system (`run_async`'s construction site),
     /// which has no real stacks to size — mirrors the existing precedent on
-    /// [`SchedulerSystem::AsyncPool`], where a stackful-only system must
+    /// [`PoolSystem::AsyncPool`](crate::resumable::common::system::PoolSystem::AsyncPool), where a stackful-only system must
     /// name an async pool it never allocates from.
     pub(crate) stack_size: usize,
     pub(crate) task_pool: S::Pool,
     /// Separate from `task_pool`: `spawn_async` needs a much smaller fixed
     /// slot size than a ULT stack, and a dual system needs both live at once
-    /// (see [`SchedulerSystem::AsyncPool`]).
+    /// (see [`PoolSystem::AsyncPool`](crate::resumable::common::system::PoolSystem::AsyncPool)).
     pub(crate) async_task_pool: S::AsyncPool,
     /// Pool backing [`crate::resumable::stackless::thread::recurse`] — see
-    /// [`SchedulerSystem::RecursionPool`] for why this needs none of
+    /// [`PoolSystem::RecursionPool`](crate::resumable::common::system::PoolSystem::RecursionPool) for why this needs none of
     /// [`task_pool`](Self::task_pool)'s `TaskDesc`/stealing-specific
     /// construction, just the same fixed-slot free-list mechanism.
     pub(crate) recursion_pool: S::RecursionPool,
 }
 
 /// Threshold `S::RecursionPool` is configured with — reuses
-/// [`SchedulerSystem::ASYNC_POOL_SIZE`] (both are "small `Future` storage"
+/// [`PoolSystem::ASYNC_POOL_SIZE`](crate::resumable::common::system::PoolSystem::ASYNC_POOL_SIZE) (both are "small `Future` storage"
 /// budgets) rather than adding a second, near-duplicate per-system
 /// constant; align 16 covers realistic recursive-`async fn` frames without
 /// needing its own knob either.

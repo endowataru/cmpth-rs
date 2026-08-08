@@ -14,7 +14,7 @@ use std::marker::PhantomData;
 use crate::traits::stackful::{NestableSystem, ThreadSystem};
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::lookup::CurrentLookup;
-use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
+use crate::resumable::common::system::{DescScheduler, PoolSystem, SchedulerSystem};
 use crate::resumable::common::worker::{UltWorker, WorkerOps};
 use crate::resumable::stackless::desc::AsyncTaskDesc;
 use crate::traits::scoped::ScopedStacklessTaskSystem;
@@ -252,7 +252,7 @@ pub trait UltAsyncIdentity: Sized + Send + Sync + 'static {
         + crate::resumable::common::desc::TaskDescCore<
             Owned: crate::resumable::common::desc::HasExternalQueue<
                 Self::Desc,
-                Queue = <UltAsyncSystem<Self> as SchedulerSystem>::ExternalQueue,
+                Queue = <UltAsyncSystem<Self> as PoolSystem>::ExternalQueue,
             >,
         >
     where
@@ -285,12 +285,8 @@ pub struct UltAsyncSystem<M: UltAsyncIdentity> {
     _marker: PhantomData<fn() -> M>,
 }
 
-impl<M: UltAsyncIdentity> SchedulerSystem for UltAsyncSystem<M> {
-    type Base  = M::Base;
+impl<M: UltAsyncIdentity> PoolSystem for UltAsyncSystem<M> {
     type Desc  = M::Desc;
-    type Item  = crate::resumable::common::desc::SuspendedTaskToken<M::Desc>;
-    type Worker = UltWorker<Self>;
-    type RunQueue = M::RunQueue;
     type ExternalQueue = crate::resumable::common::external_queue::StealPathQueue<M::Desc>;
     // Never actually allocated through: this flavor has no `spawn`, only
     // `spawn_async` (which goes through AsyncPool below). SimplePool is the
@@ -299,6 +295,13 @@ impl<M: UltAsyncIdentity> SchedulerSystem for UltAsyncSystem<M> {
     const ASYNC_POOL_SIZE: usize = <M as UltAsyncIdentity>::ASYNC_POOL_SIZE;
     type AsyncPool = crate::resumable::common::pool::ReturnPool<M::Desc, crate::resumable::common::stack::HeapStack>;
     type RecursionPool = crate::resumable::common::pool::ThresholdPool<crate::resumable::common::pool::BlockPool>;
+}
+
+impl<M: UltAsyncIdentity> SchedulerSystem for UltAsyncSystem<M> {
+    type Base  = M::Base;
+    type Item  = crate::resumable::common::desc::SuspendedTaskToken<M::Desc>;
+    type Worker = UltWorker<Self>;
+    type RunQueue = M::RunQueue;
     type Lookup = <M as UltAsyncIdentity>::Lookup;
 
     fn worker_tls() -> &'static <M::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>> {

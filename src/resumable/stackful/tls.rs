@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::traits::common::TlsSlot;
 use crate::resumable::common::desc::HasDescOwned;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
-use crate::resumable::common::system::SchedulerSystem;
+use crate::resumable::common::system::PoolSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::common::worker::{UltWorker, WorkerOps};
 
@@ -61,15 +61,15 @@ impl<S, T> Default for UltTls<S, T> {
     }
 }
 
-impl<S: StackfulSchedulerSystem, T: 'static> TlsSlot<T> for UltTls<S, T> where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
-    fn from_anchor(anchor: &'static crate::traits::common::TlsAnchor) -> &'static Self where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem, T: 'static> TlsSlot<T> for UltTls<S, T> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+    fn from_anchor(anchor: &'static crate::traits::common::TlsAnchor) -> &'static Self where <S as PoolSystem>::Desc: StackfulTaskDesc {
         // Sound: repr(transparent) over TlsAnchor (PhantomData is a ZST).
         unsafe { &*(anchor as *const _ as *const Self) }
     }
 
     const INIT: Self = UltTls::new();
 
-    fn get(&self) -> *mut T where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    fn get(&self) -> *mut T where <S as PoolSystem>::Desc: StackfulTaskDesc {
         let wk = UltWorker::<S>::current()
             .expect("cmpth: ULT-local storage accessed outside a worker");
         let map = &wk.cur_task_token_mut().desc_owned().tls;
@@ -79,7 +79,7 @@ impl<S: StackfulSchedulerSystem, T: 'static> TlsSlot<T> for UltTls<S, T> where <
             .cast()
     }
 
-    fn set(&self, p: *mut T) where <S as SchedulerSystem>::Desc: StackfulTaskDesc {
+    fn set(&self, p: *mut T) where <S as PoolSystem>::Desc: StackfulTaskDesc {
         let wk = UltWorker::<S>::current()
             .expect("cmpth: ULT-local storage accessed outside a worker");
         let map = &mut wk.cur_task_token_mut().desc_owned_mut().tls;
