@@ -61,7 +61,10 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
 }
 
 impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, const N: usize> SyncQueue<S, C>
-    for RingBufQueue<S, C, N> where <S as PoolSystem>::Desc: StackfulTaskDesc
+    for RingBufQueue<S, C, N>
+where
+    <S as PoolSystem>::Desc: StackfulTaskDesc,
+    S::Worker: StackfulWorker<S>,
 {
     fn start_lock(
         &self,
@@ -72,7 +75,7 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
 
             // Queue full: yield and retry.
             if tail.wrapping_sub(head) >= N {
-                if let Some(wk) = crate::resumable::common::worker::UltWorker::<S>::current() {
+                if let Some(wk) = S::Worker::current() {
                     wk.yield_now();
                 } else {
                     std::hint::spin_loop();

@@ -14,7 +14,7 @@ use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::common::desc::{HasExternalQueue, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskExitSink};
 use crate::resumable::stackful::desc::{HasCtx, StackfulTaskDesc};
-use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, WorkerOps};
+use crate::resumable::common::worker::{LocalQueue, TaskPool, WorkerOps};
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulWorker};
 
 // ---------------------------------------------------------------------------
@@ -30,11 +30,12 @@ use crate::resumable::stackful::worker::{ContextSwitcher, StackfulWorker};
 pub fn spawn<S, T, F>(f: F) -> JoinHandle<S, T>
 where
     S: StackfulSchedulerSystem,
+    S::Worker: ContextSwitcher<S>,
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
     <S as PoolSystem>::Desc: StackfulTaskDesc,
 {
-    let wk = UltWorker::<S>::current().expect("cmpth: spawn called outside a worker");
+    let wk = <S::Worker as WorkerOps<S>>::current().expect("cmpth: spawn called outside a worker");
     let desc = wk.alloc_task(true);
     let stack_top = {
         // SAFETY: `desc` was just freshly allocated by `alloc_task` and has
@@ -72,16 +73,16 @@ where
     // Write the closure onto the child's stack before switching.
     unsafe { f_ptr.write(f) };
 
-    let child = move |wk: &UltWorker<S>, prev| {
+    let child = move |wk: &S::Worker, prev| {
         // Running on the child's stack.  Publish the parent for stealing, run
         // the closure, then exit via exit_with_result.
         wk.push(prev);
         let val = catch_unwind(AssertUnwindSafe(|| unsafe { f_ptr.read() }()));
         // The closure may have suspended and resumed on a different worker,
         // so re-derive which one we're on now.
-        let wk = UltWorker::<S>::current().expect("cmpth: worker vanished");
+        let wk = <S::Worker as WorkerOps<S>>::current().expect("cmpth: worker vanished");
         debug_assert!(std::ptr::eq(wk.cur_task(), desc));
-        exit_with_result(wk, wk.cur_task_ref(), result_ptr, val)
+        exit_with_result::<S, T>(wk, wk.cur_task_ref(), result_ptr, val)
     };
     // SAFETY: `desc` was freshly allocated above and, after the token built
     // at line 46 was released via `into_raw`, has never been re-tokenized —
@@ -99,7 +100,7 @@ where
 /// result lives on the exiting task's own (still-allocated) stack, so
 /// `reclaim` must drop it in place before freeing the descriptor.
 struct ExitWithResultSink<'a, S: StackfulSchedulerSystem, T> {
-    wk: &'a UltWorker<S>,
+    wk: &'a S::Worker,
     desc_ptr: *mut S::Desc,
     result_ptr: *mut StackResult<T>,
 }
@@ -135,11 +136,15 @@ where
 /// (`finish_and_settle`) and settles whichever party it finds in the old
 /// value.
 fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
-    wk: &UltWorker<S>,
+    wk: &S::Worker,
     desc: &S::Desc,
     result_ptr: *mut StackResult<T>,
     val: Result<T, Box<dyn Any + Send>>,
-) -> ! where <S as PoolSystem>::Desc: StackfulTaskDesc {
+) -> !
+where
+    <S as PoolSystem>::Desc: StackfulTaskDesc,
+    S::Worker: StackfulWorker<S>,
+{
     let desc_ptr = desc as *const S::Desc as *mut S::Desc;
     if let Some(j_token) = desc.try_take_handoff_target() {
         // Direct handoff: switch straight to the parked joiner.
@@ -157,7 +162,7 @@ fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
         let sr = match val { Ok(v) => StackResult::Ok(v), Err(e) => StackResult::Err(e) };
         unsafe { result_ptr.write(sr) };
         wk.exit_to_sched(move |wk| {
-            let sink = ExitWithResultSink { wk, desc_ptr, result_ptr };
+            let sink = ExitWithResultSink::<S, T> { wk, desc_ptr, result_ptr };
             desc.finish_and_settle(&sink);
         })
     }
@@ -176,9 +181,10 @@ fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
 impl<S: StackfulSchedulerSystem, T: Send + 'static> JoinHandle<S, T>
 where
     S::Desc: StackfulTaskDesc,
+    S::Worker: StackfulWorker<S>,
 {
     pub fn join(self) -> Result<T, Box<dyn Any + Send>> {
-        let wk = UltWorker::<S>::current().expect("cmpth: join called outside a worker");
+        let wk = <S::Worker as WorkerOps<S>>::current().expect("cmpth: join called outside a worker");
 
         // Fast path: the child already exited.  Child-first spawn guarantees
         // this whenever the parent continuation was not stolen, so the whole
@@ -211,6 +217,7 @@ where
 impl<S: StackfulSchedulerSystem, T: Send + 'static> JoinHandleLike<T> for JoinHandle<S, T>
 where
     S::Desc: StackfulTaskDesc,
+    S::Worker: StackfulWorker<S>,
 {
     fn join(self) -> T {
         match JoinHandle::join(self) {

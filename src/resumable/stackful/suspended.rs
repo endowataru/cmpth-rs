@@ -4,12 +4,12 @@ use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
 
 use crate::traits::{Resumable, StackfulResumable};
-use crate::resumable::common::system::{DescScheduler, PoolSystem, SchedulerSystem};
+use crate::resumable::common::system::{DescScheduler, PoolSystem, WorkerSystem};
 use crate::resumable::stackful::system::{StackfulSchedulerSystem, StackfulWorkerSystem};
 use crate::resumable::common::desc::SuspendedTaskToken;
 use crate::interchange::AtomicSlot;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
-use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
+use crate::resumable::common::worker::{LocalQueue, WorkerOps};
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulWorker};
 
 /// Raw parked-continuation storage: a single atomic slot, the publication
@@ -44,23 +44,17 @@ where
             .expect("StackfulOnlyResumableCore: no parked continuation")
     }
 
-    /// `Self::StackfulWorkerSystem: DescScheduler + SchedulerSystem` is not
-    /// part of this trait's own associated-type bound (only plain
-    /// `StackfulWorkerSystem` — see that bound's declaration above): the
-    /// equality constraint on [`StackfulWorkerSystem::SuspendedThread`]
-    /// (`StackfulOnlyResumableCore<StackfulWorkerSystem = Self>`) is written
-    /// from *inside* the `StackfulWorkerSystem` trait, where `Self` is only
-    /// known to be `StackfulWorkerSystem`, not `DescScheduler`/
-    /// `SchedulerSystem` — so the bound has to live here instead, on the one
-    /// method that actually needs a live worker (`UltWorker::current()`
-    /// below needs `DescScheduler` for the `Worker`/`Item` pinning and
-    /// `SchedulerSystem` is required explicitly, no longer implied by
-    /// `DescScheduler` alone).
-    fn wk() -> &'static UltWorker<Self::StackfulWorkerSystem>
-    where
-        Self::StackfulWorkerSystem: DescScheduler + SchedulerSystem,
-    {
-        UltWorker::<Self::StackfulWorkerSystem>::current()
+    /// Returns `Self::StackfulWorkerSystem`'s own worker type (`S::Worker`),
+    /// not the concrete [`UltWorker`](crate::resumable::common::worker::UltWorker)
+    /// — needs no bound beyond `StackfulWorkerSystem` (already this trait's
+    /// own associated-type bound, see its declaration above) to name, since
+    /// [`WorkerSystem::Worker`] is always [`WorkerOps`]-capable by
+    /// construction. Callers that go on to call a stackful combinator
+    /// (`push`/`suspend_to_cont`/`suspend_to_sched`/...) on the result still
+    /// need their own bound on `Worker` for that — see the blanket impls
+    /// below.
+    fn wk() -> &'static <Self::StackfulWorkerSystem as WorkerSystem>::Worker {
+        <Self::StackfulWorkerSystem as WorkerSystem>::Worker::current()
             .expect("cmpth: StackfulOnlyResumableCore operation called outside a worker")
     }
 }
@@ -72,7 +66,7 @@ where
 /// a plain wake internally.
 impl<T: StackfulOnlyResumableCore> Resumable<T::StackfulWorkerSystem> for T
 where
-    T::StackfulWorkerSystem: DescScheduler + SchedulerSystem,
+    T::StackfulWorkerSystem: DescScheduler,
 {
     fn is_set(&self) -> bool {
         self.cont().is_set(Ordering::Acquire)
@@ -84,21 +78,19 @@ where
     }
 }
 
-// Bounded directly on the fold trait (`StackfulSchedulerSystem`), not on
-// `DescScheduler + SchedulerSystem` (as `Resumable`'s impl above still is):
-// `wait_with`/`wait_with_cond`/`enter`/`swap` all reach `Self::wk().
-// suspend_to_sched`/`cond_suspend_to_sched`, default methods of the
-// `StackfulWorker` trait, itself only implemented for `S:
-// StackfulSchedulerSystem`. Reconstructing that piece by piece
-// (`DescScheduler + SchedulerSystem` plus this trait's own `Desc:
-// StackfulTaskDesc` where-clause) used to work when `SchedulerSystem` was
-// implied by `DescScheduler`, but stopped resolving once `SchedulerSystem`
-// became a directly-stated conjunct instead of a supertrait implication —
-// naming the fold trait directly sidesteps needing the solver to recombine
-// those separately-stated facts at all.
+// `wk()` now returns `S::Worker` (opaque), not the concrete `UltWorker<S>`,
+// so unlike before, `StackfulSchedulerSystem` alone no longer carries the
+// worker-capability facts these methods need — it still supplies the `Item`
+// pin (`DescScheduler`, via its own supertrait bound) that `push`/
+// `suspend_to_cont`'s `SuspendedTaskToken<S::Desc>` traffic needs, but the
+// `Worker: StackfulWorker<Self>` bound (which also brings in `ContextSwitcher`
+// and `StackfulLocalQueue` as its own supertraits) has to be stated
+// separately here until it can be nested into `StackfulSchedulerSystem`
+// itself (see that trait's doc comment).
 impl<T: StackfulOnlyResumableCore> StackfulResumable<T::StackfulWorkerSystem> for T
 where
     T::StackfulWorkerSystem: StackfulSchedulerSystem,
+    <T::StackfulWorkerSystem as WorkerSystem>::Worker: StackfulWorker<T::StackfulWorkerSystem>,
 {
     fn wait_with<F: FnOnce()>(&self, f: F) {
         type D<T> = <<T as StackfulOnlyResumableCore>::StackfulWorkerSystem as PoolSystem>::Desc;

@@ -42,7 +42,11 @@ impl<S: StackfulSchedulerSystem, T: Send> DerefMut for McsMutexGuard<'_, S, T> w
     fn deref_mut(&mut self) -> &mut T where <S as PoolSystem>::Desc: StackfulTaskDesc { unsafe { &mut *self.mutex.data.get() } }
 }
 
-impl<S: StackfulSchedulerSystem, T: Send> Drop for McsMutexGuard<'_, S, T> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem, T: Send> Drop for McsMutexGuard<'_, S, T>
+where
+    <S as PoolSystem>::Desc: StackfulTaskDesc,
+    S::Worker: StackfulWorker<S>,
+{
     fn drop(&mut self) where <S as PoolSystem>::Desc: StackfulTaskDesc {
         let node_ptr: *mut McsNode<S> = &mut *self.node;
         if self.mutex.tail
@@ -62,7 +66,7 @@ impl<S: StackfulSchedulerSystem, T: Send> Drop for McsMutexGuard<'_, S, T> where
             spins = spins.wrapping_add(1);
             if spins & 0x3F == 0 {
                 use crate::resumable::common::worker::WorkerOps as _;
-                if let Some(wk) = crate::resumable::common::worker::UltWorker::<S>::current() {
+                if let Some(wk) = S::Worker::current() {
                     wk.yield_now();
                 }
             } else {

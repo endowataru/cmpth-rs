@@ -156,7 +156,7 @@ where
 {
     assert!(num_workers >= 1, "need at least one worker");
     assert!(
-        UltWorker::<S>::current().is_none(),
+        S::Worker::current().is_none(),
         "cmpth: nested init() of the same system on one thread"
     );
 
@@ -317,6 +317,7 @@ impl<S> Drop for StackfulInit<S>
 where
     S: StackfulSchedulerSystem,
     S::Desc: StackfulTaskDesc,
+    S::Worker: StackfulWorker<S>,
 {
     fn drop(&mut self) {
         // A context switch (below) while an unwind is in flight is unsound:
@@ -354,7 +355,7 @@ where
 
         // This worker may not be worker 0 — the ULT `init` returned as may
         // have migrated any number of times since.
-        let wk = UltWorker::<S>::current()
+        let wk = S::Worker::current()
             .expect("cmpth: StackfulInit dropped outside any worker of its own system");
 
         let state = &self.state;
