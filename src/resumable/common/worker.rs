@@ -92,23 +92,29 @@ pub trait RecursionAlloc {
 // ---------------------------------------------------------------------------
 
 /// Per-worker work-stealing run queue, independent of task flavor.
+///
+/// Speaks [`SchedulerSystem::Item`], never `SuspendedTaskToken<S::Desc>`:
+/// this layer moves work around without looking inside it, so naming the
+/// descriptor here would be a claim it does not need to make. The item stops
+/// being opaque exactly one method later, in
+/// [`WorkerOps::execute`].
 pub trait LocalQueue<S: SchedulerSystem> {
     /// Run `c` next on this worker (will run before anything already
     /// queued).
-    fn push(&self, c: SuspendedTaskToken<S::Desc>);
+    fn push(&self, c: S::Item);
 
     /// Run `c` after work already queued here (yield: let other tasks run
     /// first).
-    fn defer(&self, c: SuspendedTaskToken<S::Desc>);
+    fn defer(&self, c: S::Item);
 
     /// Take what this worker should run next.
-    fn try_pop(&self) -> Option<SuspendedTaskToken<S::Desc>>;
+    fn try_pop(&self) -> Option<S::Item>;
 
     /// Try to steal one task from another worker. `Steal::Retry` means some
     /// victim had work but it could not be taken right now — distinct from
     /// `Steal::Empty` (every victim scanned was genuinely empty) so callers
     /// don't mistake contention for idleness.
-    fn try_steal(&self) -> Steal<SuspendedTaskToken<S::Desc>>;
+    fn try_steal(&self) -> Steal<S::Item>;
 
     /// This worker's index within its scheduler.
     fn num(&self) -> usize;
@@ -134,7 +140,7 @@ pub trait WorkerOps<S: SchedulerSystem>: TaskPool<S> + LocalQueue<S> + Send + Sy
     /// Run one task to its next suspension point (scheduler-loop side).
     /// Forwards to [`SchedulerSystem::execute`] — see that method for why
     /// the dispatch body lives on the system trait, not here.
-    fn execute(&self, cont: SuspendedTaskToken<S::Desc>);
+    fn execute(&self, cont: S::Item);
 }
 
 // ---------------------------------------------------------------------------
@@ -383,31 +389,28 @@ impl<S: SchedulerSystem> RecursionAlloc for UltWorker<S> {
 
 // --- LocalQueue ---
 
-// `S::RunQueue: WorkerRunQueue<S::Item>` alone doesn't let this impl call
-// `self.deque.push(c)` with `c: SuspendedTaskToken<S::Desc>` -- `Item`
-// is a genuinely independent associated type (see `SchedulerSystem::Item`'s
-// doc comment for why), so the equality has to be spelled out here (via
-// `DescScheduler`). True for every concrete system today. Making this impl
-// conditional forces the same restatement onto every other generic fn/impl
-// that both calls `Worker::current`/`LocalQueue`'s methods *and* is bounded
-// by nothing stronger than base `SchedulerSystem` (the stackful/stackless
-// subtraits nest this bound into their own declarations, so code merely
-// bounded by `StackfulSchedulerSystem`/`StacklessSchedulerSystem` gets it
-// for free).
-impl<S: DescScheduler> LocalQueue<S> for UltWorker<S> {
-    fn push(&self, c: SuspendedTaskToken<S::Desc>) {
+// Bounded by bare `SchedulerSystem`, not `DescScheduler`: now that
+// `LocalQueue` speaks `S::Item` rather than `SuspendedTaskToken<S::Desc>`,
+// nothing here needs the two to be equal. `self.deque` is already
+// `S::RunQueue: WorkerRunQueue<S::Item>` and `shared.stealers` already
+// yields `Steal<S::Item>`, so every body below type-checks against the
+// opaque item alone. The equality is still needed one layer up, wherever a
+// caller hands a concrete token to these methods — but that is the task
+// layer, which legitimately knows the descriptor type.
+impl<S: SchedulerSystem> LocalQueue<S> for UltWorker<S> {
+    fn push(&self, c: S::Item) {
         self.deque.push(c);
     }
 
-    fn defer(&self, c: SuspendedTaskToken<S::Desc>) {
+    fn defer(&self, c: S::Item) {
         self.deque.defer(c);
     }
 
-    fn try_pop(&self) -> Option<SuspendedTaskToken<S::Desc>> {
+    fn try_pop(&self) -> Option<S::Item> {
         self.deque.try_pop()
     }
 
-    fn try_steal(&self) -> Steal<SuspendedTaskToken<S::Desc>> {
+    fn try_steal(&self) -> Steal<S::Item> {
         let shared = self.shared();
         let n = shared.workers.len();
         if n <= 1 {
@@ -450,7 +453,7 @@ impl<S: DescScheduler> WorkerOps<S> for UltWorker<S> {
         <S::Lookup as crate::resumable::common::lookup::CurrentLookup<S>>::current()
     }
 
-    fn execute(&self, cont: SuspendedTaskToken<S::Desc>) {
+    fn execute(&self, cont: S::Item) {
         S::execute(self, cont);
     }
 }
