@@ -6,8 +6,7 @@ use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Waker};
 
-use crate::resumable::common::desc::{DescOwned, HasDescOwned, HasScheduler, JoinState, RunningTaskToken, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskDescAlloc, decode_join_state, JS_ASYNC_JOINER_TAG, JS_ASYNC_TAG, JS_DETACHED, JS_FINISHED, JS_RUNNING};
-use crate::resumable::common::scheduler::Scheduler;
+use crate::resumable::common::desc::{DescOwned, HasDescOwned, HasExternalQueue, JoinState, RunningTaskToken, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskDescAlloc, decode_join_state, JS_ASYNC_JOINER_TAG, JS_ASYNC_TAG, JS_DETACHED, JS_FINISHED, JS_RUNNING};
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::waker::{self, WakeOutcome, EVER_SHARED, STATE_MASK};
 
@@ -202,7 +201,7 @@ pub trait HasPollFn<D> {
 ///
 /// Also pins `Suspended = SuspendedTaskToken<Self>` (nested in this trait's
 /// own supertrait bound list, so it propagates as a real implied bound at
-/// call sites merely bounded by `AsyncTaskDesc` — see [`HasScheduler`]'s
+/// call sites merely bounded by `AsyncTaskDesc` — see [`HasExternalQueue`]'s
 /// doc comment for why the nesting position matters): every call site in
 /// this crate that receives a `WakerTaskDesc`/`TaskDesc::Suspended` token
 /// generic only over `S::Desc: AsyncTaskDesc` immediately hands it to this
@@ -211,10 +210,10 @@ pub trait HasPollFn<D> {
 /// needs to be visible there, not just to this trait's own default-less
 /// methods.
 pub trait AsyncTaskDesc:
-    WakerTaskDesc + TaskDesc<Suspended = SuspendedTaskToken<Self>> + TaskDescCore<Owned: HasPollFn<Self> + HasScheduler>
+    WakerTaskDesc + TaskDesc<Suspended = SuspendedTaskToken<Self>> + TaskDescCore<Owned: HasPollFn<Self> + HasExternalQueue<Self>>
 {}
 
-impl<D: WakerTaskDesc + TaskDesc<Suspended = SuspendedTaskToken<D>> + TaskDescCore<Owned: HasPollFn<D> + HasScheduler>> AsyncTaskDesc for D {}
+impl<D: WakerTaskDesc + TaskDesc<Suspended = SuspendedTaskToken<D>> + TaskDescCore<Owned: HasPollFn<D> + HasExternalQueue<D>>> AsyncTaskDesc for D {}
 
 impl<D: TaskDescCore<Owned: HasPollFn<D>>> SuspendedTaskToken<D> {
     /// The type-erased poll entry point, non-null once `spawn_now`/
@@ -259,7 +258,7 @@ impl<D: TaskDescCore<Owned: HasPollFn<D>>> RunningTaskToken<D> {
 /// context switch).
 pub struct StacklessOnlyOwned<S: SchedulerSystem> {
     desc_owned: DescOwned,
-    scheduler: *const Scheduler<S>,
+    external_queue: *const S::ExternalQueue,
     poll_fn: Option<TaskPollFn<StacklessOnlyTaskDesc<S>>>,
 }
 
@@ -268,10 +267,12 @@ impl<S: SchedulerSystem> HasDescOwned for StacklessOnlyOwned<S> {
     fn desc_owned_mut(&mut self) -> &mut DescOwned { &mut self.desc_owned }
 }
 
-impl<S: SchedulerSystem> HasScheduler for StacklessOnlyOwned<S> {
-    type System = S;
-    fn scheduler(&self) -> *const Scheduler<S> { self.scheduler }
-    fn set_scheduler(&mut self, scheduler: *const Scheduler<S>) { self.scheduler = scheduler; }
+// See `StackfulOnlyOwned`'s matching impl for why `Desc =
+// StacklessOnlyTaskDesc<S>` is pinned here — identical reasoning.
+impl<S: SchedulerSystem<Desc = StacklessOnlyTaskDesc<S>>> HasExternalQueue<StacklessOnlyTaskDesc<S>> for StacklessOnlyOwned<S> {
+    type Queue = S::ExternalQueue;
+    fn external_queue(&self) -> *const S::ExternalQueue { self.external_queue }
+    fn set_external_queue(&mut self, queue: *const S::ExternalQueue) { self.external_queue = queue; }
 }
 
 impl<S: SchedulerSystem> HasPollFn<StacklessOnlyTaskDesc<S>> for StacklessOnlyOwned<S> {
@@ -345,7 +346,7 @@ impl<S: SchedulerSystem> StacklessOnlyTaskDesc<S> {
     pub(crate) fn alloc_with(stack: crate::resumable::common::stack::StackMem, has_handle: bool) -> StacklessOnlyTaskDesc<S> {
         let desc_owned = DescOwned::new();
         StacklessOnlyTaskDesc {
-            owned: UnsafeCell::new(StacklessOnlyOwned { desc_owned, scheduler: std::ptr::null(), poll_fn: None }),
+            owned: UnsafeCell::new(StacklessOnlyOwned { desc_owned, external_queue: std::ptr::null(), poll_fn: None }),
             is_root: false,
             join_state: AtomicUsize::new(if has_handle { JS_RUNNING } else { JS_DETACHED }),
             waker_refs: AtomicUsize::new(0),
@@ -356,7 +357,7 @@ impl<S: SchedulerSystem> StacklessOnlyTaskDesc<S> {
     /// Pseudo-descriptor for a worker's scheduler-loop context.
     pub(crate) fn new_root() -> StacklessOnlyTaskDesc<S> {
         StacklessOnlyTaskDesc {
-            owned: UnsafeCell::new(StacklessOnlyOwned { desc_owned: DescOwned::new(), scheduler: std::ptr::null(), poll_fn: None }),
+            owned: UnsafeCell::new(StacklessOnlyOwned { desc_owned: DescOwned::new(), external_queue: std::ptr::null(), poll_fn: None }),
             is_root: true,
             join_state: AtomicUsize::new(JS_DETACHED),
             waker_refs: AtomicUsize::new(0),

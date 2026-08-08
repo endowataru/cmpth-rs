@@ -74,13 +74,13 @@ where
     }
 
     let shared2 = Arc::clone(&shared);
-    let scheduler_ptr = Arc::as_ptr(&shared);
+    let external_queue_ptr = &shared.external_queue as *const _;
     let root_cont = fork_async_parent_first::<S, _>(
         async move {
             root.await;
             shared2.finished.store(true, Ordering::Release);
         },
-        scheduler_ptr,
+        external_queue_ptr,
     );
     shared.workers[0].push(root_cont);
 

@@ -12,7 +12,7 @@ use crate::traits::stackful::{HandoffTaskDesc, JoinHandleLike};
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::desc::{HasScheduler, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskExitSink};
+use crate::resumable::common::desc::{HasExternalQueue, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskExitSink};
 use crate::resumable::stackful::desc::{HasCtx, StackfulTaskDesc};
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, WorkerOps};
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulWorker};
@@ -41,7 +41,7 @@ where
         // never been wrapped in a token before — trivially exclusive.
         let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
         token.commit_as_ctx();
-        token.set_scheduler(wk.shared.get());
+        token.set_external_queue(&wk.shared().external_queue as *const _);
         let stack_top = token.as_desc().stack_top() as usize;
         let _ = token.into_raw();
         stack_top

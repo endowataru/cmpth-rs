@@ -139,18 +139,18 @@ impl<S: StacklessSchedulerSystem> crate::traits::stackless::StacklessInitSystem 
 /// [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem)'s
 /// role on the stackless side: blanket-derived for any `SchedulerSystem`
 /// whose descriptor is `AsyncTaskDesc`, purely so that
-/// `HasScheduler<System = Self>` (see that trait's doc comment for why this
-/// specific nested-supertrait-bound shape is needed) reaches every
-/// stackless leaf function (`spawn_now`, `fork_async_parent_first`,
-/// `try_wake_async`) merely bounded `S: StacklessSchedulerSystem`, with no
-/// need to restate it. Unlike `StackfulSchedulerSystem`, this trait has no
-/// associated types of its own to assemble — it exists solely as a fold
-/// point for this bound.
+/// `HasExternalQueue<Self::Desc, Queue = Self::ExternalQueue>` (see that
+/// trait's doc comment for why this specific nested-supertrait-bound shape
+/// is needed) reaches every stackless leaf function (`spawn_now`,
+/// `fork_async_parent_first`, `try_wake_async`) merely bounded `S:
+/// StacklessSchedulerSystem`, with no need to restate it. Unlike
+/// `StackfulSchedulerSystem`, this trait has no associated types of its own
+/// to assemble — it exists solely as a fold point for this bound.
 pub trait StacklessSchedulerSystem:
     DescScheduler<
         Desc: AsyncTaskDesc
                   + crate::resumable::common::desc::TaskDescCore<
-                      Owned: crate::resumable::common::desc::HasScheduler<System = Self>,
+                      Owned: crate::resumable::common::desc::HasExternalQueue<Self::Desc, Queue = Self::ExternalQueue>,
                   >,
     >
 {
@@ -160,7 +160,7 @@ impl<S: DescScheduler> StacklessSchedulerSystem for S
 where
     S::Desc: AsyncTaskDesc,
     <S::Desc as crate::resumable::common::desc::TaskDescCore>::Owned:
-        crate::resumable::common::desc::HasScheduler<System = S>,
+        crate::resumable::common::desc::HasExternalQueue<S::Desc, Queue = S::ExternalQueue>,
 {
 }
 
@@ -250,7 +250,10 @@ pub trait UltAsyncIdentity: Sized + Send + Sync + 'static {
     type Desc: crate::resumable::common::desc::TaskDescAlloc
         + AsyncTaskDesc
         + crate::resumable::common::desc::TaskDescCore<
-            Owned: crate::resumable::common::desc::HasScheduler<System = UltAsyncSystem<Self>>,
+            Owned: crate::resumable::common::desc::HasExternalQueue<
+                Self::Desc,
+                Queue = <UltAsyncSystem<Self> as SchedulerSystem>::ExternalQueue,
+            >,
         >
     where
         UltAsyncSystem<Self>: SchedulerSystem;
