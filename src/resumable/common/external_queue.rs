@@ -1,17 +1,13 @@
 //! External-queue trait and implementations for waking ULTs from outside the
 //! scheduler (e.g. RDMA completion threads calling `Waker::wake()`).
 
-use std::any::Any;
-use std::marker::PhantomData;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::traits::stackful::ThreadSystem;
 use crate::resumable::common::desc::SuspendedTaskToken;
-use crate::resumable::common::scheduler::Scheduler;
 use crate::resumable::common::system::SchedulerSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::stackful::thread::{ErasedBody, fork_parent_first};
 use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
 
 // ---------------------------------------------------------------------------
@@ -30,6 +26,12 @@ use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
 /// * [`PollerUltQueue`] — a dedicated poller ULT drains the queue; zero
 ///   overhead on the steal path, but consumes one ULT stack. Inherently
 ///   stackful (it *is* a ULT), so only implemented for `S: StackfulSchedulerSystem`.
+///   Deliberately `Scheduler`-free: it needs `run_service` running as an
+///   ordinary task, and asks for that declaratively ([`NEEDS_SERVICE`]) —
+///   [`crate::resumable::stackful::init::init`] is what actually spawns and
+///   joins it, once the caller is already running as a schedulable ULT.
+///
+/// [`NEEDS_SERVICE`]: ExternalQueue::NEEDS_SERVICE
 pub trait ExternalQueue<S: SchedulerSystem>: Default + Send + Sync + 'static {
     /// Push a continuation from an external (non-worker) OS thread.
     fn push(&self, cont: SuspendedTaskToken<S::Desc>);
@@ -40,12 +42,19 @@ pub trait ExternalQueue<S: SchedulerSystem>: Default + Send + Sync + 'static {
     /// delivery.
     fn try_pop(&self) -> Option<SuspendedTaskToken<S::Desc>>;
 
-    /// Called once by [`crate::resumable::stackful::init::init`]/
-    /// [`crate::resumable::stackless::scheduler::run_async`] before workers start.
-    ///
-    /// May push setup tasks to worker 0's deque (e.g., a poller ULT).
-    /// The default implementation is a no-op.
-    fn on_start(&self, _scheduler: &Arc<Scheduler<S>>) {}
+    /// Whether this queue needs [`run_service`](Self::run_service) running
+    /// as an ordinary task for the lifetime of the pool. Default: no
+    /// service needed ([`StealPathQueue`]'s case).
+    const NEEDS_SERVICE: bool = false;
+
+    /// Service loop. Runs until [`stop_service`](Self::stop_service) asks it
+    /// to return. Default: no-op (never called, since
+    /// [`NEEDS_SERVICE`](Self::NEEDS_SERVICE) is `false`).
+    fn run_service(&self) {}
+
+    /// Ask a running [`run_service`](Self::run_service) call to return.
+    /// Default: no-op.
+    fn stop_service(&self) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -96,18 +105,23 @@ impl<S: SchedulerSystem> ExternalQueue<S> for StealPathQueue<S::Desc> {
 
 /// External queue drained by a dedicated poller ULT.
 ///
-/// `try_pop()` always returns `None` — the steal path is unaffected.
-/// `on_start()` spawns a poller ULT that loops: drain the queue → yield →
-/// repeat.  Each wake-up re-checks and forwards any pending continuations to
-/// the worker's local deque.
+/// `try_pop()` always returns `None` — the steal path is unaffected; the
+/// only way anything moves out of `inner` is [`run_service`](Self::run_service)'s
+/// loop, spawned as an ordinary task by
+/// [`crate::resumable::stackful::init::init`] because
+/// [`NEEDS_SERVICE`](ExternalQueue::NEEDS_SERVICE) is `true`. That task
+/// drains the queue, forwards anything pending to the worker running it
+/// (via [`LocalQueue::defer`]), then yields — until
+/// [`stop_service`](Self::stop_service) sets `stop`, at which point one more
+/// drain pass runs before the loop returns.
 pub struct PollerUltQueue<D: crate::resumable::common::desc::TaskDescCore> {
-    inner: Arc<Mutex<Vec<SuspendedTaskToken<D>>>>,
-    _marker: PhantomData<D>,
+    inner: Mutex<Vec<SuspendedTaskToken<D>>>,
+    stop: AtomicBool,
 }
 
 impl<D: crate::resumable::common::desc::TaskDescCore> Default for PollerUltQueue<D> {
     fn default() -> Self {
-        PollerUltQueue { inner: Arc::new(Mutex::new(Vec::new())), _marker: PhantomData }
+        PollerUltQueue { inner: Mutex::new(Vec::new()), stop: AtomicBool::new(false) }
     }
 }
 
@@ -123,37 +137,28 @@ where
         None
     }
 
-    fn on_start(&self, scheduler: &Arc<Scheduler<S>>) {
-        let inner = Arc::clone(&self.inner);
-        // Weak avoids a reference cycle: Scheduler → deque → UltDesc → closure
-        // → Scheduler.  When run() drops the last strong Arc, the Weak becomes
-        // dead and the poller ULT exits on its next iteration.
-        let sched_weak: Weak<Scheduler<S>> = Arc::downgrade(scheduler);
-        let scheduler_ptr = Arc::as_ptr(scheduler);
+    const NEEDS_SERVICE: bool = true;
 
-        let body: ErasedBody = Box::new(move || {
-            loop {
-                let pending: Vec<SuspendedTaskToken<S::Desc>> =
-                    std::mem::take(&mut *inner.lock().unwrap());
-                if let Some(wk) = UltWorker::<S>::current() {
-                    for cont in pending {
-                        wk.defer(cont);
-                    }
+    fn run_service(&self) {
+        loop {
+            let pending: Vec<SuspendedTaskToken<S::Desc>> =
+                std::mem::take(&mut *self.inner.lock().unwrap());
+            if let Some(wk) = UltWorker::<S>::current() {
+                for cont in pending {
+                    wk.defer(cont);
                 }
-                match sched_weak.upgrade() {
-                    None => break,
-                    Some(sched) => {
-                        if sched.finished.load(Ordering::Acquire) {
-                            break;
-                        }
-                    }
-                }
-                S::yield_now();
             }
-            Box::new(()) as Box<dyn Any + Send>
-        });
+            // Check *after* draining (not before) so a `stop_service()` call
+            // that races with a last-moment `push()` still gets one more
+            // drain pass before this returns.
+            if self.stop.load(Ordering::Acquire) {
+                break;
+            }
+            S::yield_now();
+        }
+    }
 
-        let cont = fork_parent_first::<S>(body, scheduler_ptr);
-        scheduler.workers[0].push(cont);
+    fn stop_service(&self) {
+        self.stop.store(true, Ordering::Release);
     }
 }

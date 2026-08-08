@@ -54,9 +54,8 @@ pub trait HasCtx {
     fn set_ctx(&mut self, ptr: *mut u8);
 
     /// Ensure this `Owned` is configured for real-context-switch dispatch.
-    /// Called once by the allocating call site (`spawn`, `fork_parent_first`)
-    /// right after allocation, before `init_saved_context`/
-    /// `publish_saved_context` ever runs.
+    /// Called once by the allocating call site (`spawn`) right after
+    /// allocation, before `publish_saved_context` ever runs.
     ///
     /// No-op default: only meaningful for an `Owned` type that also
     /// implements [`HasPollFn`](crate::resumable::stackless::desc::HasPollFn)
@@ -106,12 +105,6 @@ impl<D: TaskDescCore<Owned: HasCtx>> SuspendedTaskToken<D> {
     /// (`cond_suspend_to_cont`).
     pub(crate) fn peek_saved_context(&self) -> *mut u8 {
         self.ctx()
-    }
-
-    /// Initialize the context of a freshly allocated task that has never
-    /// been suspended.
-    pub(crate) fn init_saved_context(&mut self, ptr: *mut u8) {
-        self.set_ctx(ptr);
     }
 }
 
