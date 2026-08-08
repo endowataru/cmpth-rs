@@ -9,10 +9,10 @@
 use std::any::Any;
 use std::marker::PhantomData;
 
-use crate::resumable::common::system::{DescScheduler, ReclaimableDesc, SchedulerSystem};
+use crate::resumable::common::system::{ReclaimableDesc, SchedulerSystem};
 use crate::resumable::common::desc::TaskDesc;
 use crate::resumable::common::pool::free_desc;
-use crate::resumable::common::worker::{UltWorker, WorkerOps};
+use crate::resumable::common::worker::WorkerOps;
 
 // Result stored directly on the child's stack, avoiding a Box for the success
 // case.  The Err variant still boxes because that is what catch_unwind produces.
@@ -26,13 +26,15 @@ pub(crate) fn align_down(addr: usize, align: usize) -> usize {
     addr & !(align - 1)
 }
 
-// `DescScheduler` lives on the struct itself (not just `Drop`, below)
-// because a `Drop` impl must restate exactly the bounds its type definition
-// carries -- see the `Drop` impl at the bottom of this file, which needs
-// `Worker::current()` and so needs this bound. Every real system satisfies
-// it (see `DescScheduler`'s doc comment), so this costs nothing beyond the
-// restatement.
-pub struct JoinHandle<S: DescScheduler + SchedulerSystem, T> {
+// Bounded on plain `SchedulerSystem` (not `DescScheduler`): the `Drop` impl
+// at the bottom of this file needs `S::Worker::current()`, which
+// `WorkerSystem::Worker: WorkerOps<Self>` already provides for any
+// `WorkerSystem`, and `<S::Desc as ReclaimableDesc<S>>::reclaim(wk, desc)`
+// already takes `&S::Worker` per that trait's own signature -- neither
+// needs `Worker`/`Item` pinned to this crate's concrete `UltWorker`/
+// `SuspendedTaskToken`. A `Drop` impl must restate exactly the bounds its
+// type definition carries, so the bound has to live here regardless.
+pub struct JoinHandle<S: SchedulerSystem, T> {
     pub(crate) desc: *mut S::Desc,
     pub(crate) result_ptr: *mut StackResult<T>,
     // Type-erased drop for the result slot; avoids a T: Send + 'static bound
@@ -45,11 +47,11 @@ pub(crate) unsafe fn drop_stack_result<T>(ptr: *mut ()) {
     unsafe { std::ptr::drop_in_place(ptr as *mut StackResult<T>) };
 }
 
-unsafe impl<S: DescScheduler + SchedulerSystem, T: Send> Send for JoinHandle<S, T> {}
+unsafe impl<S: SchedulerSystem, T: Send> Send for JoinHandle<S, T> {}
 // JoinHandle holds only raw pointers; it is safe to move at any time.
-impl<S: DescScheduler + SchedulerSystem, T> Unpin for JoinHandle<S, T> {}
+impl<S: SchedulerSystem, T> Unpin for JoinHandle<S, T> {}
 
-impl<S: DescScheduler + SchedulerSystem, T> JoinHandle<S, T> {
+impl<S: SchedulerSystem, T> JoinHandle<S, T> {
     /// Safe access to the descriptor's own `&self` methods. `self.desc` can
     /// be null (see [`Drop`] below — the "already consumed by
     /// `Future::poll`" state) so this must only be called where that's
@@ -62,8 +64,8 @@ impl<S: DescScheduler + SchedulerSystem, T> JoinHandle<S, T> {
     }
 }
 
-impl<S: DescScheduler + SchedulerSystem, T: Send + 'static> JoinHandle<S, T> {
-    pub(crate) fn take_result(self, wk: &UltWorker<S>) -> Result<T, Box<dyn Any + Send>> {
+impl<S: SchedulerSystem, T: Send + 'static> JoinHandle<S, T> {
+    pub(crate) fn take_result(self, wk: &S::Worker) -> Result<T, Box<dyn Any + Send>> {
         let desc = self.desc;
         let result_ptr = self.result_ptr;
         std::mem::forget(self);
@@ -90,7 +92,7 @@ impl<S: DescScheduler + SchedulerSystem, T: Send + 'static> JoinHandle<S, T> {
 
 impl<S, T> Drop for JoinHandle<S, T>
 where
-    S: DescScheduler + SchedulerSystem,
+    S: SchedulerSystem,
 {
     // The common case (already consumed by `Future::poll`, `desc` null) is a
     // single branch; without this hint the compiler was leaving the whole
@@ -111,7 +113,7 @@ where
         // finished -> this handle owns the result and the descriptor.
         if self.desc_ref().try_abandon() {
             unsafe { result_drop(result_ptr) };
-            match UltWorker::<S>::current() {
+            match S::Worker::current() {
                 Some(wk) => unsafe { <S::Desc as ReclaimableDesc<S>>::reclaim(wk, desc) },
                 None => unsafe { free_desc(desc) },
             }

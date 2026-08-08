@@ -76,7 +76,7 @@ impl<S: StackfulSchedulerSystem> DualResumable<S> where S::Desc: StackfulTaskDes
             let w: Box<Waker> = unsafe { raw.into_typed() };
             w.wake();
         } else {
-            let wk = UltWorker::<S>::current()
+            let wk = S::Worker::current()
                 .expect("cmpth: DualResumable wake called outside a worker");
             // SAFETY: `tag == 0` means this slot's `publish` was called
             // from `wait_with`/`wait_with_cond`/`swap` with a real

@@ -174,29 +174,33 @@ pub trait DescScheduler:
 impl<S: WorkerSystem<Item = SuspendedTaskToken<<S as PoolSystem>::Desc>, Worker = UltWorker<S>>> DescScheduler for S {}
 
 // ---------------------------------------------------------------------------
-// Blanket TaskSystem for every DescScheduler
+// Blanket TaskSystem for every WorkerSystem
 // ---------------------------------------------------------------------------
 
 /// Every `resumable`-backed system (stackful, stackless, or dual alike)
 /// assumes the same work-stealing scheduler underneath, so `TaskSystem` is
 /// blanket-derived here rather than implemented per flavor — one impl
 /// covers `ThreadSystem`'s (stackful) and `StacklessTaskSystem`'s
-/// (stackless) supertrait requirement alike, since
-/// [`UltWorker::current`](crate::resumable::common::worker::WorkerOps::current)/
-/// `num`/`num_workers` need no dispatch capability, just `DescScheduler`'s
-/// `Item`/`Worker` pinning. Only the true base case (`OsSystem`, which isn't
-/// even a `DescScheduler` — no managed worker pool) needs its own
-/// hand-written impl, in `os.rs`.
-impl<S: DescScheduler> TaskSystem for S {
+/// (stackless) supertrait requirement alike.
+///
+/// Bounded on plain `WorkerSystem`, not `DescScheduler`:
+/// [`WorkerOps::current`]/
+/// `num`/`num_workers` are `LocalQueue`/`WorkerOps` trait methods reachable
+/// through `S::Worker` alone — this needs no dispatch capability, and
+/// neither method ever names `S::Item`/`S::Desc`, so there is nothing here
+/// for `DescScheduler`'s `Item`/`Worker` pinning to actually buy. Only the
+/// true base case (`OsSystem`, which isn't even a `WorkerSystem` — no
+/// managed worker pool) needs its own hand-written impl, in `os.rs`.
+impl<S: WorkerSystem> TaskSystem for S {
     fn worker_num() -> usize {
-        match UltWorker::<S>::current() {
+        match S::Worker::current() {
             Some(wk) => wk.num(),
             None => 0,
         }
     }
 
     fn num_workers() -> usize {
-        match UltWorker::<S>::current() {
+        match S::Worker::current() {
             Some(wk) => wk.num_workers(),
             None => 1,
         }

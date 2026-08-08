@@ -11,7 +11,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use crate::resumable::common::system::{DescScheduler, SchedulerSystem};
+use crate::resumable::common::system::{DescScheduler, SchedulerSystem, WorkerSystem};
 use crate::resumable::stackless::system::StacklessSchedulerSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
 use crate::resumable::common::desc::{HasExternalQueue, SuspendedTaskToken, TaskDesc, TaskDescAlloc, TaskDescCore, TaskExitSink};
@@ -255,15 +255,15 @@ where
 /// `poll` is fixed and can never be changed to return `Poll::Pending`) so a
 /// future work-first rewrite still has a `poll` body of its own to modify.
 // Bound carried on the struct itself (not just the impls) because it holds
-// a `JoinHandle<S, T>` field, and `JoinHandle` itself now requires
-// `DescScheduler` -- see that struct's own comment.
-pub struct SpawnAction<S: DescScheduler + SchedulerSystem, T> {
+// a `JoinHandle<S, T>` field -- `JoinHandle` only needs plain
+// `SchedulerSystem` now (see that struct's own comment), so this does too.
+pub struct SpawnAction<S: SchedulerSystem, T> {
     handle: Option<JoinHandle<S, T>>,
 }
 
-impl<S: DescScheduler + SchedulerSystem, T> Unpin for SpawnAction<S, T> {}
+impl<S: SchedulerSystem, T> Unpin for SpawnAction<S, T> {}
 
-impl<S: DescScheduler + SchedulerSystem, T> Future for SpawnAction<S, T> {
+impl<S: SchedulerSystem, T> Future for SpawnAction<S, T> {
     type Output = JoinHandle<S, T>;
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<JoinHandle<S, T>> {
@@ -442,12 +442,13 @@ where
 /// ```
 pub fn recurse<S, F, Mk>(mk: Mk) -> RecursionFrame<S, F>
 where
-    S: DescScheduler + SchedulerSystem,
+    S: WorkerSystem,
+    S::Worker: RecursionAlloc,
     F: Future,
     Mk: FnOnce() -> F,
 {
     let layout = Layout::new::<F>();
-    let raw = match UltWorker::<S>::current() {
+    let raw = match S::Worker::current() {
         Some(wk) => wk.alloc_recursion_frame(layout),
         None => unsafe { std::alloc::alloc(layout) },
     };
@@ -461,22 +462,32 @@ where
 
 /// See [`recurse`]. Holds a pool-backed `F`, polled in place; never a
 /// schedulable task.
-// `DescScheduler` is carried directly on the struct (not just `Drop`,
-// below): `Drop` impls must restate exactly the bounds the type definition
-// has, so the bound has to live here regardless, and every real system
-// satisfies it anyway (see `DescScheduler`'s doc comment).
-pub struct RecursionFrame<S: DescScheduler + SchedulerSystem, F> {
+// Bounded on plain `WorkerSystem` + `S::Worker: RecursionAlloc` (not
+// `DescScheduler`/`SchedulerSystem`): nothing here ever names
+// `SuspendedTaskToken<S::Desc>` or dispatches an item -- `alloc_recursion_frame`/
+// `free_recursion_frame` are `RecursionAlloc` methods, `UltWorker<S>`
+// implements that trait unconditionally for any `S: WorkerSystem` (see
+// `common::worker`), so this needs neither the `Item` nor the `Worker`
+// pinning `DescScheduler` provides. `Drop` impls must restate exactly the
+// bounds the type definition has, so the bound has to live here regardless.
+pub struct RecursionFrame<S: WorkerSystem, F>
+where
+    S::Worker: RecursionAlloc,
+{
     ptr: std::ptr::NonNull<F>,
     _marker: PhantomData<S>,
 }
 
-unsafe impl<S: DescScheduler + SchedulerSystem, F: Send> Send for RecursionFrame<S, F> {}
+unsafe impl<S: WorkerSystem, F: Send> Send for RecursionFrame<S, F> where S::Worker: RecursionAlloc {}
 // The pointee is never moved (only ever touched through the stable
 // pointer, exactly like `Pin<Box<F>>`), so the wrapper itself is Unpin
 // regardless of whether `F` is.
-impl<S: DescScheduler + SchedulerSystem, F> Unpin for RecursionFrame<S, F> {}
+impl<S: WorkerSystem, F> Unpin for RecursionFrame<S, F> where S::Worker: RecursionAlloc {}
 
-impl<S: DescScheduler + SchedulerSystem, F: Future> Future for RecursionFrame<S, F> {
+impl<S: WorkerSystem, F: Future> Future for RecursionFrame<S, F>
+where
+    S::Worker: RecursionAlloc,
+{
     type Output = F::Output;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
@@ -485,11 +496,14 @@ impl<S: DescScheduler + SchedulerSystem, F: Future> Future for RecursionFrame<S,
     }
 }
 
-impl<S: DescScheduler + SchedulerSystem, F> Drop for RecursionFrame<S, F> {
+impl<S: WorkerSystem, F> Drop for RecursionFrame<S, F>
+where
+    S::Worker: RecursionAlloc,
+{
     fn drop(&mut self) {
         unsafe { std::ptr::drop_in_place(self.ptr.as_ptr()) };
         let layout = Layout::new::<F>();
-        match UltWorker::<S>::current() {
+        match S::Worker::current() {
             Some(wk) => unsafe {
                 wk.free_recursion_frame(self.ptr.as_ptr() as *mut u8, layout)
             },

@@ -258,7 +258,7 @@ pub struct ResumablePoller<S: StackfulSchedulerSystem> where <S as PoolSystem>::
 
 impl<S: StackfulSchedulerSystem> Poller for ResumablePoller<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     fn new() -> Self {
-        match UltWorker::<S>::current() {
+        match S::Worker::current() {
             Some(_wk) => {
                 let slot = Arc::new(ResumablePollerSlot::<S> {
                     state: AtomicUsize::new(waker::POLLING),

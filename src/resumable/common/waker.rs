@@ -17,7 +17,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::resumable::common::system::DescScheduler;
-use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
+use crate::resumable::common::worker::{LocalQueue, WorkerOps};
 use crate::resumable::common::desc::{HasExternalQueue, SuspendedTaskToken};
 use crate::resumable::common::external_queue::ExternalWakeQueue;
 
@@ -175,7 +175,7 @@ pub(crate) fn push_continuation<S: DescScheduler>(token: SuspendedTaskToken<S::D
 where
     <S::Desc as crate::resumable::common::desc::TaskDescCore>::Owned: HasExternalQueue<S::Desc>,
 {
-    match UltWorker::<S>::current() {
+    match S::Worker::current() {
         Some(wk) => wk.push(token),
         None => {
             // Copy the pointer out before `push` below consumes `token`

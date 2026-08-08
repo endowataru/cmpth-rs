@@ -8,7 +8,7 @@ use crate::traits::stackful::ThreadSystem;
 use crate::resumable::common::desc::{SuspendedTaskToken, TaskDescCore};
 use crate::resumable::common::system::PoolSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
+use crate::resumable::common::worker::{LocalQueue, WorkerOps};
 
 // ---------------------------------------------------------------------------
 // Trait
@@ -155,7 +155,7 @@ where
         loop {
             let pending: Vec<SuspendedTaskToken<S::Desc>> =
                 std::mem::take(&mut *self.inner.lock().unwrap());
-            if let Some(wk) = UltWorker::<S>::current() {
+            if let Some(wk) = S::Worker::current() {
                 for cont in pending {
                     wk.defer(cont);
                 }
