@@ -33,9 +33,9 @@ use crate::resumable::stackful::desc::{StackfulOnlyTaskDesc, StackfulTaskDesc};
 /// stackless-only system has no context-switch policy to name. Worker-layer
 /// (`S: StackfulWorkerSystem`), not gated on dispatch (`SchedulerSystem`):
 /// switching contexts never touches `RunnableItem`/`ReclaimableDesc`. The
-/// concrete impl below (for [`UltWorker<S>`]) needs `S: DescScheduler` too,
-/// for `cur_task_token_mut` — see that impl's own comment — but never
-/// `SchedulerSystem` itself.
+/// concrete impl below (for [`UltWorker<S>`]) needs no `Worker` pin at all —
+/// every method is `Self`-typed (`Self` is already the concrete `UltWorker<S>`
+/// because that's the impl's own target), so `S::Worker` is never named.
 pub trait ContextSwitcher<S: StackfulWorkerSystem>: Sized
 where
     S::Desc: StackfulTaskDesc,
@@ -179,17 +179,16 @@ where
 /// `AsyncTaskDesc`), so this always performs a real context switch — no
 /// runtime check.
 ///
-/// Bound: `StackfulWorkerSystem<Worker = UltWorker<S>> + WorkerSystem<Desc =
-/// StackfulOnlyTaskDesc<S>>` — strictly below `SchedulerSystem`, and no
-/// longer through `DescScheduler`: `wk.suspend_to_cont`/`wk.set_root_cont`
-/// need `ContextSwitcher<S>`/`StackfulLocalQueue<S>` to be implemented for
-/// `UltWorker<S>` specifically (both are concrete-`UltWorker`-only impls), so
-/// `Worker = UltWorker<S>` is a real requirement here — but `S::SuspendedToken`
-/// is never named in this impl's body, so pinning it too (as `DescScheduler`
-/// used to) was dead weight. Neither `SchedulerSystem` nor any of its folds
-/// is needed: `SchedulerSystem` itself becomes derivable for `S` only *after*
-/// this impl (plus the matching `ReclaimableDesc` impl below) exist, not
-/// before.
+/// Bound: `StackfulWorkerSystem + WorkerSystem<Desc = StackfulOnlyTaskDesc<S>>`
+/// plus `S::Worker: ContextSwitcher<S> + StackfulLocalQueue<S>` — strictly
+/// below `SchedulerSystem`, and no identity pin at all: `wk.suspend_to_cont`/
+/// `wk.set_root_cont` only need those two *capabilities* on `S::Worker`, not
+/// `S::Worker` to literally be `UltWorker<S>` — the only implementer today
+/// happens to be `UltWorker<S>`, but the bound doesn't have to say so, and
+/// `S::SuspendedToken` is never named in this impl's body either. Neither
+/// `SchedulerSystem` nor any of its folds is needed: `SchedulerSystem` itself
+/// becomes derivable for `S` only *after* this impl (plus the matching
+/// `ReclaimableDesc` impl below) exist, not before.
 ///
 /// `Desc` is pinned via `WorkerSystem<Desc = ...>` directly, not restated on
 /// `StackfulWorkerSystem` — `StackfulWorkerSystem` no longer carries any
@@ -197,12 +196,14 @@ where
 /// broke unrelated obligations on the same concrete descriptor, such as
 /// `DualTaskDesc`'s `HasPollFn`, once pinned), so there is nothing left to
 /// pin it *against*.
-impl<S: StackfulWorkerSystem<Worker = UltWorker<S>> + WorkerSystem<Desc = StackfulOnlyTaskDesc<S>>>
+impl<S: StackfulWorkerSystem + WorkerSystem<Desc = StackfulOnlyTaskDesc<S>>>
     RunnableItem<S> for SuspendedTaskToken<StackfulOnlyTaskDesc<S>>
+where
+    S::Worker: ContextSwitcher<S> + StackfulLocalQueue<S>,
 {
-    fn run_on(self, wk: &UltWorker<S>) {
+    fn run_on(self, wk: &S::Worker) {
         let wk2 = wk.suspend_to_cont(self, |wk, prev| wk.set_root_cont(prev));
-        debug_assert!(std::ptr::eq(wk2 as *const UltWorker<S>, wk as *const UltWorker<S>));
+        debug_assert!(std::ptr::eq(wk2 as *const S::Worker, wk as *const S::Worker));
     }
 }
 
@@ -244,7 +245,7 @@ where
 
 // --- ContextSwitcher ---
 
-impl<S: StackfulWorkerSystem<Worker = UltWorker<S>>> ContextSwitcher<S> for UltWorker<S>
+impl<S: StackfulWorkerSystem> ContextSwitcher<S> for UltWorker<S>
 where
     S::Desc: StackfulTaskDesc,
 {
