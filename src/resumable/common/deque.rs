@@ -57,7 +57,7 @@ pub enum Steal<T> {
 /// Generic over the element type `T` moved through the queue — neither
 /// provided implementation ever inspects `T`, only stores/returns it. Every
 /// concrete system today sets `T = SuspendedTaskToken<Self::Desc>` via
-/// [`crate::WorkerSystem::Item`].
+/// [`crate::WorkerSystem::SuspendedToken`].
 pub trait WorkerRunQueue<T: Send>: Send + Sync + 'static {
     type Stealer: RunQueueStealer<T>;
 

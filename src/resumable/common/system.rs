@@ -81,12 +81,12 @@ pub trait WorkerSystem: PoolSystem {
     /// bound directly) so [`WorkerRunQueue`] and [`ExternalQueue`] stay
     /// generic over "whatever this system moves through them," with no need
     /// to name `SuspendedTaskToken`/`Self::Desc` themselves.
-    type Item: Send;
+    type SuspendedToken: Send;
 
     /// Work-stealing run queue implementation. `+ Default` here (rather than
     /// as a [`WorkerRunQueue`] supertrait) so that trait's contract stays
     /// scoped to the queue behavior itself.
-    type RunQueue: WorkerRunQueue<Self::Item> + Default;
+    type RunQueue: WorkerRunQueue<Self::SuspendedToken> + Default;
 
     /// Current-worker lookup policy.
     type Lookup: CurrentLookup<Self>;
@@ -148,9 +148,9 @@ pub trait ReclaimableDesc<S: WorkerSystem> {
 /// allocator: a stackless-only system has no real stack to switch into, so
 /// requiring one here would force it to name machinery it never uses. See
 /// [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem) for the stackful extension.
-pub trait SchedulerSystem: WorkerSystem<Item: RunnableItem<Self>, Desc: ReclaimableDesc<Self>> {}
+pub trait SchedulerSystem: WorkerSystem<SuspendedToken: RunnableItem<Self>, Desc: ReclaimableDesc<Self>> {}
 
-impl<S: WorkerSystem<Item: RunnableItem<S>, Desc: ReclaimableDesc<S>>> SchedulerSystem for S {}
+impl<S: WorkerSystem<SuspendedToken: RunnableItem<S>, Desc: ReclaimableDesc<S>>> SchedulerSystem for S {}
 
 // ---------------------------------------------------------------------------
 // DescScheduler — the "engine's own token/worker" assumption, named once
@@ -167,11 +167,11 @@ impl<S: WorkerSystem<Item: RunnableItem<S>, Desc: ReclaimableDesc<S>>> Scheduler
 /// UltWorker<..>` on every generic function that touches both the abstract
 /// associated types and the concrete ones.
 pub trait DescScheduler:
-    WorkerSystem<Item = SuspendedTaskToken<<Self as PoolSystem>::Desc>, Worker = UltWorker<Self>>
+    WorkerSystem<SuspendedToken = SuspendedTaskToken<<Self as PoolSystem>::Desc>, Worker = UltWorker<Self>>
 {
 }
 
-impl<S: WorkerSystem<Item = SuspendedTaskToken<<S as PoolSystem>::Desc>, Worker = UltWorker<S>>> DescScheduler for S {}
+impl<S: WorkerSystem<SuspendedToken = SuspendedTaskToken<<S as PoolSystem>::Desc>, Worker = UltWorker<S>>> DescScheduler for S {}
 
 // ---------------------------------------------------------------------------
 // Blanket TaskSystem for every WorkerSystem
