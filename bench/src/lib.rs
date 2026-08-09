@@ -345,10 +345,9 @@ pub fn fib<S: BenchSystem>(n: u64) -> u64 {
 /// its immediate caller, right here).
 pub fn fib_async<S>(n: u64) -> impl std::future::Future<Output = u64> + Send
 where
-    S: cmpth::StacklessSchedulerSystem,
+    S: cmpth::StacklessTaskSystem,
 {
     async move {
-        use cmpth::StacklessTaskSystem as _;
         if n <= 1 {
             return n;
         }
@@ -362,14 +361,14 @@ where
 /// the result.
 pub fn run_fib_async<S>(num_workers: usize, n: u64) -> u64
 where
-    S: cmpth::StacklessSchedulerSystem,
+    S: cmpth::StacklessTaskSystem + cmpth::StacklessInitSystem,
 {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
 
     let result = Arc::new(AtomicU64::new(0));
     let result2 = Arc::clone(&result);
-    use cmpth::{StacklessBuilder, StacklessInitSystem};
+    use cmpth::StacklessBuilder;
     S::builder().workers(num_workers).run_async(async move {
         result2.store(fib_async::<S>(n).await, Ordering::Release);
     });
