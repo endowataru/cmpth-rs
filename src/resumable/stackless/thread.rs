@@ -11,7 +11,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
-use crate::resumable::common::system::{DescScheduler, SchedulerSystem, WorkerSystem};
+use crate::resumable::common::system::{SchedulerSystem, WorkerSystem};
 use crate::resumable::stackless::system::StacklessSchedulerSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
 use crate::resumable::common::desc::{HasExternalQueue, SuspendedTaskToken, TaskDesc, TaskDescAlloc, TaskDescCore, TaskExitSink};
@@ -292,7 +292,7 @@ struct PollSpawnedSink<S: SchedulerSystem, T> {
 
 impl<S, T: Send + 'static> TaskExitSink<S::Desc> for PollSpawnedSink<S, T>
 where
-    S: DescScheduler + SchedulerSystem,
+    S: SchedulerSystem + WorkerSystem<Worker = UltWorker<S>>,
     S::Desc: AsyncTaskDesc,
 {
     fn resume(&self, cont: <S::Desc as TaskDesc>::Suspended) {
@@ -304,7 +304,7 @@ where
             // (execute → run_async_poll → poll_fn).
             let wk = UltWorker::<S>::current()
                 .expect("cmpth: poll_spawned_task called outside a worker");
-            wk.push(cont);
+            wk.push(cont.into());
         }
     }
 
@@ -334,7 +334,7 @@ unsafe fn poll_spawned_task<S, T, F>(
     cx: &mut Context<'_>,
 ) -> TaskPollResult<S::Desc>
 where
-    S: DescScheduler + SchedulerSystem,
+    S: SchedulerSystem + WorkerSystem<Worker = UltWorker<S>>,
     T: Send + 'static,
     F: Future<Output = T> + Send + 'static,
     S::Desc: AsyncTaskDesc,

@@ -9,7 +9,7 @@
 
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::worker::{AsyncTaskPool, TaskPool, UltWorker};
-use crate::resumable::common::system::{DescScheduler, ReclaimableDesc, RunnableItem};
+use crate::resumable::common::system::{DescScheduler, ReclaimableDesc, RunnableItem, WorkerSystem};
 use crate::resumable::stackful::system::StackfulWorkerSystem;
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulLocalQueue};
 use crate::resumable::common::desc::SuspendedTaskToken;
@@ -60,23 +60,26 @@ impl<S: StackfulWorkerSystem + DescScheduler<Desc = DualTaskDesc<S>>>
 /// task popped off the top has no saved context to switch into, so requeue
 /// it and fall back to the root (scheduler-loop) continuation instead.
 ///
-/// Lowest rung: [`DescScheduler`] + `S::Desc: AsyncTaskDesc` — same `Item`
-/// pinning need as
+/// Lowest rung: plain `WorkerSystem` + `S::Desc: AsyncTaskDesc` — same
+/// conversion need as
 /// [`crate::resumable::stackful::worker::pop_or_root_stackful`] (`wk.deque`
-/// round-trips `S::Item`), plus `AsyncTaskDesc` for `is_poll_fn_dispatch`.
-/// No context switch happens here, so — unlike `execute_dual` — this needs
+/// round-trips `S::SuspendedToken`, converted via the `Into`/`From` bounds on
+/// [`crate::resumable::common::system::WorkerSystem::SuspendedToken`] rather
+/// than an equality pin), plus `AsyncTaskDesc` for `is_poll_fn_dispatch`. No
+/// context switch happens here, so — unlike `execute_dual` — this needs
 /// neither `StackfulWorkerSystem` nor `StackfulTaskDesc`.
 pub fn pop_or_root_dual<S>(wk: &UltWorker<S>) -> SuspendedTaskToken<S::Desc>
 where
-    S: DescScheduler,
+    S: WorkerSystem,
     S::Desc: AsyncTaskDesc,
 {
     if let Some(c) = wk.deque.try_pop() {
+        let c: SuspendedTaskToken<S::Desc> = c.into();
         if c.is_poll_fn_dispatch() {
             // Async tasks have no saved context; they can only be executed
             // by the scheduler loop via execute().  Push the async task back
             // so the scheduler loop handles it.
-            wk.deque.push(c);
+            wk.deque.push(c.into());
         } else {
             return c;
         }
