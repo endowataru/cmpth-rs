@@ -96,8 +96,8 @@ where
 /// [`PoolSystem::AsyncPool`](crate::resumable::common::system::PoolSystem::AsyncPool));
 /// everything else goes through the ULT-stack pool as usual.
 ///
-/// Bound: plain [`WorkerSystem`](crate::resumable::common::system::WorkerSystem),
-/// `Desc` pinned directly (not via [`DescScheduler`]) — `desc` is a raw
+/// Bound: plain [`WorkerSystem`], `Desc` pinned directly (not via
+/// `DescScheduler`) — `desc` is a raw
 /// `*mut Self` throughout (never `S::SuspendedToken`), `wk.free_task` is
 /// reachable through `S::Worker: WorkerOps<S>` alone, and `wk.free_async_task`
 /// needs the separate `S::Worker: AsyncTaskPool<S>` bound stated below (not a

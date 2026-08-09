@@ -19,7 +19,7 @@ use std::ptr;
 use crate::resumable::common::deque::{RunQueueStealer, Steal, WorkerRunQueue};
 use crate::resumable::common::pool::{DescPool, DynamicPool};
 use crate::resumable::common::scheduler::Scheduler;
-use crate::resumable::common::system::{DescScheduler, WorkerSystem};
+use crate::resumable::common::system::WorkerSystem;
 use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, TaskDescAlloc};
 
 // ---------------------------------------------------------------------------
@@ -508,7 +508,7 @@ impl<S: WorkerSystem<Worker = UltWorker<S>>> WorkerOps<S> for UltWorker<S> {
 
 pub fn current_worker<S>() -> Option<&'static UltWorker<S>>
 where
-    S: DescScheduler,
+    S: WorkerSystem<Worker = UltWorker<S>>,
 {
     UltWorker::<S>::current()
 }

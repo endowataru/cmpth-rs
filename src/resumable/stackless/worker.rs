@@ -163,8 +163,8 @@ impl<S: DescScheduler<Desc = StacklessOnlyTaskDesc<S>>>
 /// based on whether the descriptor's `Node` wrapper was marked oversized at
 /// allocation time).
 ///
-/// Bound: plain [`WorkerSystem`](crate::resumable::common::system::WorkerSystem),
-/// `Desc` pinned directly (not via [`DescScheduler`]) — `wk.free_async_task`
+/// Bound: plain [`WorkerSystem`], `Desc` pinned directly (not via
+/// `DescScheduler`) — `wk.free_async_task`
 /// needs `S::Worker: AsyncTaskPool<S>` (stated below; not a `WorkerOps`
 /// supertrait); `desc` is a raw `*mut Self`, never `S::SuspendedToken`, so
 /// this needs neither `Worker = UltWorker<S>` nor any fold of
