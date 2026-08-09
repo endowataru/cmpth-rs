@@ -223,11 +223,11 @@ impl<S: WorkerSystem<Desc = StackfulOnlyTaskDesc<S>>> ReclaimableDesc<S> for Sta
 // --- StackfulLocalQueue ---
 
 // `S: StackfulSchedulerSystem` was the old bound here; relaxed further to
-// plain `StackfulWorkerSystem` (no `DescScheduler` at all): `pop_or_root`
-// below calls `S::pop_or_root`, whose default body no longer needs
-// `DescScheduler` either (see that method's doc comment — it converts via
-// `Into` now), and `set_root_cont` only ever touches the concrete
-// `root_cont` field, never `S::SuspendedToken`.
+// plain `StackfulWorkerSystem`: `pop_or_root` below calls `S::pop_or_root`,
+// whose default body needs no `Worker`/`SuspendedToken` identity pin (see
+// that method's doc comment — it converts via `Into` now), and
+// `set_root_cont` only ever touches the concrete `root_cont` field, never
+// `S::SuspendedToken`.
 impl<S: StackfulWorkerSystem> StackfulLocalQueue<S> for UltWorker<S>
 where
     S::Desc: StackfulTaskDesc,
