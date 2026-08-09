@@ -12,7 +12,7 @@ use std::ptr;
 use crate::traits::stackful::{CondTransfer, Context, ContextPolicy, Transfer};
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, WorkerOps};
-use crate::resumable::common::system::{DescScheduler, ReclaimableDesc, RunnableItem, WorkerSystem};
+use crate::resumable::common::system::{ReclaimableDesc, RunnableItem, WorkerSystem};
 use crate::resumable::stackful::system::{StackfulSchedulerSystem, StackfulWorkerSystem};
 use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, TaskDescCore};
 use crate::interchange::Transferred;
@@ -179,24 +179,25 @@ where
 /// `AsyncTaskDesc`), so this always performs a real context switch — no
 /// runtime check.
 ///
-/// Bound: `StackfulWorkerSystem + DescScheduler<Desc = StackfulOnlyTaskDesc<S>>`
-/// — strictly below `SchedulerSystem`. `wk.suspend_to_cont`/`wk.set_root_cont`
+/// Bound: `StackfulWorkerSystem<Worker = UltWorker<S>> + WorkerSystem<Desc =
+/// StackfulOnlyTaskDesc<S>>` — strictly below `SchedulerSystem`, and no
+/// longer through `DescScheduler`: `wk.suspend_to_cont`/`wk.set_root_cont`
 /// need `ContextSwitcher<S>`/`StackfulLocalQueue<S>` to be implemented for
-/// `UltWorker<S>`, and *those* impls (below) need `DescScheduler` regardless
-/// — `cond_suspend_to_cont`'s shim calls `cur_task_token_mut`, which is only
-/// defined for `S: DescScheduler` (`common::worker`) — plus
-/// `StackfulWorkerSystem` for `S::Ctx`. Neither `SchedulerSystem` nor any of
-/// its folds is needed: `SchedulerSystem` itself becomes derivable for `S`
-/// only *after* this impl (plus the matching `ReclaimableDesc` impl below)
-/// exist, not before.
+/// `UltWorker<S>` specifically (both are concrete-`UltWorker`-only impls), so
+/// `Worker = UltWorker<S>` is a real requirement here — but `S::SuspendedToken`
+/// is never named in this impl's body, so pinning it too (as `DescScheduler`
+/// used to) was dead weight. Neither `SchedulerSystem` nor any of its folds
+/// is needed: `SchedulerSystem` itself becomes derivable for `S` only *after*
+/// this impl (plus the matching `ReclaimableDesc` impl below) exist, not
+/// before.
 ///
-/// `Desc` is pinned only via `DescScheduler<Desc = ...>`, not restated on
+/// `Desc` is pinned via `WorkerSystem<Desc = ...>` directly, not restated on
 /// `StackfulWorkerSystem` — `StackfulWorkerSystem` no longer carries any
 /// bound on `Desc` at all (see that trait's doc comment: nesting one there
 /// broke unrelated obligations on the same concrete descriptor, such as
 /// `DualTaskDesc`'s `HasPollFn`, once pinned), so there is nothing left to
 /// pin it *against*.
-impl<S: StackfulWorkerSystem + DescScheduler<Desc = StackfulOnlyTaskDesc<S>>>
+impl<S: StackfulWorkerSystem<Worker = UltWorker<S>> + WorkerSystem<Desc = StackfulOnlyTaskDesc<S>>>
     RunnableItem<S> for SuspendedTaskToken<StackfulOnlyTaskDesc<S>>
 {
     fn run_on(self, wk: &UltWorker<S>) {
@@ -221,14 +222,13 @@ impl<S: WorkerSystem<Desc = StackfulOnlyTaskDesc<S>>> ReclaimableDesc<S> for Sta
 
 // --- StackfulLocalQueue ---
 
-// `S: StackfulSchedulerSystem` was the old bound here; relaxed to
-// `StackfulWorkerSystem + DescScheduler` (strictly below `SchedulerSystem`):
-// `pop_or_root` below calls `S::pop_or_root`, whose default body (see
-// `StackfulWorkerSystem::pop_or_root`'s doc comment) needs only `Self:
-// DescScheduler`, not `SchedulerSystem` — so this impl doesn't need it
-// either. Same relaxation applies to `ContextSwitcher`'s impl just below,
-// for the same reason (see the `RunnableItem` impl above's doc comment).
-impl<S: StackfulWorkerSystem + DescScheduler> StackfulLocalQueue<S> for UltWorker<S>
+// `S: StackfulSchedulerSystem` was the old bound here; relaxed further to
+// plain `StackfulWorkerSystem` (no `DescScheduler` at all): `pop_or_root`
+// below calls `S::pop_or_root`, whose default body no longer needs
+// `DescScheduler` either (see that method's doc comment — it converts via
+// `Into` now), and `set_root_cont` only ever touches the concrete
+// `root_cont` field, never `S::SuspendedToken`.
+impl<S: StackfulWorkerSystem> StackfulLocalQueue<S> for UltWorker<S>
 where
     S::Desc: StackfulTaskDesc,
 {

@@ -20,14 +20,18 @@ use crate::resumable::stackless::desc::AsyncTaskDesc;
 /// `poll_fn` first, and either poll inline or perform a real context switch.
 ///
 /// Bound: `StackfulWorkerSystem + DescScheduler<Desc = DualTaskDesc<S>>` —
-/// strictly below `SchedulerSystem`, same reasoning as
-/// [`stackful::worker`](crate::resumable::stackful::worker)'s
-/// `RunnableItem` impl for the sync-ULT branch (`ContextSwitcher`/
-/// `StackfulLocalQueue` need exactly this). The poll_fn branch's
-/// `crate::resumable::stackless::worker::run_async_poll` needs
-/// `StacklessSchedulerSystem`, which becomes derivable for `S` from this
-/// same bound once this impl (plus the matching `ReclaimableDesc` impl
-/// below) exist — `StacklessSchedulerSystem` doesn't need to be named here.
+/// strictly below `SchedulerSystem`. Unlike the stackful-only `RunnableItem`
+/// impl (which only needs `Worker` pinned), this one keeps the full
+/// `DescScheduler` pin: the poll_fn branch calls
+/// `crate::resumable::stackless::worker::run_async_poll`, which itself
+/// requires `S: StacklessSchedulerSystem` — and `StacklessSchedulerSystem`
+/// extends `SchedulerSystem`, whose own blanket derive rule is stated as
+/// `Self::SuspendedToken: RunnableItem<Self>` (the *opaque* associated
+/// type). That's only provable if `S::SuspendedToken` is known equal to the
+/// concrete `SuspendedTaskToken<DualTaskDesc<S>>` this very impl is written
+/// for — an impl for the concrete type doesn't automatically count as an
+/// impl for an unrelated opaque type with no known relationship to it. So
+/// `SuspendedToken` genuinely has to be pinned here too, not just `Worker`.
 ///
 /// `Desc` is pinned only via `DescScheduler<Desc = ...>`, not restated on
 /// `StackfulWorkerSystem`, for the reason spelled out on `stackful::worker`'s

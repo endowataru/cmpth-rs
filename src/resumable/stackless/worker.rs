@@ -136,9 +136,16 @@ pub(crate) fn run_async_poll<S>(
 /// `poll_fn` tag check, because there is nothing else it could be.
 ///
 /// Bound: plain [`DescScheduler`] — strictly below `SchedulerSystem`.
-/// `run_async_poll` needs `S: StacklessSchedulerSystem`, which becomes
-/// derivable for `S` from this same bound once this impl (plus the matching
-/// `ReclaimableDesc` impl below) exist, so it doesn't need to be named here.
+/// `run_async_poll` needs `S: StacklessSchedulerSystem`, which extends
+/// `SchedulerSystem`, whose own blanket derive rule is stated as
+/// `Self::SuspendedToken: RunnableItem<Self>` (the *opaque* associated
+/// type) — only provable if `S::SuspendedToken` is known equal to the
+/// concrete `SuspendedTaskToken<StacklessOnlyTaskDesc<S>>` this impl is
+/// written for (see the `DualTaskDesc` `RunnableItem` impl's doc comment,
+/// same reasoning), so `DescScheduler`'s full pin is genuinely needed here,
+/// not just `Worker`. It becomes derivable for `S` from this same bound
+/// once this impl (plus the matching `ReclaimableDesc` impl below) exist,
+/// so it doesn't need to be named here.
 impl<S: DescScheduler<Desc = StacklessOnlyTaskDesc<S>>>
     RunnableItem<S> for SuspendedTaskToken<StacklessOnlyTaskDesc<S>>
 {

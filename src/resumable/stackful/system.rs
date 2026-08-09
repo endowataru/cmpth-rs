@@ -96,17 +96,13 @@ pub trait StackfulWorkerSystem: WorkerSystem
     /// Resolve what a suspending/exiting ULT switches into when its local
     /// deque is empty: the worker's own root (scheduler-loop) continuation.
     ///
-    /// `where Self: DescScheduler`: not part of this trait's own supertrait
-    /// bound (`Self` is only known to be `WorkerSystem` inside
-    /// `StackfulWorkerSystem` itself — the whole reason dispatch was split
-    /// off into [`SchedulerSystem`] in the first place), but `UltWorker<Self>`
-    /// requires `SchedulerSystem` structurally (`UltWorker<S: SchedulerSystem>`)
-    /// and [`pop_or_root_stackful`](crate::resumable::stackful::worker::pop_or_root_stackful)'s
-    /// `SuspendedTaskToken<Self::Desc>` return type requires the `Item`
-    /// pinning `DescScheduler` provides (`wk.deque.try_pop()` hands back
-    /// `Self::Item`), so both live on the one method that actually needs
-    /// them. Every real implementor satisfies it (see
-    /// [`StackfulSchedulerSystem`]'s doc comment).
+    /// No extra bound needed beyond this trait's own supertrait
+    /// (`StackfulWorkerSystem: WorkerSystem`):
+    /// [`pop_or_root_stackful`](crate::resumable::stackful::worker::pop_or_root_stackful)
+    /// converts `wk.deque.try_pop()`'s `Self::SuspendedToken` to this
+    /// method's `SuspendedTaskToken<Self::Desc>` return type via the
+    /// `Into` bound on [`crate::resumable::common::system::WorkerSystem::SuspendedToken`]
+    /// rather than needing `DescScheduler`'s equality pin.
     ///
     /// Default: [`crate::resumable::stackful::worker::pop_or_root_stackful`] — correct
     /// whenever `Self::Desc` isn't also `AsyncTaskDesc` (stackful-only),
@@ -114,10 +110,7 @@ pub trait StackfulWorkerSystem: WorkerSystem
     /// continuation. Dual configs override with
     /// [`crate::resumable::dual::worker::pop_or_root_dual`], which requeues an async
     /// task popped off the top instead of trying to switch into it.
-    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedTaskToken<Self::Desc>
-    where
-        Self: DescScheduler,
-    {
+    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedTaskToken<Self::Desc> {
         crate::resumable::stackful::worker::pop_or_root_stackful(wk)
     }
 }
