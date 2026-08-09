@@ -23,7 +23,7 @@ use crate::resumable::common::worker::{AsyncTaskPool, LocalQueue, RecursionAlloc
 // .await-ing a JoinHandle
 // ---------------------------------------------------------------------------
 
-impl<S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>, T: Send + 'static> Future for JoinHandle<S, T> {
+impl<S: StacklessSchedulerSystem, T: Send + 'static> Future for JoinHandle<S, T> {
     type Output = T;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
@@ -41,7 +41,7 @@ impl<S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>, T: Send 
         // `Box<Waker>` allocation. A hand-rolled `Future` that manually
         // swaps in a foreign `Context` inside that span would violate this —
         // not something any code in this crate does.
-        let current_wk = UltWorker::<S>::current();
+        let current_wk = S::Worker::current();
 
         // Reclaim fast path: if `desc` is still sitting untouched on our
         // own local deque (nobody has started or stolen it), pop it back
@@ -59,7 +59,7 @@ impl<S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>, T: Send 
 
         let registered = match current_wk {
             Some(wk) => {
-                let joiner = wk.polling_async.get();
+                let joiner = wk.polling_async();
                 if !joiner.is_null() {
                     // SAFETY: `joiner` is the descriptor this worker is
                     // currently, synchronously, driving via
@@ -102,7 +102,7 @@ impl<S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>, T: Send 
 /// `run_async_poll` instead of leaving it for some worker to pick up
 /// later. Anything else popped (a different task, or `desc` itself but
 /// stackful) goes right back — not something this fast path can help with.
-fn try_reclaim_and_run<S>(wk: &UltWorker<S>, desc: *mut S::Desc)
+fn try_reclaim_and_run<S>(wk: &S::Worker, desc: *mut S::Desc)
 where
     S: StacklessSchedulerSystem,
 {
@@ -113,7 +113,7 @@ where
                 if popped.is_poll_fn_dispatch() {
                     let poll_fn = popped.poll_fn()
                         .expect("cmpth: descriptor committed to poll_fn dispatch but poll_fn unset");
-                    crate::resumable::stackless::worker::run_async_poll(wk, desc, poll_fn);
+                    crate::resumable::stackless::worker::run_async_poll::<S>(wk, desc, poll_fn);
                 } else {
                     wk.push(popped.into());
                 }
@@ -467,13 +467,13 @@ where
 /// See [`recurse`]. Holds a pool-backed `F`, polled in place; never a
 /// schedulable task.
 // Bounded on plain `WorkerSystem` + `S::Worker: RecursionAlloc` (not
-// `DescScheduler`/`SchedulerSystem`): nothing here ever names
-// `SuspendedTaskToken<S::Desc>` or dispatches an item -- `alloc_recursion_frame`/
-// `free_recursion_frame` are `RecursionAlloc` methods, `UltWorker<S>`
-// implements that trait unconditionally for any `S: WorkerSystem` (see
-// `common::worker`), so this needs neither the `Item` nor the `Worker`
-// pinning `DescScheduler` provides. `Drop` impls must restate exactly the
-// bounds the type definition has, so the bound has to live here regardless.
+// `SchedulerSystem`): nothing here ever names `SuspendedTaskToken<S::Desc>`
+// or dispatches an item -- `alloc_recursion_frame`/`free_recursion_frame`
+// are `RecursionAlloc` methods, `UltWorker<S>` implements that trait
+// unconditionally for any `S: WorkerSystem` (see `common::worker`), so this
+// needs neither `SuspendedToken` nor `Worker` pinned to anything concrete.
+// `Drop` impls must restate exactly the bounds the type definition has, so
+// the bound has to live here regardless.
 pub struct RecursionFrame<S: WorkerSystem, F>
 where
     S::Worker: RecursionAlloc,

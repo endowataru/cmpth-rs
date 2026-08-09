@@ -13,7 +13,7 @@ use crate::resumable::common::external_queue::ExternalQueue;
 use crate::resumable::common::desc::{SuspendedTaskToken, TaskDescAlloc};
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::pool::{DescPool, DynamicPool};
-use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
+use crate::resumable::common::worker::{LocalQueue, WorkerOps};
 
 /// Storage-related subset of [`SchedulerSystem`]: the descriptor type and
 /// the pools/external-queue that store and move it around. Split out as its
@@ -104,7 +104,7 @@ pub trait WorkerSystem: PoolSystem {
     type Lookup: CurrentLookup<Self>;
 
     /// The concrete worker type driving this scheduler. Every system today
-    /// sets this to [`UltWorker<Self>`] — kept as its own associated type
+    /// sets this to [`UltWorker<Self>`](crate::resumable::common::worker::UltWorker) — kept as its own associated type
     /// (rather than [`worker_tls`](Self::worker_tls)/[`CurrentLookup`]
     /// naming `UltWorker<Self>` directly) so those interfaces stay generic
     /// over "whatever struct implements [`WorkerOps`] for this system,"
@@ -163,45 +163,6 @@ pub trait ReclaimableDesc<S: WorkerSystem> {
 pub trait SchedulerSystem: WorkerSystem<SuspendedToken: RunnableItem<Self>, Desc: ReclaimableDesc<Self>> {}
 
 impl<S: WorkerSystem<SuspendedToken: RunnableItem<S>, Desc: ReclaimableDesc<S>>> SchedulerSystem for S {}
-
-// ---------------------------------------------------------------------------
-// DescScheduler — the equality this crate's dispatch bootstrap needs, not a
-// general-purpose "give me a concrete engine" marker
-// ---------------------------------------------------------------------------
-
-/// A [`SchedulerSystem`] whose scheduling unit is this crate's own task
-/// descriptor token and whose worker is this crate's own [`UltWorker`].
-///
-/// Used far less than the name suggests. Nearly every place that touches
-/// both a worker and a token gets by with *capability* bounds instead
-/// (`S::Worker: SomeCapability<S>`, `S::SuspendedToken: Into<SuspendedTaskToken<S::Desc>>`
-/// — the latter always free, see [`WorkerSystem::SuspendedToken`]'s own
-/// bound) — never needing to know `S::Worker`/`S::SuspendedToken` are
-/// *literally* `UltWorker<S>`/`SuspendedTaskToken<S::Desc>`, only that they
-/// implement the right traits. The one `Worker = UltWorker<Self>` identity
-/// this crate genuinely needs lives locally, at the handful of "construct
-/// the concrete `Scheduler<S>`" sites (`stackful::init::init`,
-/// `stackless::scheduler::run_async`, and their immediate callers) — not
-/// centrally here.
-///
-/// What's left, genuinely needing both pins at once: the dispatch-flavor
-/// `RunnableItem` impls whose body calls into stackless polling
-/// (`resumable::dual::worker`/`resumable::stackless::worker`'s impls for
-/// `DualTaskDesc`/`StacklessOnlyTaskDesc`). Those need `SuspendedToken`
-/// pinned because [`SchedulerSystem`]'s own blanket-derive rule is stated
-/// as `Self::SuspendedToken: RunnableItem<Self>` — the *opaque* associated
-/// type — which is only provable if `S::SuspendedToken` is known equal to
-/// the concrete token type the impl is written for (an impl for a concrete
-/// type doesn't automatically count as one for an unrelated opaque type);
-/// and `Worker` because `run_async_poll` takes `&UltWorker<S>` concretely
-/// (it reads `pub(crate)` fields — `polling_async`/`yield_requested` —
-/// never promoted to a trait, unlike `cur_task`/`external_queue`).
-pub trait DescScheduler:
-    WorkerSystem<SuspendedToken = SuspendedTaskToken<<Self as PoolSystem>::Desc>, Worker = UltWorker<Self>>
-{
-}
-
-impl<S: WorkerSystem<SuspendedToken = SuspendedTaskToken<<S as PoolSystem>::Desc>, Worker = UltWorker<S>>> DescScheduler for S {}
 
 // ---------------------------------------------------------------------------
 // Blanket TaskSystem for every WorkerSystem

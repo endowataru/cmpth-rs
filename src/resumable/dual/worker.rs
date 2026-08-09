@@ -9,7 +9,7 @@
 
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::worker::{AsyncTaskPool, TaskPool, UltWorker};
-use crate::resumable::common::system::{DescScheduler, ReclaimableDesc, RunnableItem, WorkerSystem};
+use crate::resumable::common::system::{ReclaimableDesc, RunnableItem, WorkerSystem};
 use crate::resumable::stackful::system::StackfulWorkerSystem;
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulLocalQueue};
 use crate::resumable::common::desc::SuspendedTaskToken;
@@ -19,21 +19,28 @@ use crate::resumable::stackless::desc::AsyncTaskDesc;
 /// `cont` may be either a real ULT or a `spawn_async` task — check
 /// `poll_fn` first, and either poll inline or perform a real context switch.
 ///
-/// Bound: `StackfulWorkerSystem + DescScheduler<Desc = DualTaskDesc<S>>` —
-/// strictly below `SchedulerSystem`. Unlike the stackful-only `RunnableItem`
-/// impl (which only needs `Worker` pinned), this one keeps the full
-/// `DescScheduler` pin: the poll_fn branch calls
-/// `crate::resumable::stackless::worker::run_async_poll`, which itself
-/// requires `S: StacklessSchedulerSystem` — and `StacklessSchedulerSystem`
-/// extends `SchedulerSystem`, whose own blanket derive rule is stated as
-/// `Self::SuspendedToken: RunnableItem<Self>` (the *opaque* associated
-/// type). That's only provable if `S::SuspendedToken` is known equal to the
-/// concrete `SuspendedTaskToken<DualTaskDesc<S>>` this very impl is written
-/// for — an impl for the concrete type doesn't automatically count as an
-/// impl for an unrelated opaque type with no known relationship to it. So
-/// `SuspendedToken` genuinely has to be pinned here too, not just `Worker`.
+/// Bound: `StackfulWorkerSystem + WorkerSystem<SuspendedToken =
+/// SuspendedTaskToken<Self::Desc>, Desc = DualTaskDesc<S>>`, plus
+/// `S::Worker: ContextSwitcher<S> + StackfulLocalQueue<S> + AsyncTaskPool<S>`
+/// — strictly below `SchedulerSystem`, and no `DescScheduler` (no `Worker`
+/// identity pin at all): the sync-ULT branch only needs `ContextSwitcher`/
+/// `StackfulLocalQueue` as *capabilities* on `S::Worker` (same reasoning as
+/// the stackful-only `RunnableItem` impl), and the poll_fn branch's
+/// `crate::resumable::stackless::worker::run_async_poll` now takes `&S::Worker`
+/// too (its old `polling_async`/`yield_requested` field reads were promoted
+/// to `WorkerOps` methods). `AsyncTaskPool` is needed transitively: `run_async_poll`
+/// requires `S: StacklessSchedulerSystem` -> `SchedulerSystem` ->
+/// `Desc: ReclaimableDesc<Self>`, and the matching `ReclaimableDesc` impl
+/// below needs exactly this.
 ///
-/// `Desc` is pinned only via `DescScheduler<Desc = ...>`, not restated on
+/// `SuspendedToken` still has to be pinned, though (same reasoning as the
+/// stackless-only `RunnableItem` impl's doc comment): `SchedulerSystem`'s
+/// own blanket derive rule is stated as `Self::SuspendedToken:
+/// RunnableItem<Self>` (the *opaque* associated type), only provable if
+/// `S::SuspendedToken` is known equal to the concrete
+/// `SuspendedTaskToken<DualTaskDesc<S>>` this impl is written for.
+///
+/// `Desc` is pinned directly on `WorkerSystem`, not restated on
 /// `StackfulWorkerSystem`, for the reason spelled out on `stackful::worker`'s
 /// `RunnableItem` impl (and on `StackfulWorkerSystem`'s own doc comment —
 /// this dual impl is in fact the concrete case that first exposed the
@@ -42,20 +49,23 @@ use crate::resumable::stackless::desc::AsyncTaskDesc;
 /// `run_async_poll`, stopped normalizing entirely as long as
 /// `StackfulWorkerSystem` carried *any* nested bound on `Desc`, even one
 /// with nothing to do with `HasPollFn`).
-impl<S: StackfulWorkerSystem + DescScheduler<Desc = DualTaskDesc<S>>>
-    RunnableItem<S> for SuspendedTaskToken<DualTaskDesc<S>>
+impl<S> RunnableItem<S> for SuspendedTaskToken<DualTaskDesc<S>>
+where
+    S: StackfulWorkerSystem
+        + WorkerSystem<SuspendedToken = SuspendedTaskToken<<S as crate::resumable::common::system::PoolSystem>::Desc>, Desc = DualTaskDesc<S>>,
+    S::Worker: ContextSwitcher<S> + StackfulLocalQueue<S> + AsyncTaskPool<S>,
 {
-    fn run_on(self, wk: &UltWorker<S>) {
+    fn run_on(self, wk: &S::Worker) {
         let desc = self.desc();
         if self.is_poll_fn_dispatch() {
             let poll_fn = self.poll_fn()
                 .expect("cmpth: descriptor committed to poll_fn dispatch but poll_fn unset");
             let _ = self.into_raw(); // consumed; no context switch
-            crate::resumable::stackless::worker::run_async_poll(wk, desc, poll_fn);
+            crate::resumable::stackless::worker::run_async_poll::<S>(wk, desc, poll_fn);
         } else {
             // Sync ULT: context switch as usual.
             let wk2 = wk.suspend_to_cont(self, |wk, prev| wk.set_root_cont(prev));
-            debug_assert!(std::ptr::eq(wk2 as *const UltWorker<S>, wk as *const UltWorker<S>));
+            debug_assert!(std::ptr::eq(wk2 as *const S::Worker, wk as *const S::Worker));
         }
     }
 }

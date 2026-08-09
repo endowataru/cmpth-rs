@@ -171,6 +171,33 @@ pub trait WorkerOps<S: WorkerSystem>: TaskPool<S> + LocalQueue<S> + Send + Sync 
     /// `#[doc(hidden)]` for the same reason as [`cur_task`](Self::cur_task).
     #[doc(hidden)]
     fn external_queue(&self) -> &S::ExternalQueue;
+
+    /// The descriptor `run_async_poll` is currently synchronously driving on
+    /// this worker, or null. Crate-internal, see [`UltWorker`]'s
+    /// `polling_async` field for the full invariant; `#[doc(hidden)]` for
+    /// the same reason as [`cur_task`](Self::cur_task). Declared uniformly
+    /// here (like [`PoolSystem::AsyncPool`](crate::resumable::common::system::PoolSystem::AsyncPool))
+    /// even though only stackless dispatch (`run_async_poll`,
+    /// `JoinHandle::poll`'s fast path, `yield_now`) ever reads it — a
+    /// stackful-only worker simply never sets it.
+    #[doc(hidden)]
+    fn polling_async(&self) -> *mut S::Desc;
+
+    /// Set the [`polling_async`](Self::polling_async) marker.
+    /// `#[doc(hidden)]` for the same reason.
+    #[doc(hidden)]
+    fn set_polling_async(&self, desc: *mut S::Desc);
+
+    /// Take (read and reset to `false`) the yield-requested marker. See
+    /// [`UltWorker`]'s `yield_requested` field for the full invariant.
+    /// `#[doc(hidden)]` for the same reason.
+    #[doc(hidden)]
+    fn take_yield_requested(&self) -> bool;
+
+    /// Set the yield-requested marker. `#[doc(hidden)]` for the same
+    /// reason.
+    #[doc(hidden)]
+    fn set_yield_requested(&self, v: bool);
 }
 
 // ---------------------------------------------------------------------------
@@ -421,8 +448,8 @@ impl<S: WorkerSystem> RecursionAlloc for UltWorker<S> {
 
 // --- LocalQueue ---
 
-// Bounded by bare `WorkerSystem`, not `DescScheduler`/`SchedulerSystem`: now
-// that `LocalQueue` speaks `S::Item` rather than `SuspendedTaskToken<S::Desc>`,
+// Bounded by bare `WorkerSystem`, not `SchedulerSystem`: `LocalQueue` speaks
+// `S::SuspendedToken` rather than `SuspendedTaskToken<S::Desc>`,
 // nothing here needs the two to be equal, nor dispatch capability. `self.deque`
 // is already `S::RunQueue: WorkerRunQueue<S::Item>` and `shared.stealers`
 // already yields `Steal<S::Item>`, so every body below type-checks against the
@@ -499,6 +526,22 @@ impl<S: WorkerSystem<Worker = UltWorker<S>>> WorkerOps<S> for UltWorker<S> {
 
     fn external_queue(&self) -> &S::ExternalQueue {
         UltWorker::external_queue(self)
+    }
+
+    fn polling_async(&self) -> *mut S::Desc {
+        self.polling_async.get()
+    }
+
+    fn set_polling_async(&self, desc: *mut S::Desc) {
+        self.polling_async.set(desc);
+    }
+
+    fn take_yield_requested(&self) -> bool {
+        self.yield_requested.take()
+    }
+
+    fn set_yield_requested(&self, v: bool) {
+        self.yield_requested.set(v);
     }
 }
 

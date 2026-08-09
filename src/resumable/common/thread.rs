@@ -26,7 +26,7 @@ pub(crate) fn align_down(addr: usize, align: usize) -> usize {
     addr & !(align - 1)
 }
 
-// Bounded on plain `SchedulerSystem` (not `DescScheduler`): the `Drop` impl
+// Bounded on plain `SchedulerSystem`: the `Drop` impl
 // at the bottom of this file needs `S::Worker::current()`, which
 // `WorkerSystem::Worker: WorkerOps<Self>` already provides for any
 // `WorkerSystem`, and `<S::Desc as ReclaimableDesc<S>>::reclaim(wk, desc)`

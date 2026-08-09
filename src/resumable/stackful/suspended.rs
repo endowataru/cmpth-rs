@@ -75,20 +75,15 @@ impl<T: StackfulOnlyResumableCore> Resumable<T::StackfulWorkerSystem> for T {
     }
 }
 
-// `wk()` now returns `S::Worker` (opaque), not the concrete `UltWorker<S>`,
-// so unlike before, `StackfulSchedulerSystem` alone no longer carries the
-// worker-capability facts these methods need — `push`/`suspend_to_cont`'s
-// `SuspendedTaskToken<S::Desc>` traffic now crosses to/from `S::SuspendedToken`
-// via the `Into`/`From` bounds on `WorkerSystem::SuspendedToken` (no
-// `DescScheduler` pin needed for that anymore), but the `Worker:
-// StackfulWorker<Self>` bound (which also brings in `ContextSwitcher` and
-// `StackfulLocalQueue` as its own supertraits) has to be stated separately
-// here until it can be nested into `StackfulSchedulerSystem` itself (see
-// that trait's doc comment).
+// `wk()` returns `S::Worker` (opaque), not the concrete `UltWorker<S>` —
+// `push`/`suspend_to_cont`'s `SuspendedTaskToken<S::Desc>` traffic crosses
+// to/from `S::SuspendedToken` via the `Into`/`From` bounds on
+// `WorkerSystem::SuspendedToken`. `Worker: StackfulWorker<Self>` is already
+// nested into `StackfulSchedulerSystem` itself (see that trait's doc
+// comment), so it doesn't need restating here.
 impl<T: StackfulOnlyResumableCore> StackfulResumable<T::StackfulWorkerSystem> for T
 where
     T::StackfulWorkerSystem: StackfulSchedulerSystem,
-    <T::StackfulWorkerSystem as WorkerSystem>::Worker: StackfulWorker<T::StackfulWorkerSystem>,
 {
     fn wait_with<F: FnOnce()>(&self, f: F) {
         type D<T> = <<T as StackfulOnlyResumableCore>::StackfulWorkerSystem as PoolSystem>::Desc;
