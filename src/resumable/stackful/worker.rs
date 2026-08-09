@@ -12,7 +12,7 @@ use std::ptr;
 use crate::traits::stackful::{CondTransfer, Context, ContextPolicy, Transfer};
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, WorkerOps};
-use crate::resumable::common::system::{DescScheduler, ReclaimableDesc, RunnableItem};
+use crate::resumable::common::system::{DescScheduler, ReclaimableDesc, RunnableItem, WorkerSystem};
 use crate::resumable::stackful::system::{StackfulSchedulerSystem, StackfulWorkerSystem};
 use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, TaskDescCore};
 use crate::interchange::Transferred;
@@ -153,18 +153,19 @@ where
 /// `pop_or_root` body for stackful-only systems: every popped item is a
 /// real, switchable continuation, so no requeue check is needed.
 ///
-/// Lowest rung: [`DescScheduler`] — `wk.deque.try_pop()` returns `S::Item`,
-/// which this function's `SuspendedTaskToken<S::Desc>` return type needs
-/// pinned equal to via `DescScheduler`; `wk.take_root_cont()` is a plain
-/// `WorkerSystem`-level accessor, already implied. Does *not* need
-/// `StackfulWorkerSystem` (no context switch happens here, so `S::Ctx` is
-/// never named) or `S::Desc: StackfulTaskDesc`.
+/// Lowest rung: plain [`WorkerSystem`] — `wk.deque.try_pop()` returns
+/// `S::SuspendedToken`, converted to this function's
+/// `SuspendedTaskToken<S::Desc>` return type via the `Into` bound on
+/// [`WorkerSystem::SuspendedToken`] rather than an equality pin;
+/// `wk.take_root_cont()` is a plain `WorkerSystem`-level accessor, already
+/// implied. Does *not* need `StackfulWorkerSystem` (no context switch
+/// happens here, so `S::Ctx` is never named) or `S::Desc: StackfulTaskDesc`.
 pub fn pop_or_root_stackful<S>(wk: &UltWorker<S>) -> SuspendedTaskToken<S::Desc>
 where
-    S: DescScheduler,
+    S: WorkerSystem,
 {
     if let Some(c) = wk.deque.try_pop() {
-        return c;
+        return c.into();
     }
     wk.take_root_cont()
 }
