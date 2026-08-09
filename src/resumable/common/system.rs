@@ -81,7 +81,19 @@ pub trait WorkerSystem: PoolSystem {
     /// bound directly) so [`WorkerRunQueue`] and [`ExternalQueue`] stay
     /// generic over "whatever this system moves through them," with no need
     /// to name `SuspendedTaskToken`/`Self::Desc` themselves.
-    type SuspendedToken: Send;
+    ///
+    /// The `Into`/`From` bounds let call sites cross between this opaque
+    /// type and the crate's own concrete `SuspendedTaskToken<Self::Desc>`
+    /// (e.g. a token freshly built from a raw descriptor pointer, or one
+    /// pulled out of `ExternalQueue::try_pop`, which is declared at the
+    /// `PoolSystem` level and so can only speak the concrete type) without
+    /// pinning the two equal — every concrete system today sets
+    /// `SuspendedToken = SuspendedTaskToken<Self::Desc>` as a literal type
+    /// alias, so both bounds are satisfied for free by `std`'s blanket
+    /// `impl<T> From<T> for T`.
+    type SuspendedToken: Send
+        + Into<SuspendedTaskToken<Self::Desc>>
+        + From<SuspendedTaskToken<Self::Desc>>;
 
     /// Work-stealing run queue implementation. `+ Default` here (rather than
     /// as a [`WorkerRunQueue`] supertrait) so that trait's contract stays
