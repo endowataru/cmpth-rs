@@ -110,9 +110,9 @@ pub(crate) fn run_async_poll<S>(
                         // Fair yield: behind whatever this worker already
                         // had queued, not ahead of it -- see
                         // `StacklessTaskSystem::yield_now`.
-                        wk.defer(token);
+                        wk.defer(token.into());
                     } else {
-                        wk.push(token);
+                        wk.push(token.into());
                     }
                 }
                 return;

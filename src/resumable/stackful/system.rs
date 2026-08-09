@@ -24,7 +24,7 @@ use crate::traits::stackful::{
 };
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::lookup::CurrentLookup;
-use crate::resumable::common::system::{DescScheduler, PoolSystem, SchedulerSystem, WorkerSystem};
+use crate::resumable::common::system::{PoolSystem, SchedulerSystem, WorkerSystem};
 use crate::resumable::common::desc::{HasExternalQueue, SuspendedTaskToken, TaskDescCore};
 use crate::resumable::common::stack::StackAlloc;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
@@ -44,7 +44,7 @@ pub use crate::traits::stackful::StackfulTaskSystem;
 /// below folds the two back together for callers that need both.
 ///
 /// "This system can run real ULTs" is checked at [`StackfulSchedulerSystem`]
-/// (via its `DescScheduler<Desc: StackfulTaskDesc + ...>` nest), not here.
+/// (via its `PoolSystem<Desc: StackfulTaskDesc + ...>` nest), not here.
 ///
 /// Deliberately does **not** nest ANY bound on `WorkerSystem::Desc` here —
 /// not `StackfulTaskDesc`, and not `TaskDescCore<Owned:
@@ -116,29 +116,40 @@ pub trait StackfulWorkerSystem: WorkerSystem
 }
 
 /// The fold point: a [`SchedulerSystem`] (dispatch) that is also a
-/// [`StackfulWorkerSystem`] (real-stack capability) whose scheduling unit is
-/// this crate's own task descriptor/worker ([`DescScheduler`]) — i.e. every
-/// system built on the `resumable` engine that can run real ULTs.
+/// [`StackfulWorkerSystem`] (real-stack capability) whose worker can
+/// actually drive real ULTs — i.e. every system built on the `resumable`
+/// engine that can run real ULTs.
 ///
 /// Blanket-derived (not implemented directly by concrete systems anymore):
 /// every member that used to live here now lives on [`SchedulerSystem`] or
 /// [`StackfulWorkerSystem`], so once a concrete system implements both of
-/// those (plus [`DescScheduler`], itself blanket-derived whenever `Item`/
-/// `Worker` have their expected shapes), it gets `StackfulSchedulerSystem`
-/// for free.
+/// those, plus `Worker`/`Desc` having their expected *capabilities* (not
+/// identities — see below), it gets `StackfulSchedulerSystem` for free.
+///
+/// No `DescScheduler` anywhere in this fold, unlike earlier revisions:
+/// `Worker: StackfulWorker<Self>` is a **capability** bound, not an
+/// identity pin (`Worker = UltWorker<Self>`) — `UltWorker<S>` is the only
+/// thing that implements `WorkerOps`/`ContextSwitcher`/`StackfulLocalQueue`
+/// today, but nothing here has to say so. `Desc: StackfulTaskDesc +
+/// TaskDescCore<Owned: HasExternalQueue<...>>` is likewise a bound, not an
+/// identity. The one remaining `Worker = UltWorker<Self>` identity pin this
+/// crate needs lives nowhere near this trait: it's local to
+/// [`crate::resumable::stackful::init::init`] and its immediate callers —
+/// the actual "construct the concrete `Scheduler<S>`" boundary, the one
+/// place that's legitimately allowed to name `UltWorker<S>` directly. Every
+/// generic function merely bounded `S: StackfulSchedulerSystem` never needs
+/// that identity: it only ever asks `S::Worker` to implement a capability.
 ///
 /// `Desc: StackfulTaskDesc` and `Owned: HasExternalQueue<Self::Desc, Queue =
 /// Self::ExternalQueue>` are nested directly in the supertrait bound list
-/// (`DescScheduler<Desc: ...>`), not a separate `where`-clause — that's
+/// (`PoolSystem<Desc: ...>`), not a separate `where`-clause — that's
 /// what lets every function merely bounded `S: StackfulSchedulerSystem` get
 /// both for free, with no need to restate either. A `where`-clause form
 /// (`SchedulerSystem where Self::Desc: ...`) does *not* propagate this way
 /// (verified empirically, both for a `where`-clause on this trait's own
 /// declaration and for one on `SchedulerSystem::Desc`'s declaration in a
 /// different trait) — only associated-type bounds nested in a supertrait's
-/// own bound list are treated as real implied bounds. [`DescScheduler`]
-/// itself is one such supertrait, folding in `Item`/`Worker` once so this
-/// trait doesn't have to restate them.
+/// own bound list are treated as real implied bounds.
 ///
 /// Both `StackfulTaskDesc` and `HasExternalQueue` live here now, not on
 /// [`StackfulWorkerSystem`] (see that trait's doc comment for why nesting
@@ -146,20 +157,30 @@ pub trait StackfulWorkerSystem: WorkerSystem
 /// concrete descriptor once one is pinned): nesting them here, on the fold
 /// trait, means they only ever normalize against a concrete `Desc` at a
 /// point where `Desc`'s well-formedness is already independently
-/// established (via `DescScheduler`/`StackfulWorkerSystem` each
-/// individually holding), never while an impl's *own* bounds are still
-/// being checked.
+/// established, never while an impl's *own* bounds are still being
+/// checked.
+///
+/// `Worker: StackfulWorker<Self>` had to be nested here rather than folded
+/// through a separate marker trait: `StackfulWorker<S>`'s own declaration
+/// used to require `S: StackfulSchedulerSystem`, which is mutually
+/// recursive with this trait nesting `Worker: StackfulWorker<Self>` on
+/// itself — proving `UltWorker<X>: StackfulWorker<X>` needed `X:
+/// StackfulSchedulerSystem`, which needed `X::Worker: StackfulWorker<X>`
+/// again, an infinite loop (`overflow evaluating the requirement`).
+/// Lowering `StackfulWorker<S>`'s own bound to `S: StackfulWorkerSystem`
+/// (all its default method bodies only ever need `WorkerOps`/
+/// `ContextSwitcher`/`StackfulLocalQueue`, never dispatch) broke the cycle.
 pub trait StackfulSchedulerSystem:
     SchedulerSystem
-    + StackfulWorkerSystem
-    + DescScheduler<Desc: StackfulTaskDesc + TaskDescCore<Owned: HasExternalQueue<Self::Desc, Queue = Self::ExternalQueue>>>
+    + StackfulWorkerSystem<Worker: crate::resumable::stackful::worker::StackfulWorker<Self>>
+    + PoolSystem<Desc: StackfulTaskDesc + TaskDescCore<Owned: HasExternalQueue<Self::Desc, Queue = Self::ExternalQueue>>>
 {
 }
 
 impl<
     S: SchedulerSystem
-        + StackfulWorkerSystem
-        + DescScheduler<Desc: StackfulTaskDesc + TaskDescCore<Owned: HasExternalQueue<S::Desc, Queue = S::ExternalQueue>>>,
+        + StackfulWorkerSystem<Worker: crate::resumable::stackful::worker::StackfulWorker<S>>
+        + PoolSystem<Desc: StackfulTaskDesc + TaskDescCore<Owned: HasExternalQueue<S::Desc, Queue = S::ExternalQueue>>>,
 > StackfulSchedulerSystem for S
 {
 }
@@ -198,6 +219,7 @@ where
 impl<S: ThreadSystem + StackfulSchedulerSystem> crate::traits::stackful::StackfulInitSystem for S
 where
     S::Desc: StackfulTaskDesc,
+    S: WorkerSystem<Worker = UltWorker<S>>,
 {
     type Builder = crate::resumable::stackful::init::StackfulBuilderImpl<Self>;
     type Init = crate::resumable::stackful::init::StackfulInit<Self>;
@@ -384,11 +406,12 @@ where
 impl<M: UltIdentity + StackfulSchedulerSystem> ThreadSystem for M
 where
     <M as PoolSystem>::Desc: StackfulTaskDesc,
+    M::Worker: crate::resumable::stackful::worker::StackfulWorker<M>,
 {
     fn yield_now() {
         use crate::resumable::common::worker::WorkerOps;
         use crate::resumable::stackful::worker::StackfulWorker;
-        match UltWorker::<Self>::current() {
+        match M::Worker::current() {
             Some(wk) => { wk.yield_now(); }
             None => <<M as UltIdentity>::Base as ThreadSystem>::yield_now(),
         }

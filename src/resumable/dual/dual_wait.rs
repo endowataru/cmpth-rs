@@ -82,7 +82,7 @@ impl<S: StackfulSchedulerSystem> DualResumable<S> where S::Desc: StackfulTaskDes
             // from `wait_with`/`wait_with_cond`/`swap` with a real
             // `SuspendedTaskToken`.
             let c: SuspendedTaskToken<S::Desc> = unsafe { raw.into_typed() };
-            wk.push(c);
+            wk.push(c.into());
         }
     }
 }
@@ -148,7 +148,7 @@ where
                 // SAFETY: `tag != ASYNC_TAG` means a `SuspendedTaskToken`
                 // was published by `wait_with`/`wait_with_cond`.
                 let c: SuspendedTaskToken<S::Desc> = unsafe { raw.into_typed() };
-                wk.suspend_to_cont(c, |wk, prev| wk.push(prev));
+                wk.suspend_to_cont(c, |wk, prev| wk.push(prev.into()));
             }
             // Not a real continuation (or empty) — no context jump is
             // possible here, so fall back to a plain wake instead.

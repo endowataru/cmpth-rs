@@ -73,10 +73,10 @@ where
     // Write the closure onto the child's stack before switching.
     unsafe { f_ptr.write(f) };
 
-    let child = move |wk: &S::Worker, prev| {
+    let child = move |wk: &S::Worker, prev: SuspendedTaskToken<S::Desc>| {
         // Running on the child's stack.  Publish the parent for stealing, run
         // the closure, then exit via exit_with_result.
-        wk.push(prev);
+        wk.push(prev.into());
         let val = catch_unwind(AssertUnwindSafe(|| unsafe { f_ptr.read() }()));
         // The closure may have suspended and resumed on a different worker,
         // so re-derive which one we're on now.
@@ -111,7 +111,7 @@ where
     <S as PoolSystem>::Desc: StackfulTaskDesc,
 {
     fn resume(&self, cont: <S::Desc as TaskDesc>::Suspended) {
-        self.wk.push(cont);
+        self.wk.push(cont.into());
     }
 
     fn reclaim(&self) {

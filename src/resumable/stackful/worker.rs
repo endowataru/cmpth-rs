@@ -13,7 +13,7 @@ use crate::traits::stackful::{CondTransfer, Context, ContextPolicy, Transfer};
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, WorkerOps};
 use crate::resumable::common::system::{ReclaimableDesc, RunnableItem, WorkerSystem};
-use crate::resumable::stackful::system::{StackfulSchedulerSystem, StackfulWorkerSystem};
+use crate::resumable::stackful::system::StackfulWorkerSystem;
 use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, TaskDescCore};
 use crate::interchange::Transferred;
 use crate::resumable::stackful::desc::{StackfulOnlyTaskDesc, StackfulTaskDesc};
@@ -99,7 +99,7 @@ where
 
 /// Scheduler-level operations that only make sense with a real, switchable
 /// stack: suspending the calling ULT and resuming whatever's next.
-pub trait StackfulWorker<S: StackfulSchedulerSystem>:
+pub trait StackfulWorker<S: StackfulWorkerSystem>:
     WorkerOps<S> + ContextSwitcher<S> + StackfulLocalQueue<S>
 where
     S::Desc: StackfulTaskDesc,
@@ -125,7 +125,7 @@ where
             if c.is_root() {
                 wk.set_root_cont(c);
             } else {
-                wk.push(c);
+                wk.push(c.into());
             }
         }
         wk
@@ -142,7 +142,7 @@ where
 
     /// Cooperative yield: defer so other tasks already queued run first.
     fn yield_now(&self) -> &Self {
-        self.suspend_to_sched(|wk, prev| wk.defer(prev))
+        self.suspend_to_sched(|wk, prev| wk.defer(prev.into()))
     }
 }
 
@@ -340,7 +340,11 @@ where
 
 // --- StackfulWorker ---
 
-impl<S: StackfulSchedulerSystem> StackfulWorker<S> for UltWorker<S> where S::Desc: StackfulTaskDesc {}
+impl<S: StackfulWorkerSystem, W: WorkerOps<S> + ContextSwitcher<S> + StackfulLocalQueue<S>> StackfulWorker<S> for W
+where
+    S::Desc: StackfulTaskDesc,
+{
+}
 
 // ---------------------------------------------------------------------------
 // Shims: extern "C" callbacks handed to the context-switch layer.
