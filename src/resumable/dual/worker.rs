@@ -92,13 +92,18 @@ where
 /// [`PoolSystem::AsyncPool`](crate::resumable::common::system::PoolSystem::AsyncPool));
 /// everything else goes through the ULT-stack pool as usual.
 ///
-/// Bound: plain [`DescScheduler`] — `desc` is a raw `*mut Self` throughout
-/// (never `S::Item`), and `wk.free_task`/`wk.free_async_task` are
-/// `WorkerSystem`-gated, so this needs neither `StackfulWorkerSystem` nor
-/// any fold of `SchedulerSystem`. `DescScheduler` itself is only needed to
-/// pin `Desc = DualTaskDesc<S>` so `Self` resolves.
-impl<S: DescScheduler<Desc = DualTaskDesc<S>>> ReclaimableDesc<S> for DualTaskDesc<S> {
-    unsafe fn reclaim(wk: &UltWorker<S>, desc: *mut Self) {
+/// Bound: plain [`WorkerSystem`](crate::resumable::common::system::WorkerSystem),
+/// `Desc` pinned directly (not via [`DescScheduler`]) — `desc` is a raw
+/// `*mut Self` throughout (never `S::SuspendedToken`), `wk.free_task` is
+/// reachable through `S::Worker: WorkerOps<S>` alone, and `wk.free_async_task`
+/// needs the separate `S::Worker: AsyncTaskPool<S>` bound stated below (not a
+/// `WorkerOps` supertrait) — so this needs neither `Worker = UltWorker<S>`
+/// nor any fold of `SchedulerSystem`.
+impl<S: WorkerSystem<Desc = DualTaskDesc<S>>> ReclaimableDesc<S> for DualTaskDesc<S>
+where
+    S::Worker: AsyncTaskPool<S>,
+{
+    unsafe fn reclaim(wk: &S::Worker, desc: *mut Self) {
         // SAFETY: `desc` is finished (about to be freed) — `TaskDesc::join_state`'s
         // own contract guarantees the exit path never touches the descriptor
         // again after publishing `FINISHED`, so no other token can exist for

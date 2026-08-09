@@ -7,7 +7,7 @@
 use std::task::{RawWaker, Waker};
 
 use crate::resumable::common::worker::{AsyncTaskPool, LocalQueue, UltWorker};
-use crate::resumable::common::system::{DescScheduler, ReclaimableDesc, RunnableItem};
+use crate::resumable::common::system::{DescScheduler, ReclaimableDesc, RunnableItem, WorkerSystem};
 use crate::resumable::stackless::system::StacklessSchedulerSystem;
 use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken};
 use crate::resumable::stackless::desc::{StacklessOnlyTaskDesc, WakerTaskDesc};
@@ -156,12 +156,17 @@ impl<S: DescScheduler<Desc = StacklessOnlyTaskDesc<S>>>
 /// based on whether the descriptor's `Node` wrapper was marked oversized at
 /// allocation time).
 ///
-/// Bound: plain [`DescScheduler`] — `wk.free_async_task` only needs
-/// `AsyncTaskPool<S>`, itself only `WorkerSystem`-gated; `desc` is a raw
-/// `*mut Self`, never `S::Item`, so `DescScheduler` here is only needed to
-/// pin `Desc = StacklessOnlyTaskDesc<S>` so `Self` resolves.
-impl<S: DescScheduler<Desc = StacklessOnlyTaskDesc<S>>> ReclaimableDesc<S> for StacklessOnlyTaskDesc<S> {
-    unsafe fn reclaim(wk: &UltWorker<S>, desc: *mut Self) {
+/// Bound: plain [`WorkerSystem`](crate::resumable::common::system::WorkerSystem),
+/// `Desc` pinned directly (not via [`DescScheduler`]) — `wk.free_async_task`
+/// needs `S::Worker: AsyncTaskPool<S>` (stated below; not a `WorkerOps`
+/// supertrait); `desc` is a raw `*mut Self`, never `S::SuspendedToken`, so
+/// this needs neither `Worker = UltWorker<S>` nor any fold of
+/// `SchedulerSystem`.
+impl<S: WorkerSystem<Desc = StacklessOnlyTaskDesc<S>>> ReclaimableDesc<S> for StacklessOnlyTaskDesc<S>
+where
+    S::Worker: AsyncTaskPool<S>,
+{
+    unsafe fn reclaim(wk: &S::Worker, desc: *mut Self) {
         unsafe { wk.free_async_task(desc) };
     }
 }
