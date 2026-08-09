@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
 
 use crate::traits::{Resumable, StackfulResumable};
-use crate::resumable::common::system::{DescScheduler, PoolSystem, WorkerSystem};
+use crate::resumable::common::system::{PoolSystem, WorkerSystem};
 use crate::resumable::stackful::system::{StackfulSchedulerSystem, StackfulWorkerSystem};
 use crate::resumable::common::desc::SuspendedTaskToken;
 use crate::interchange::AtomicSlot;
@@ -64,29 +64,27 @@ where
 /// switch here — the slot can only ever hold a real continuation, unlike
 /// `DualResumable`, which may hold an async waiter and has to fall back to
 /// a plain wake internally.
-impl<T: StackfulOnlyResumableCore> Resumable<T::StackfulWorkerSystem> for T
-where
-    T::StackfulWorkerSystem: DescScheduler,
-{
+impl<T: StackfulOnlyResumableCore> Resumable<T::StackfulWorkerSystem> for T {
     fn is_set(&self) -> bool {
         self.cont().is_set(Ordering::Acquire)
     }
 
     fn notify(&self) {
         let c = self.take_cont();
-        Self::wk().push(c);
+        Self::wk().push(c.into());
     }
 }
 
 // `wk()` now returns `S::Worker` (opaque), not the concrete `UltWorker<S>`,
 // so unlike before, `StackfulSchedulerSystem` alone no longer carries the
-// worker-capability facts these methods need — it still supplies the `Item`
-// pin (`DescScheduler`, via its own supertrait bound) that `push`/
-// `suspend_to_cont`'s `SuspendedTaskToken<S::Desc>` traffic needs, but the
-// `Worker: StackfulWorker<Self>` bound (which also brings in `ContextSwitcher`
-// and `StackfulLocalQueue` as its own supertraits) has to be stated
-// separately here until it can be nested into `StackfulSchedulerSystem`
-// itself (see that trait's doc comment).
+// worker-capability facts these methods need — `push`/`suspend_to_cont`'s
+// `SuspendedTaskToken<S::Desc>` traffic now crosses to/from `S::SuspendedToken`
+// via the `Into`/`From` bounds on `WorkerSystem::SuspendedToken` (no
+// `DescScheduler` pin needed for that anymore), but the `Worker:
+// StackfulWorker<Self>` bound (which also brings in `ContextSwitcher` and
+// `StackfulLocalQueue` as its own supertraits) has to be stated separately
+// here until it can be nested into `StackfulSchedulerSystem` itself (see
+// that trait's doc comment).
 impl<T: StackfulOnlyResumableCore> StackfulResumable<T::StackfulWorkerSystem> for T
 where
     T::StackfulWorkerSystem: StackfulSchedulerSystem,
