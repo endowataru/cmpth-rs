@@ -736,7 +736,7 @@ impl cmpth::PoolSystem for ManualSystem {
 
 impl cmpth::WorkerSystem for ManualSystem {
     type Base  = OsSystem;
-    type Item  = cmpth::SuspendedTaskToken<DualTaskDesc<Self>>;
+    type SuspendedToken  = cmpth::SuspendedTaskToken<DualTaskDesc<Self>>;
     type Worker = UltWorker<Self>;
     type RunQueue = HybridRunQueue<cmpth::SuspendedTaskToken<DualTaskDesc<Self>>>;
     type Lookup          = TlsCurrent;
@@ -837,7 +837,7 @@ impl cmpth::PoolSystem for PollerSystem {
 
 impl cmpth::WorkerSystem for PollerSystem {
     type Base  = OsSystem;
-    type Item  = cmpth::SuspendedTaskToken<StackfulOnlyTaskDesc<Self>>;
+    type SuspendedToken  = cmpth::SuspendedTaskToken<StackfulOnlyTaskDesc<Self>>;
     type Worker = UltWorker<Self>;
     type RunQueue = HybridRunQueue<cmpth::SuspendedTaskToken<StackfulOnlyTaskDesc<Self>>>;
     type Lookup          = TlsCurrent;

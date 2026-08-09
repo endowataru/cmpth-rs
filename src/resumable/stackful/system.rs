@@ -358,7 +358,7 @@ impl<M: UltIdentity> PoolSystem for M {
 
 impl<M: UltIdentity> WorkerSystem for M {
     type Base  = M::Base;
-    type Item  = SuspendedTaskToken<M::Desc>;
+    type SuspendedToken  = SuspendedTaskToken<M::Desc>;
     type Worker = UltWorker<Self>;
     type RunQueue = M::RunQueue;
     type Lookup = <M as UltIdentity>::Lookup;

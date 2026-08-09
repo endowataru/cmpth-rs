@@ -31,7 +31,7 @@ pub struct Scheduler<S: WorkerSystem> {
     /// structural. Populated once, at construction, by mapping over
     /// `workers` (see the two `init`/`run_async` call sites) — never
     /// mutated afterward.
-    pub(crate) stealers: Box<[<S::RunQueue as WorkerRunQueue<S::Item>>::Stealer]>,
+    pub(crate) stealers: Box<[<S::RunQueue as WorkerRunQueue<S::SuspendedToken>>::Stealer]>,
     pub(crate) finished: std::sync::atomic::AtomicBool,
     pub(crate) external_queue: S::ExternalQueue,
     /// Per-task ULT stack size for the stackful `spawn`/`fork_parent_first`

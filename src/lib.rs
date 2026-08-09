@@ -92,7 +92,7 @@ impl resumable::common::system::PoolSystem for DefaultDualTaskSystem {
 
 impl resumable::common::system::WorkerSystem for DefaultDualTaskSystem {
     type Base  = OsSystem;
-    type Item  = SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>;
+    type SuspendedToken  = SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>;
     type Worker = UltWorker<Self>;
     type RunQueue = HybridRunQueue<SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>>;
     type Lookup          = resumable::common::lookup::TlsCurrent;
@@ -175,7 +175,7 @@ impl resumable::common::system::PoolSystem for DefaultNestedDualTaskSystem {
 
 impl resumable::common::system::WorkerSystem for DefaultNestedDualTaskSystem {
     type Base  = DefaultDualTaskSystem;
-    type Item  = SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>;
+    type SuspendedToken  = SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>;
     type Worker = UltWorker<Self>;
     type RunQueue = HybridRunQueue<SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>>;
     type Lookup          = resumable::common::lookup::TlsCurrent;

@@ -243,7 +243,7 @@ where
 
 // --- ContextSwitcher ---
 
-impl<S: StackfulWorkerSystem + DescScheduler> ContextSwitcher<S> for UltWorker<S>
+impl<S: StackfulWorkerSystem<Worker = UltWorker<S>>> ContextSwitcher<S> for UltWorker<S>
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -348,7 +348,7 @@ impl<S: StackfulSchedulerSystem> StackfulWorker<S> for UltWorker<S> where S::Des
 // anything that could allow the previous context to resume.
 // ---------------------------------------------------------------------------
 
-struct SuspendPayload<S: StackfulWorkerSystem + DescScheduler, F>
+struct SuspendPayload<S: StackfulWorkerSystem, F>
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -359,7 +359,7 @@ where
 
 unsafe extern "C" fn suspend_shim<S, F>(prev: Context, a1: *mut (), _a2: *mut ()) -> Transfer
 where
-    S: StackfulWorkerSystem + DescScheduler,
+    S: StackfulWorkerSystem,
     S::Desc: StackfulTaskDesc,
     F: FnOnce(&UltWorker<S>, SuspendedTaskToken<S::Desc>),
 {
@@ -376,7 +376,7 @@ where
     Transfer(wk as *const UltWorker<S> as *mut ())
 }
 
-struct CondSuspendPayload<S: StackfulWorkerSystem + DescScheduler, F>
+struct CondSuspendPayload<S: StackfulWorkerSystem, F>
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -387,7 +387,7 @@ where
 
 unsafe extern "C" fn cond_suspend_shim<S, F>(prev: Context, a1: *mut (), _a2: *mut ()) -> CondTransfer
 where
-    S: StackfulWorkerSystem + DescScheduler,
+    S: StackfulWorkerSystem,
     S::Desc: StackfulTaskDesc,
     F: FnOnce(&UltWorker<S>, &mut Option<SuspendedTaskToken<S::Desc>>),
 {
@@ -438,7 +438,7 @@ where
     }
 }
 
-struct ExitPayload<S: StackfulWorkerSystem + DescScheduler, F>
+struct ExitPayload<S: StackfulWorkerSystem, F>
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -449,7 +449,7 @@ where
 
 unsafe extern "C" fn exit_shim<S, F>(a1: *mut (), _a2: *mut ()) -> Transfer
 where
-    S: StackfulWorkerSystem + DescScheduler,
+    S: StackfulWorkerSystem,
     S::Desc: StackfulTaskDesc,
     F: FnOnce(&UltWorker<S>),
 {

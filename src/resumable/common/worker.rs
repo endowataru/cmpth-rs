@@ -94,7 +94,7 @@ pub trait RecursionAlloc {
 
 /// Per-worker work-stealing run queue, independent of task flavor.
 ///
-/// Speaks [`WorkerSystem::Item`], never `SuspendedTaskToken<S::Desc>`:
+/// Speaks [`WorkerSystem::SuspendedToken`], never `SuspendedTaskToken<S::Desc>`:
 /// this layer moves work around without looking inside it, so naming the
 /// descriptor here would be a claim it does not need to make. The item stops
 /// being opaque exactly one step later, when a caller with a concrete token
@@ -104,20 +104,20 @@ pub trait RecursionAlloc {
 pub trait LocalQueue<S: WorkerSystem> {
     /// Run `c` next on this worker (will run before anything already
     /// queued).
-    fn push(&self, c: S::Item);
+    fn push(&self, c: S::SuspendedToken);
 
     /// Run `c` after work already queued here (yield: let other tasks run
     /// first).
-    fn defer(&self, c: S::Item);
+    fn defer(&self, c: S::SuspendedToken);
 
     /// Take what this worker should run next.
-    fn try_pop(&self) -> Option<S::Item>;
+    fn try_pop(&self) -> Option<S::SuspendedToken>;
 
     /// Try to steal one task from another worker. `Steal::Retry` means some
     /// victim had work but it could not be taken right now — distinct from
     /// `Steal::Empty` (every victim scanned was genuinely empty) so callers
     /// don't mistake contention for idleness.
-    fn try_steal(&self) -> Steal<S::Item>;
+    fn try_steal(&self) -> Steal<S::SuspendedToken>;
 
     /// This worker's index within its scheduler.
     fn num(&self) -> usize;
@@ -430,19 +430,19 @@ impl<S: WorkerSystem> RecursionAlloc for UltWorker<S> {
 // caller hands a concrete token to these methods — but that is the task
 // layer, which legitimately knows the descriptor type.
 impl<S: WorkerSystem> LocalQueue<S> for UltWorker<S> {
-    fn push(&self, c: S::Item) {
+    fn push(&self, c: S::SuspendedToken) {
         self.deque.push(c);
     }
 
-    fn defer(&self, c: S::Item) {
+    fn defer(&self, c: S::SuspendedToken) {
         self.deque.defer(c);
     }
 
-    fn try_pop(&self) -> Option<S::Item> {
+    fn try_pop(&self) -> Option<S::SuspendedToken> {
         self.deque.try_pop()
     }
 
-    fn try_steal(&self) -> Steal<S::Item> {
+    fn try_steal(&self) -> Steal<S::SuspendedToken> {
         let shared = self.shared();
         let n = shared.workers.len();
         if n <= 1 {

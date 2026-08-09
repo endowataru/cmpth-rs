@@ -319,7 +319,7 @@ impl<M: UltAsyncIdentity> PoolSystem for UltAsyncSystem<M> {
 
 impl<M: UltAsyncIdentity> WorkerSystem for UltAsyncSystem<M> {
     type Base  = M::Base;
-    type Item  = crate::resumable::common::desc::SuspendedTaskToken<M::Desc>;
+    type SuspendedToken  = crate::resumable::common::desc::SuspendedTaskToken<M::Desc>;
     type Worker = UltWorker<Self>;
     type RunQueue = M::RunQueue;
     type Lookup = <M as UltAsyncIdentity>::Lookup;
