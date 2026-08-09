@@ -208,12 +208,13 @@ impl<S: StackfulWorkerSystem + DescScheduler<Desc = StackfulOnlyTaskDesc<S>>>
 /// Every descriptor came from the pool (there is no `spawn_async`
 /// allocation path to bypass it), so always return it there.
 ///
-/// Bound: plain [`WorkerSystem`](crate::resumable::common::system::WorkerSystem)
-/// (via [`DescScheduler`]) — `wk.free_task` only needs `TaskPool<S>`, itself
-/// only `WorkerSystem`-gated (`common::worker`), so this needs neither
-/// `StackfulWorkerSystem` nor any fold of `SchedulerSystem`.
-impl<S: DescScheduler<Desc = StackfulOnlyTaskDesc<S>>> ReclaimableDesc<S> for StackfulOnlyTaskDesc<S> {
-    unsafe fn reclaim(wk: &UltWorker<S>, desc: *mut Self) {
+/// Bound: plain [`WorkerSystem`](crate::resumable::common::system::WorkerSystem),
+/// `Desc` pinned directly (not via [`DescScheduler`]) — `wk.free_task` only
+/// needs `TaskPool<S>`, reachable through `S::Worker: WorkerOps<S>` alone, so
+/// this needs neither `Worker = UltWorker<S>` nor any fold of
+/// `SchedulerSystem`.
+impl<S: WorkerSystem<Desc = StackfulOnlyTaskDesc<S>>> ReclaimableDesc<S> for StackfulOnlyTaskDesc<S> {
+    unsafe fn reclaim(wk: &S::Worker, desc: *mut Self) {
         unsafe { wk.free_task(desc) };
     }
 }
