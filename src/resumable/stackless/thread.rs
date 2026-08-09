@@ -23,7 +23,7 @@ use crate::resumable::common::worker::{AsyncTaskPool, LocalQueue, RecursionAlloc
 // .await-ing a JoinHandle
 // ---------------------------------------------------------------------------
 
-impl<S: StacklessSchedulerSystem, T: Send + 'static> Future for JoinHandle<S, T> {
+impl<S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>, T: Send + 'static> Future for JoinHandle<S, T> {
     type Output = T;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
@@ -107,16 +107,20 @@ where
     S: StacklessSchedulerSystem,
 {
     match wk.try_pop() {
-        Some(popped) if std::ptr::eq(popped.desc(), desc) => {
-            if popped.is_poll_fn_dispatch() {
-                let poll_fn = popped.poll_fn()
-                    .expect("cmpth: descriptor committed to poll_fn dispatch but poll_fn unset");
-                crate::resumable::stackless::worker::run_async_poll(wk, desc, poll_fn);
+        Some(popped) => {
+            let popped: crate::resumable::common::desc::SuspendedTaskToken<S::Desc> = popped.into();
+            if std::ptr::eq(popped.desc(), desc) {
+                if popped.is_poll_fn_dispatch() {
+                    let poll_fn = popped.poll_fn()
+                        .expect("cmpth: descriptor committed to poll_fn dispatch but poll_fn unset");
+                    crate::resumable::stackless::worker::run_async_poll(wk, desc, poll_fn);
+                } else {
+                    wk.push(popped.into());
+                }
             } else {
-                wk.push(popped);
+                wk.push(popped.into());
             }
         }
-        Some(other) => wk.push(other),
         None => {}
     }
 }
@@ -174,7 +178,7 @@ where
 /// change — see `SpawnAction`'s own docs.
 pub fn spawn_async<S, T, F, Mk>(mk: Mk) -> SpawnAction<S, T>
 where
-    S: StacklessSchedulerSystem,
+    S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>,
     F: Future<Output = T> + Send + 'static,
     Mk: FnOnce() -> F + Send + 'static,
     T: Send + 'static,
@@ -201,7 +205,7 @@ where
 /// result) on the easy-to-optimize side of that boundary.
 fn spawn_now<S, T, F, Mk>(mk: Mk) -> JoinHandle<S, T>
 where
-    S: StacklessSchedulerSystem,
+    S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>,
     F: Future<Output = T> + Send + 'static,
     Mk: FnOnce() -> F,
     T: Send + 'static,
@@ -240,7 +244,7 @@ where
     token.set_poll_fn(Some(poll_spawned_task::<S, T, F>));
 
     // Push to the run queue as a ready-to-poll task.
-    wk.push(token);
+    wk.push(token.into());
 
     JoinHandle { desc, result_ptr, result_drop: drop_stack_result::<T>, _marker: PhantomData }
 }
@@ -530,7 +534,7 @@ where
 /// root's `exit()` — reuses [`poll_spawned_task`] directly with `T = ()`.
 pub(crate) fn fork_async_parent_first<S, F>(f: F, external_queue: *const S::ExternalQueue) -> SuspendedTaskToken<S::Desc>
 where
-    S: StacklessSchedulerSystem,
+    S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>,
     F: Future<Output = ()> + Send + 'static,
 {
     let result_layout = Layout::new::<StackResult<()>>();

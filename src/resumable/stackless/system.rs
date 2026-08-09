@@ -14,7 +14,7 @@ use std::marker::PhantomData;
 use crate::traits::stackful::{NestableSystem, ThreadSystem};
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::lookup::CurrentLookup;
-use crate::resumable::common::system::{DescScheduler, PoolSystem, SchedulerSystem, WorkerSystem};
+use crate::resumable::common::system::{PoolSystem, SchedulerSystem, WorkerSystem};
 use crate::resumable::common::worker::{UltWorker, WorkerOps};
 use crate::resumable::stackless::desc::AsyncTaskDesc;
 use crate::traits::scoped::ScopedStacklessTaskSystem;
@@ -24,7 +24,7 @@ use crate::traits::scoped::ScopedStacklessTaskSystem;
 // `resumable::stackless::system::StacklessTaskSystem`.
 pub use crate::traits::stackless::StacklessTaskSystem;
 
-impl<S: StacklessSchedulerSystem> StacklessTaskSystem for S {
+impl<S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>> StacklessTaskSystem for S {
     type SpawnHandle<T: Send + 'static> = crate::resumable::common::thread::JoinHandle<S, T>;
 
     fn spawn<T, F, Mk>(mk: Mk) -> impl Future<Output = Self::SpawnHandle<T>> + Send
@@ -80,7 +80,7 @@ impl<S: StacklessSchedulerSystem> StacklessTaskSystem for S {
 /// impl doesn't need a `StacklessTaskSystem` bound of its own — the two
 /// blankets are independent, both satisfied by the same `SchedulerSystem +
 /// AsyncTaskDesc` condition.
-impl<S: StacklessSchedulerSystem> ScopedStacklessTaskSystem for S {
+impl<S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>> ScopedStacklessTaskSystem for S {
     async fn parallel_call<Fa, Fb, Ra, Rb, MkA, MkB>(mk_a: MkA, mk_b: MkB) -> (Ra, Rb)
     where
         MkA: FnOnce() -> Fa + Send + 'static,
@@ -110,7 +110,7 @@ impl<S> StacklessBuilderImpl<S> {
     }
 }
 
-impl<S: StacklessSchedulerSystem> crate::traits::stackless::StacklessBuilder<S> for StacklessBuilderImpl<S> {
+impl<S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>> crate::traits::stackless::StacklessBuilder<S> for StacklessBuilderImpl<S> {
     fn workers(mut self, n: usize) -> Self {
         self.num_workers = Some(n);
         self
@@ -127,7 +127,7 @@ impl<S: StacklessSchedulerSystem> crate::traits::stackless::StacklessBuilder<S> 
 
 /// Replaces the old `ScopedStacklessTaskSystem::run_async` — same blanket
 /// condition as `ScopedStacklessTaskSystem` itself just above.
-impl<S: StacklessSchedulerSystem> crate::traits::stackless::StacklessInitSystem for S {
+impl<S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>> crate::traits::stackless::StacklessInitSystem for S {
     type Builder = StacklessBuilderImpl<Self>;
 
     fn builder() -> Self::Builder {
@@ -148,7 +148,7 @@ impl<S: StacklessSchedulerSystem> crate::traits::stackless::StacklessInitSystem 
 /// to assemble — it exists solely as a fold point for this bound.
 pub trait StacklessSchedulerSystem:
     SchedulerSystem
-    + DescScheduler<
+    + PoolSystem<
         Desc: AsyncTaskDesc
                   + crate::resumable::common::desc::TaskDescCore<
                       Owned: crate::resumable::common::desc::HasExternalQueue<Self::Desc, Queue = Self::ExternalQueue>,
@@ -157,7 +157,7 @@ pub trait StacklessSchedulerSystem:
 {
 }
 
-impl<S: SchedulerSystem + DescScheduler> StacklessSchedulerSystem for S
+impl<S: SchedulerSystem> StacklessSchedulerSystem for S
 where
     S::Desc: AsyncTaskDesc,
     <S::Desc as crate::resumable::common::desc::TaskDescCore>::Owned:

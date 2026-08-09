@@ -37,7 +37,7 @@ use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
 /// automatically, with no separate dispatch loop needed here.
 pub fn run_async<S, F>(num_workers: usize, root: F)
 where
-    S: StacklessSchedulerSystem,
+    S: StacklessSchedulerSystem + crate::resumable::common::system::WorkerSystem<Worker = UltWorker<S>>,
     F: std::future::Future<Output = ()> + Send + 'static,
 {
     assert!(num_workers >= 1, "need at least one worker");
@@ -82,7 +82,7 @@ where
         },
         external_queue_ptr,
     );
-    shared.workers[0].push(root_cont);
+    shared.workers[0].push(root_cont.into());
 
     let handles: Vec<_> = (1..num_workers)
         .map(|i| {

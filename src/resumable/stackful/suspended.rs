@@ -120,7 +120,7 @@ where
     fn enter(&self) {
         let wk = Self::wk();
         let c = self.take_cont();
-        wk.suspend_to_cont(c, |wk, prev| wk.push(prev));
+        wk.suspend_to_cont(c, |wk, prev| wk.push(prev.into()));
     }
 
     fn swap(&self, next: &Self) {

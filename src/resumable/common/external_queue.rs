@@ -157,7 +157,7 @@ where
                 std::mem::take(&mut *self.inner.lock().unwrap());
             if let Some(wk) = S::Worker::current() {
                 for cont in pending {
-                    wk.defer(cont);
+                    wk.defer(cont.into());
                 }
             }
             // Check *after* draining (not before) so a `stop_service()` call

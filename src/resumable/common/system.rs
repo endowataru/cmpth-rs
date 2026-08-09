@@ -165,19 +165,37 @@ pub trait SchedulerSystem: WorkerSystem<SuspendedToken: RunnableItem<Self>, Desc
 impl<S: WorkerSystem<SuspendedToken: RunnableItem<S>, Desc: ReclaimableDesc<S>>> SchedulerSystem for S {}
 
 // ---------------------------------------------------------------------------
-// DescScheduler — the "engine's own token/worker" assumption, named once
+// DescScheduler — the equality this crate's dispatch bootstrap needs, not a
+// general-purpose "give me a concrete engine" marker
 // ---------------------------------------------------------------------------
 
 /// A [`SchedulerSystem`] whose scheduling unit is this crate's own task
-/// descriptor token and whose worker is this crate's own [`UltWorker`] —
-/// i.e. every system built on the `resumable` engine (as opposed to a
-/// future `scoped`-style system, which will put a stack-resident task
-/// reference in `Item` instead).
+/// descriptor token and whose worker is this crate's own [`UltWorker`].
 ///
-/// Exists so the engine's internals can state that assumption **once**
-/// rather than repeating `Item = SuspendedTaskToken<..>, Worker =
-/// UltWorker<..>` on every generic function that touches both the abstract
-/// associated types and the concrete ones.
+/// Used far less than the name suggests. Nearly every place that touches
+/// both a worker and a token gets by with *capability* bounds instead
+/// (`S::Worker: SomeCapability<S>`, `S::SuspendedToken: Into<SuspendedTaskToken<S::Desc>>`
+/// — the latter always free, see [`WorkerSystem::SuspendedToken`]'s own
+/// bound) — never needing to know `S::Worker`/`S::SuspendedToken` are
+/// *literally* `UltWorker<S>`/`SuspendedTaskToken<S::Desc>`, only that they
+/// implement the right traits. The one `Worker = UltWorker<Self>` identity
+/// this crate genuinely needs lives locally, at the handful of "construct
+/// the concrete `Scheduler<S>`" sites (`stackful::init::init`,
+/// `stackless::scheduler::run_async`, and their immediate callers) — not
+/// centrally here.
+///
+/// What's left, genuinely needing both pins at once: the dispatch-flavor
+/// `RunnableItem` impls whose body calls into stackless polling
+/// (`resumable::dual::worker`/`resumable::stackless::worker`'s impls for
+/// `DualTaskDesc`/`StacklessOnlyTaskDesc`). Those need `SuspendedToken`
+/// pinned because [`SchedulerSystem`]'s own blanket-derive rule is stated
+/// as `Self::SuspendedToken: RunnableItem<Self>` — the *opaque* associated
+/// type — which is only provable if `S::SuspendedToken` is known equal to
+/// the concrete token type the impl is written for (an impl for a concrete
+/// type doesn't automatically count as one for an unrelated opaque type);
+/// and `Worker` because `run_async_poll` takes `&UltWorker<S>` concretely
+/// (it reads `pub(crate)` fields — `polling_async`/`yield_requested` —
+/// never promoted to a trait, unlike `cur_task`/`external_queue`).
 pub trait DescScheduler:
     WorkerSystem<SuspendedToken = SuspendedTaskToken<<Self as PoolSystem>::Desc>, Worker = UltWorker<Self>>
 {

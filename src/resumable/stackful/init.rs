@@ -78,6 +78,7 @@ use crate::resumable::common::desc::{HasExternalQueue, RunningTaskToken, Suspend
 use crate::resumable::common::external_queue::ExternalQueue;
 use crate::resumable::common::pool::{DescPool, DynamicPool};
 use crate::resumable::common::scheduler::{recursion_pool_threshold, worker_idle_loop, worker_loop, Scheduler};
+use crate::resumable::common::system::WorkerSystem;
 use crate::resumable::common::stack::{StackAlloc as _, StackMem, UltStackMemory as _};
 use crate::resumable::common::thread::{align_down, JoinHandle};
 use crate::resumable::common::worker::{LocalQueue, UltWorker, WorkerOps};
@@ -151,7 +152,7 @@ where
 /// stealable task on worker 0's deque. See the module doc comment.
 pub fn init<S>(num_workers: usize, stack_size: usize) -> StackfulInit<S>
 where
-    S: StackfulSchedulerSystem,
+    S: StackfulSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>,
     S::Desc: StackfulTaskDesc,
 {
     assert!(num_workers >= 1, "need at least one worker");
@@ -239,7 +240,7 @@ where
         // as an ordinary, stealable task, same as C++
         // `on_fork_child_first`'s `wk.local_push_top(parent_cont)` — this
         // is the moment `init`'s caller becomes a schedulable ULT.
-        wk.push(prev);
+        wk.push(prev.into());
 
         // Ordinary dispatch loop, same one every worker OS thread runs,
         // until `StackfulInit::drop` sets `finished`.
@@ -396,7 +397,7 @@ impl<S> StackfulBuilderImpl<S> {
 
 impl<S> StackfulBuilder<S> for StackfulBuilderImpl<S>
 where
-    S: StackfulSchedulerSystem + StackfulInitSystem<Init = StackfulInit<S>>,
+    S: StackfulSchedulerSystem + StackfulInitSystem<Init = StackfulInit<S>> + WorkerSystem<Worker = UltWorker<S>>,
     S::Desc: StackfulTaskDesc,
 {
     fn workers(mut self, n: usize) -> Self {
