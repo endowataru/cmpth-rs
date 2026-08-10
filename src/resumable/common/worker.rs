@@ -31,8 +31,10 @@ pub trait TaskPool<S: WorkerSystem> {
     /// Allocate a descriptor for a ULT stack. The size comes from the
     /// pool's own configuration (`Scheduler::stack_size`, set by
     /// [`StackfulBuilder::stack_size`](crate::traits::system::stackful::StackfulBuilder::stack_size)),
-    /// not from the caller — callers neither know nor pass it.
-    fn alloc_task(&self, has_handle: bool) -> *mut S::Desc;
+    /// not from the caller — callers neither know nor pass it. Returns it
+    /// already wrapped as an owned token — see [`DescPool::alloc`], which
+    /// this delegates to.
+    fn alloc_task(&self, has_handle: bool) -> SuspendedTaskToken<S::Desc>;
 
     /// Return a dead descriptor to the pool.
     ///
@@ -53,9 +55,10 @@ pub trait TaskPool<S: WorkerSystem> {
 /// once — see [`PoolSystem::AsyncPool`](crate::resumable::common::system::PoolSystem::AsyncPool)'s doc comment) — and this trait
 /// is stackless-only, unlike `TaskPool`, which every system needs.
 pub trait AsyncTaskPool<S: WorkerSystem> {
-    /// Allocate a descriptor with storage for at least `size` bytes (see
-    /// [`DescPool::alloc`]).
-    fn alloc_async_task(&self, has_handle: bool, size: usize) -> *mut S::Desc;
+    /// Allocate a descriptor with storage for at least `size` bytes.
+    /// Returns it already wrapped as an owned token — see
+    /// [`DescPool::alloc`], which this delegates to.
+    fn alloc_async_task(&self, has_handle: bool, size: usize) -> SuspendedTaskToken<S::Desc>;
 
     /// Return a dead descriptor to the pool.
     ///
@@ -412,7 +415,7 @@ impl<S: WorkerSystem> UltWorker<S> {
 // --- TaskPool ---
 
 impl<S: WorkerSystem> TaskPool<S> for UltWorker<S> {
-    fn alloc_task(&self, has_handle: bool) -> *mut S::Desc {
+    fn alloc_task(&self, has_handle: bool) -> SuspendedTaskToken<S::Desc> {
         let shared = self.shared();
         shared.task_pool.alloc(self.num, has_handle, shared.stack_size)
     }
@@ -425,7 +428,7 @@ impl<S: WorkerSystem> TaskPool<S> for UltWorker<S> {
 // --- AsyncTaskPool ---
 
 impl<S: WorkerSystem> AsyncTaskPool<S> for UltWorker<S> {
-    fn alloc_async_task(&self, has_handle: bool, size: usize) -> *mut S::Desc {
+    fn alloc_async_task(&self, has_handle: bool, size: usize) -> SuspendedTaskToken<S::Desc> {
         self.shared().async_task_pool.alloc(self.num, has_handle, size)
     }
 

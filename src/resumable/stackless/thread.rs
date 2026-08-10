@@ -226,10 +226,8 @@ where
     let stack_size =
         result_layout.size() + result_layout.align() + f_layout.size() + f_layout.align() + 16;
 
-    let desc = wk.alloc_async_task(true, stack_size);
-    // SAFETY: `desc` was just freshly allocated by `async_task_pool.alloc`
-    // and has never been wrapped in a token before — trivially exclusive.
-    let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
+    let mut token = wk.alloc_async_task(true, stack_size);
+    let desc = token.as_desc() as *const S::Desc as *mut S::Desc;
     token.commit_as_poll_fn();
     token.set_external_queue(wk.external_queue() as *const _);
 

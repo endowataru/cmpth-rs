@@ -36,17 +36,11 @@ where
     <S as PoolSystem>::Desc: StackfulTaskDesc,
 {
     let wk = <S::Worker as WorkerOps<S>>::current().expect("cmpth: spawn called outside a worker");
-    let desc = wk.alloc_task(true);
-    let stack_top = {
-        // SAFETY: `desc` was just freshly allocated by `alloc_task` and has
-        // never been wrapped in a token before — trivially exclusive.
-        let mut token = unsafe { SuspendedTaskToken::from_raw(desc) };
-        token.commit_as_ctx();
-        token.set_external_queue(wk.external_queue() as *const _);
-        let stack_top = token.as_desc().stack_top() as usize;
-        let _ = token.into_raw();
-        stack_top
-    };
+    let mut token = wk.alloc_task(true);
+    token.commit_as_ctx();
+    token.set_external_queue(wk.external_queue() as *const _);
+    let stack_top = token.as_desc().stack_top() as usize;
+    let desc = token.into_raw();
 
     // Reserve space at the top of the child's stack (high addresses) for the
     // closure and the result slot.  The execution stack gets the rest below.
@@ -84,9 +78,9 @@ where
         debug_assert!(std::ptr::eq(wk.cur_task(), desc));
         exit_with_result::<S, T>(wk, wk.cur_task_ref(), result_ptr, val)
     };
-    // SAFETY: `desc` was freshly allocated above and, after the token built
-    // at line 46 was released via `into_raw`, has never been re-tokenized —
-    // still exclusively owned here.
+    // SAFETY: `desc` was freshly allocated above and, after the token was
+    // released via `into_raw`, has never been re-tokenized — still
+    // exclusively owned here.
     unsafe { wk.suspend_to_new(exec_top, desc, child) };
 
     JoinHandle { desc, result_ptr, result_drop: drop_stack_result::<T>, _marker: PhantomData }
