@@ -29,7 +29,7 @@ use std::mem::offset_of;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::resumable::common::desc::TaskDescAlloc;
+use crate::resumable::common::desc::{SuspendedTaskToken, TaskDescAlloc};
 use crate::resumable::common::stack::{HeapStack, StackAlloc};
 
 // ---------------------------------------------------------------------------
@@ -65,8 +65,12 @@ pub trait DescPool<D: TaskDescAlloc>: Send + Sync + 'static {
     fn new_pool(num_workers: usize, stack_size: usize) -> Self;
 
     /// Allocate a task descriptor for worker `wk_num` with storage for at
-    /// least `size` bytes.
-    fn alloc(&self, wk_num: usize, has_handle: bool, size: usize) -> *mut D;
+    /// least `size` bytes. Returns it already wrapped as an owned token —
+    /// the pool is the exclusive originator of this memory, so it is the
+    /// one place that can soundly assert "never wrapped in a token before"
+    /// once, instead of every caller repeating that unsafe justification
+    /// for itself.
+    fn alloc(&self, wk_num: usize, has_handle: bool, size: usize) -> SuspendedTaskToken<D>;
 
     /// Return a finished descriptor from worker `wk_num` back to the pool
     /// (or free it directly, if it was an oversized one-off allocation).
@@ -345,24 +349,28 @@ impl<D: TaskDescAlloc, A: StackAlloc, const CAP: usize> DescPool<D> for SimplePo
         SimplePool { stack_size, lists, _alloc: PhantomData }
     }
 
-    fn alloc(&self, wk_num: usize, has_handle: bool, size: usize) -> *mut D {
-        if size > self.stack_size {
+    fn alloc(&self, wk_num: usize, has_handle: bool, size: usize) -> SuspendedTaskToken<D> {
+        let ptr = if size > self.stack_size {
             // Oversized: one-off allocation, bypasses the free list entirely.
             let payload = D::alloc(size, has_handle);
-            return Node::wrap_fresh(wk_num, true, payload);
-        }
-
-        let list = unsafe { &mut *self.lists[wk_num].get() };
-        match list.pop() {
-            Some(node) => {
-                unsafe { (*node).payload.reinit(has_handle) };
-                Node::payload_of(node)
+            Node::wrap_fresh(wk_num, true, payload)
+        } else {
+            let list = unsafe { &mut *self.lists[wk_num].get() };
+            match list.pop() {
+                Some(node) => {
+                    unsafe { (*node).payload.reinit(has_handle) };
+                    Node::payload_of(node)
+                }
+                None => {
+                    let payload = D::alloc_with(A::alloc_stack(self.stack_size).into(), has_handle);
+                    Node::wrap_fresh(wk_num, false, payload)
+                }
             }
-            None => {
-                let payload = D::alloc_with(A::alloc_stack(self.stack_size).into(), has_handle);
-                Node::wrap_fresh(wk_num, false, payload)
-            }
-        }
+        };
+        // SAFETY: `ptr` was just freshly allocated above (or freshly
+        // reinitialized from a pool slot with no live token pointing at
+        // it) — trivially exclusive.
+        unsafe { SuspendedTaskToken::from_raw(ptr) }
     }
 
     unsafe fn dealloc(&self, wk_num: usize, desc: *mut D) {
@@ -497,24 +505,28 @@ impl<D: TaskDescAlloc, A: StackAlloc, const THRESHOLD: usize> DescPool<D> for Re
         ReturnPool { stack_size, workers, pro_arrays, _alloc: PhantomData }
     }
 
-    fn alloc(&self, wk_num: usize, has_handle: bool, size: usize) -> *mut D {
-        if size > self.stack_size {
+    fn alloc(&self, wk_num: usize, has_handle: bool, size: usize) -> SuspendedTaskToken<D> {
+        let ptr = if size > self.stack_size {
             // Oversized: one-off allocation, bypasses the free list entirely.
             let payload = D::alloc(size, has_handle);
-            return Node::wrap_fresh(wk_num, true, payload);
-        }
-
-        match node_take(&self.workers, wk_num) {
-            Some(node) => {
-                unsafe { (*node).payload.reinit(has_handle) };
-                Node::payload_of(node)
+            Node::wrap_fresh(wk_num, true, payload)
+        } else {
+            match node_take(&self.workers, wk_num) {
+                Some(node) => {
+                    unsafe { (*node).payload.reinit(has_handle) };
+                    Node::payload_of(node)
+                }
+                None => {
+                    // Miss: allocate fresh and record the home worker.
+                    let payload = D::alloc_with(A::alloc_stack(self.stack_size).into(), has_handle);
+                    Node::wrap_fresh(wk_num, false, payload)
+                }
             }
-            None => {
-                // Miss: allocate fresh and record the home worker.
-                let payload = D::alloc_with(A::alloc_stack(self.stack_size).into(), has_handle);
-                Node::wrap_fresh(wk_num, false, payload)
-            }
-        }
+        };
+        // SAFETY: `ptr` was just freshly allocated above (or freshly
+        // reinitialized from a pool slot with no live token pointing at
+        // it) — trivially exclusive.
+        unsafe { SuspendedTaskToken::from_raw(ptr) }
     }
 
     unsafe fn dealloc(&self, cur_wk: usize, desc: *mut D) {
