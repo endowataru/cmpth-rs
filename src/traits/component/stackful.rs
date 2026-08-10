@@ -43,7 +43,7 @@ pub trait HandoffTaskDesc: TaskDesc {
 ///
 /// `Poller` is to `block_on` what a wait-slot (`StackfulResumable`) is to `wait_with`: a thin
 /// type that encapsulates the system-specific park/wake mechanism, leaving the
-/// poll loop itself as a generic default on [`ThreadSystem`](crate::traits::system::stackful::ThreadSystem).
+/// poll loop itself as a generic default on [`SpawnableStackfulTaskSystem`](crate::traits::system::stackful::SpawnableStackfulTaskSystem).
 ///
 /// Implementations are always stack-local inside `block_on`.  They are `!Send`
 /// by convention — bound to the same ULT, not to a specific OS thread.

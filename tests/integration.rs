@@ -151,7 +151,7 @@ fn nested_spawn_join() {
     run(2, || {
         <DefaultNestedDualTaskSystem as StackfulInitSystem>::builder().workers(2).run(|| {
             let handles: Vec<_> = (0..50)
-                .map(|i| <DefaultNestedDualTaskSystem as ThreadSystem>::spawn(move || i * 3u64))
+                .map(|i| <DefaultNestedDualTaskSystem as SpawnableStackfulTaskSystem>::spawn(move || i * 3u64))
                 .collect();
             let mut sum = 0u64;
             for h in handles {
@@ -173,7 +173,7 @@ fn nested_mutex() {
             let handles: Vec<_> = (0..20)
                 .map(|_| {
                     let m = Arc::clone(&m);
-                    <DefaultNestedDualTaskSystem as ThreadSystem>::spawn(move || {
+                    <DefaultNestedDualTaskSystem as SpawnableStackfulTaskSystem>::spawn(move || {
                         for _ in 0..50 {
                             *m.lock() += 1;
                         }
@@ -188,7 +188,7 @@ fn nested_mutex() {
     });
 }
 
-fn generic_workload<S: ThreadSystem + StackfulSyncSystem>() -> u64 {
+fn generic_workload<S: SpawnableStackfulTaskSystem + StackfulSyncSystem>() -> u64 {
     use std::sync::Arc;
     use cmpth::traits::StackfulMutex;
     let m = Arc::new(<S::Mutex<u64> as StackfulMutex<u64>>::new(0));
@@ -233,7 +233,7 @@ fn nested_standalone_init() {
         let guard = <DefaultNestedDualTaskSystem as StackfulInitSystem>::builder().workers(2).init();
 
         let handles: Vec<_> = (0..30)
-            .map(|i| <DefaultNestedDualTaskSystem as ThreadSystem>::spawn(move || i * 3u64))
+            .map(|i| <DefaultNestedDualTaskSystem as SpawnableStackfulTaskSystem>::spawn(move || i * 3u64))
             .collect();
         let mut sum = 0u64;
         for h in handles {
@@ -380,7 +380,7 @@ fn block_on_cross_ult_wake() {
                     w.wake();
                     break;
                 }
-                <DefaultDualTaskSystem as ThreadSystem>::yield_now();
+                <DefaultDualTaskSystem as SpawnableStackfulTaskSystem>::yield_now();
             }
         });
 
@@ -712,7 +712,7 @@ fn float_regs_survive_yield() {
 }
 
 // ---------------------------------------------------------------------------
-// ThreadSystem implemented by hand (no UltIdentity blanket)
+// SpawnableStackfulTaskSystem implemented by hand (no UltIdentity blanket)
 // ---------------------------------------------------------------------------
 
 /// `UltIdentity`'s blanket impl is convenience, not architecture: everything
@@ -762,13 +762,13 @@ impl cmpth::StackfulWorkerSystem for ManualSystem {
     type SuspendedThread = BasicStackfulOnlyResumable<Self>;
 }
 
-impl ThreadSystem for ManualSystem {
+impl SpawnableStackfulTaskSystem for ManualSystem {
     fn yield_now() {
         use cmpth::resumable::common::worker::WorkerOps;
         use cmpth::resumable::stackful::worker::StackfulWorker;
         match UltWorker::<Self>::current() {
             Some(wk) => { wk.yield_now(); }
-            None => <OsSystem as ThreadSystem>::yield_now(),
+            None => <OsSystem as SpawnableStackfulTaskSystem>::yield_now(),
         }
     }
 
@@ -808,7 +808,7 @@ impl NestableSystem for ManualSystem {
 #[test]
 fn manual_impl_without_macro() {
     <ManualSystem as StackfulInitSystem>::builder().workers(2).run(|| {
-        let h = <ManualSystem as ThreadSystem>::spawn(|| 6 * 7u64);
+        let h = <ManualSystem as SpawnableStackfulTaskSystem>::spawn(|| 6 * 7u64);
         assert_eq!(JoinHandleLike::join(h), 42);
     });
 }
@@ -860,13 +860,13 @@ impl cmpth::StackfulWorkerSystem for PollerSystem {
     type SuspendedThread = BasicStackfulOnlyResumable<Self>;
 }
 
-impl ThreadSystem for PollerSystem {
+impl SpawnableStackfulTaskSystem for PollerSystem {
     fn yield_now() {
         use cmpth::resumable::common::worker::WorkerOps;
         use cmpth::resumable::stackful::worker::StackfulWorker;
         match UltWorker::<Self>::current() {
             Some(wk) => { wk.yield_now(); }
-            None => <OsSystem as ThreadSystem>::yield_now(),
+            None => <OsSystem as SpawnableStackfulTaskSystem>::yield_now(),
         }
     }
 

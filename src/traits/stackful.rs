@@ -1,4 +1,4 @@
-//! Stackful (real-ULT, blocking-call) interface: [`ThreadSystem`],
+//! Stackful (real-ULT, blocking-call) interface: [`SpawnableStackfulTaskSystem`],
 //! [`Delegator`], [`StackfulMutex`]/[`StackfulBarrier`],
 //! [`StackfulResumable`], [`Poller`], [`StackfulTaskSystem`].
 //!
@@ -21,7 +21,7 @@ pub use crate::traits::system::delegation::{Delegator, DelegationSystem};
 pub use crate::traits::system::nesting::NestableSystem;
 pub use crate::traits::system::scoped::ScopedStackfulTaskSystem;
 pub use crate::traits::system::stackful::{
-    JoinHandleLike, StackfulBuilder, StackfulInitSystem, ThreadSystem,
+    JoinHandleLike, StackfulBuilder, StackfulInitSystem, SpawnableStackfulTaskSystem,
 };
 pub use crate::traits::system::suspend::SuspendableSystem;
 pub use crate::traits::system::sync::{StackfulBarrier, StackfulMutex, StackfulSyncSystem};

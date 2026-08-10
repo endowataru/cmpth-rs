@@ -7,7 +7,7 @@
 //! (async-task capability).
 
 use crate::traits::common::TaskSystem;
-use crate::traits::stackful::{NestableSystem, ThreadSystem};
+use crate::traits::stackful::{NestableSystem, SpawnableStackfulTaskSystem};
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::external_queue::ExternalQueue;
 use crate::resumable::common::desc::{SuspendedTaskToken, TaskDescAlloc};
@@ -73,7 +73,7 @@ pub trait PoolSystem: Sized + Send + Sync + 'static {
 /// require it.
 pub trait WorkerSystem: PoolSystem {
     /// The threading system this scheduler runs on.
-    type Base: ThreadSystem + NestableSystem;
+    type Base: SpawnableStackfulTaskSystem + NestableSystem;
 
     /// The unit that goes on a worker run queue / the external queue. Every
     /// concrete system sets this to `SuspendedTaskToken<Self::Desc>` — kept
@@ -171,7 +171,7 @@ impl<S: WorkerSystem<SuspendedToken: RunnableItem<S>, Desc: ReclaimableDesc<S>>>
 /// Every `resumable`-backed system (stackful, stackless, or dual alike)
 /// assumes the same work-stealing scheduler underneath, so `TaskSystem` is
 /// blanket-derived here rather than implemented per flavor — one impl
-/// covers `ThreadSystem`'s (stackful) and `StacklessTaskSystem`'s
+/// covers `SpawnableStackfulTaskSystem`'s (stackful) and `StacklessTaskSystem`'s
 /// (stackless) supertrait requirement alike.
 ///
 /// Bounded on plain `WorkerSystem`, not `DescScheduler`:

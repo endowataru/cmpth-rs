@@ -5,7 +5,7 @@ use crate::traits::{Delegator as DelegatorTrait, DelegatorConsumer, Resumable, S
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::system::PoolSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::traits::{ThreadSystem, SuspendableSystem};
+use crate::traits::{SpawnableStackfulTaskSystem, SuspendableSystem};
 use crate::resumable::common::thread;
 use crate::resumable::stackful::thread::spawn;
 
@@ -13,12 +13,12 @@ use crate::resumable::stackful::thread::spawn;
 // DelegatorNode — content of each queue node
 // ---------------------------------------------------------------------------
 
-pub struct DelegatorNode<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+pub struct DelegatorNode<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     pub(super) sth:  <S as SuspendableSystem>::SuspendedThread,
     pub(super) work: C::Work,
 }
 
-impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>> Default for DelegatorNode<S, C> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>> Default for DelegatorNode<S, C> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     fn default() -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc {
         DelegatorNode { sth: Default::default(), work: Default::default() }
     }
@@ -29,7 +29,7 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
 // ---------------------------------------------------------------------------
 
 /// Queue backend for [`Delegator`].  Not part of the public API.
-pub trait SyncQueue<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>>: Send + Sync where <S as PoolSystem>::Desc: StackfulTaskDesc {
+pub trait SyncQueue<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>>: Send + Sync where <S as PoolSystem>::Desc: StackfulTaskDesc {
     /// Try to acquire the lock or enqueue.
     /// Returns `(is_locked, prev_node, cur_node)`.
     /// `prev_node` is null when the queue was empty (i.e. is_locked == true).
@@ -55,7 +55,7 @@ pub trait SyncQueue<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSyste
 // Delegator<S, C, Q>
 // ---------------------------------------------------------------------------
 
-pub struct Delegator<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+pub struct Delegator<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     queue:        Q,
     consumer:     std::cell::UnsafeCell<C>,
     consumer_sth: <S as SuspendableSystem>::SuspendedThread,
@@ -67,12 +67,12 @@ pub struct Delegator<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSyst
     consumer_started: AtomicBool,
 }
 
-unsafe impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Send
+unsafe impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Send
     for Delegator<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc {}
-unsafe impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Sync
+unsafe impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Sync
     for Delegator<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc {}
 
-impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default>
+impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default>
     Delegator<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc
 {
     pub fn new(consumer: C) -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc {
@@ -92,7 +92,7 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
 // Core algorithm (shared between MCS and ring-buffer variants)
 // ---------------------------------------------------------------------------
 
-impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Delegator<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Delegator<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     fn consumer(&self) -> &mut C where <S as PoolSystem>::Desc: StackfulTaskDesc {
         unsafe { &mut *self.consumer.get() }
     }
@@ -367,7 +367,7 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
 // Delegator impl
 // ---------------------------------------------------------------------------
 
-impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default + 'static>
+impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default + 'static>
     DelegatorTrait<S, C> for Delegator<S, C, Q>
 where
     <S as PoolSystem>::Desc: StackfulTaskDesc,

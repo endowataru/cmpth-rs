@@ -4,7 +4,7 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::traits::stackful::ThreadSystem;
+use crate::traits::stackful::SpawnableStackfulTaskSystem;
 use crate::resumable::common::desc::{SuspendedTaskToken, TaskDescCore};
 use crate::resumable::common::system::PoolSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
@@ -141,7 +141,7 @@ impl<D: crate::resumable::common::desc::TaskDescCore> ExternalWakeQueue<D> for P
     }
 }
 
-impl<S: StackfulSchedulerSystem + ThreadSystem> ExternalQueue<S> for PollerUltQueue<S::Desc>
+impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem> ExternalQueue<S> for PollerUltQueue<S::Desc>
 where
     S::Desc: crate::resumable::stackful::desc::StackfulTaskDesc,
 {

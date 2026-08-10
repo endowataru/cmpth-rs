@@ -31,7 +31,7 @@ use crate::resumable::stackful::sync::delegator::SyncQueue;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::system::PoolSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::traits::{ThreadSystem, SuspendableSystem};
+use crate::traits::{SpawnableStackfulTaskSystem, SuspendableSystem};
 use crate::resumable::common::thread;
 use crate::resumable::stackful::thread::spawn;
 
@@ -39,7 +39,7 @@ use crate::resumable::stackful::thread::spawn;
 // Inner
 // ---------------------------------------------------------------------------
 
-struct Inner<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>>
+struct Inner<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>>
 where
     <S as PoolSystem>::Desc: StackfulTaskDesc,
     <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>,
@@ -52,10 +52,10 @@ where
     consumer_th: std::cell::UnsafeCell<Option<thread::JoinHandle<S, ()>>>,
 }
 
-unsafe impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Send for Inner<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {}
-unsafe impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Sync for Inner<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {}
+unsafe impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Send for Inner<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {}
+unsafe impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Sync for Inner<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {}
 
-impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default> Inner<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
+impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default> Inner<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
     fn new(consumer: C) -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
         Inner {
             queue: Q::default(),
@@ -73,7 +73,7 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
 // delegator.rs (see that file's comments for the four-bugs-found history).
 // ---------------------------------------------------------------------------
 
-impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Inner<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
+impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Inner<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
     fn consumer(&self) -> &mut C where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
         unsafe { &mut *self.consumer.get() }
     }
@@ -286,7 +286,7 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
 // lock_wait() first.
 // ---------------------------------------------------------------------------
 
-impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Drop for Inner<S, C, Q>
+impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Drop for Inner<S, C, Q>
 where
     <S as PoolSystem>::Desc: StackfulTaskDesc,
     <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>,
@@ -311,15 +311,15 @@ where
 // Producer — Clone, mpsc::Sender-like
 // ---------------------------------------------------------------------------
 
-pub struct Producer<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>>(Arc<Inner<S, C, Q>>) where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>;
+pub struct Producer<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>>(Arc<Inner<S, C, Q>>) where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>;
 
-impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Clone for Producer<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
+impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Clone for Producer<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
     fn clone(&self) -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
         Producer(Arc::clone(&self.0))
     }
 }
 
-impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Producer<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
+impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Producer<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
     /// Runs `imm` inline if uncontended, otherwise delegates via `del` and
     /// waits for the result. Blocks only on the caller's own work; any
     /// backlog left behind by other callers is handed to the consumer ULT
@@ -352,7 +352,7 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
 /// [`crate::resumable::stackful::thread::spawn`]).
 pub fn delegator<S, C, Q>(consumer: C) -> Producer<S, C, Q>
 where
-    S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem,
+    S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem,
     C: DelegatorConsumer<S>,
     Q: SyncQueue<S, C> + Default + 'static,
     <S as PoolSystem>::Desc: StackfulTaskDesc,

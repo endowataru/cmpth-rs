@@ -1,6 +1,6 @@
 //! Pluggable task-descriptor pool.
 //!
-//! The [`DescPool`] trait makes the pooling strategy a per-`ThreadSystem`
+//! The [`DescPool`] trait makes the pooling strategy a per-`SpawnableStackfulTaskSystem`
 //! configuration axis.  Two implementations are provided:
 //!
 //! * [`SimplePool`] — per-worker free list with no cross-worker return.  The

@@ -35,7 +35,7 @@ and bounds memory.
 use cmpth::DefaultStackfulOnlyTaskSystem;
 use cmpth::traits::stackful::*;
 
-fn fib<S: ThreadSystem>(n: u64) -> u64 {
+fn fib<S: SpawnableStackfulTaskSystem>(n: u64) -> u64 {
     if n <= 1 { return n; }
     let h = S::spawn(move || fib::<S>(n - 1)); // child runs first; parent is stealable
     let r2 = fib::<S>(n - 2);                  // parent continues here (or on a thief)
@@ -51,7 +51,7 @@ fn main() {
 
 `DefaultStackfulOnlyTaskSystem` is cmpth's ready-made stackful system — see
 [Trait-based components](#trait-based-components-not-monoliths) below for
-why the example calls it through `S: ThreadSystem` rather than naming
+why the example calls it through `S: SpawnableStackfulTaskSystem` rather than naming
 `DefaultStackfulOnlyTaskSystem` inside `fib` itself. `cmpth::traits::stackful::*` /
 `cmpth::traits::stackless::*` pull in every trait for that model in one
 line, so you don't have to track down which single trait a given method
@@ -65,7 +65,7 @@ use cmpth::DefaultStackfulOnlyTaskSystem;
 use cmpth::traits::stackful::*;
 use std::sync::Arc;
 
-fn sum_concurrently<S: ThreadSystem + StackfulSyncSystem>(n: u64) -> u64 {
+fn sum_concurrently<S: SpawnableStackfulTaskSystem + StackfulSyncSystem>(n: u64) -> u64 {
     let total = Arc::new(S::Mutex::new(0u64));
     let handles: Vec<_> = (0..n)
         .map(|i| {
@@ -213,19 +213,19 @@ impl cmpth::UltIdentity for MySystem {
 is wired up exactly like `MySystem` above, just with `HeapStack`/`TlsCurrent`);
 `UltAsyncIdentity` does the same for a stackless-only system. Both are config
 traits — implement one for your own marker type and a blanket impl (written
-inside `cmpth`) supplies `SchedulerSystem`/`StackfulSchedulerSystem`/`ThreadSystem`.
+inside `cmpth`) supplies `SchedulerSystem`/`StackfulSchedulerSystem`/`SpawnableStackfulTaskSystem`.
 Both are shorthand for hand-writing the underlying trait implementations
 yourself — the escape hatch for when their fixed shape doesn't fit, since
 every component they wire up is a public trait you can implement directly.
 
-Every stackful system implements `ThreadSystem` directly, so schedulers
+Every stackful system implements `SpawnableStackfulTaskSystem` directly, so schedulers
 **nest**: set `type Base = MySystem` in a second system and it runs ULTs
 on top of ULTs. Nesting doubles as a correctness check for the abstraction
 boundaries — the same code must work at every level.
 
 All three models' traits share one root, `TaskSystem` — the declaration
 that a system provides an efficient (work-stealing) scheduler as its
-execution model. `ThreadSystem` (stackful spawn/join),
+execution model. `SpawnableStackfulTaskSystem` (stackful spawn/join),
 `StackfulInitSystem`/`StacklessInitSystem` (bracketing `run`/`run_async`
 via a `Builder`, plus standalone `init` on the stackful side — see
 [Standalone init](#standalone-init) below),
@@ -245,7 +245,7 @@ flags and spin-wait handshakes throughout the scheduler.
 ### Program against the trait, not the concrete system
 
 All three quickstart examples above already follow this rule: each `fib`
-is generic over a trait (`S: ThreadSystem`, `S: StacklessTaskSystem`, `S:
+is generic over a trait (`S: SpawnableStackfulTaskSystem`, `S: StacklessTaskSystem`, `S:
 ScopedStackfulTaskSystem`), and the concrete system
 (`DefaultStackfulOnlyTaskSystem`, `DefaultStacklessOnlyTaskSystem`,
 `ScopedTaskSystem`) only ever appears at the single "pick a system" call

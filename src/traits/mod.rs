@@ -1,7 +1,7 @@
 //! Interface traits — no implementations live here.
 //!
 //! Split by audience: [`system`] (what a library *user* calls — complete
-//! system interfaces like `ThreadSystem`/`StacklessTaskSystem`) vs.
+//! system interfaces like `SpawnableStackfulTaskSystem`/`StacklessTaskSystem`) vs.
 //! [`component`] (what an *implementer* plugs in to assemble one — task
 //! descriptors, resumable wait-slots, context-switch policies, TLS slots).
 //!
@@ -36,7 +36,7 @@ pub use system::block_on::BlockOnSystem;
 pub use system::bundle::StackfulTaskSystem;
 pub use system::delegation::{Delegator, DelegationSystem};
 pub use system::nesting::NestableSystem;
-pub use system::stackful::{JoinHandleLike, StackfulBuilder, StackfulInitSystem, ThreadSystem};
+pub use system::stackful::{JoinHandleLike, StackfulBuilder, StackfulInitSystem, SpawnableStackfulTaskSystem};
 pub use system::suspend::SuspendableSystem;
 pub use system::sync::{StackfulBarrier, StackfulMutex, StackfulSyncSystem};
 pub use system::stackless::{StacklessBuilder, StacklessInitSystem, StacklessTaskSystem};

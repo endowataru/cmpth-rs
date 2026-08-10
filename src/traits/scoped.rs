@@ -14,9 +14,9 @@
 //! an ordinary (if parallel) function call would. That's the same
 //! "nothing spawned here outlives this call" property `std::thread::scope`
 //! names after itself, just restricted to exactly two branches. This is a
-//! *stricter* constraint than [`ThreadSystem`](crate::ThreadSystem)'s
+//! *stricter* constraint than [`SpawnableStackfulTaskSystem`](crate::SpawnableStackfulTaskSystem)'s
 //! spawn/join (whose spawned task may outlive the caller) — so anything
-//! with `ThreadSystem`'s looser capability can trivially satisfy this one
+//! with `SpawnableStackfulTaskSystem`'s looser capability can trivially satisfy this one
 //! too (spawn one branch, run the other inline, join). See
 //! [`StackfulTaskSystem`](crate::traits::stackful::StackfulTaskSystem) for
 //! that blanket derivation.
@@ -31,10 +31,10 @@
 //! this mirrors — confirmed against rayon's own docs: `join`'s description
 //! never uses "fork-join"; `scope`'s does).
 //!
-//! Implemented directly (no `ThreadSystem`/`SchedulerSystem` involved) by
+//! Implemented directly (no `SpawnableStackfulTaskSystem`/`SchedulerSystem` involved) by
 //! [`crate::scoped`]'s standalone engine for systems that want *only* this
 //! capability, and blanket-derived for anything that already has
-//! `ThreadSystem`/[`StacklessTaskSystem`](crate::StacklessTaskSystem) — see
+//! `SpawnableStackfulTaskSystem`/[`StacklessTaskSystem`](crate::StacklessTaskSystem) — see
 //! [`crate::scoped`]'s docs for why the standalone engine stays independent
 //! of `resumable`'s `SchedulerSystem`/`UltWorker` machinery.
 

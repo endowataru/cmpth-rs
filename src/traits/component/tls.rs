@@ -11,7 +11,7 @@ use std::sync::atomic::AtomicUsize;
 /// lines for every system:
 ///
 /// ```ignore
-/// fn worker_tls() -> &'static <Self::Base as ThreadSystem>::ThreadSpecific<UltWorker<Self>> {
+/// fn worker_tls() -> &'static <Self::Base as SpawnableStackfulTaskSystem>::ThreadSpecific<UltWorker<Self>> {
 ///     static A: TlsAnchor = TlsAnchor::new();
 ///     TlsSlot::from_anchor(&A)
 /// }

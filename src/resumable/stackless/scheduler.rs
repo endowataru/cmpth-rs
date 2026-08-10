@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crate::traits::common::TlsSlot;
-use crate::traits::stackful::{JoinHandleLike, ThreadSystem};
+use crate::traits::stackful::{JoinHandleLike, SpawnableStackfulTaskSystem};
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::scheduler::{recursion_pool_threshold, worker_loop, Scheduler};
 use crate::resumable::common::pool::{DescPool, DynamicPool};

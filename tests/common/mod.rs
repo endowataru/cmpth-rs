@@ -7,7 +7,7 @@
 
 #![allow(dead_code)]
 
-use cmpth::{BlockOnSystem, DefaultDualTaskSystem, StackfulBuilder, StackfulInitSystem, ThreadSystem};
+use cmpth::{BlockOnSystem, DefaultDualTaskSystem, StackfulBuilder, StackfulInitSystem, SpawnableStackfulTaskSystem};
 
 pub fn run<F, R>(num_workers: usize, root: F) -> R
 where
@@ -20,7 +20,7 @@ where
     <DefaultDualTaskSystem as StackfulInitSystem>::builder().workers(num_workers).run(root)
 }
 
-pub fn spawn<T, F>(f: F) -> <DefaultDualTaskSystem as ThreadSystem>::JoinHandle<T>
+pub fn spawn<T, F>(f: F) -> <DefaultDualTaskSystem as SpawnableStackfulTaskSystem>::JoinHandle<T>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
@@ -31,7 +31,7 @@ where
 /// Spawn a `Future` as a stackless task from stackful ULT context, blocking
 /// until the spawn itself completes (not the task) and returning a handle
 /// that can be `.join()`ed like any other.
-pub fn spawn_async<T, F>(f: F) -> <DefaultDualTaskSystem as ThreadSystem>::JoinHandle<T>
+pub fn spawn_async<T, F>(f: F) -> <DefaultDualTaskSystem as SpawnableStackfulTaskSystem>::JoinHandle<T>
 where
     F: std::future::Future<Output = T> + Send + 'static,
     T: Send + 'static,

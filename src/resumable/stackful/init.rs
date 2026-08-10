@@ -71,7 +71,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crate::traits::common::TlsSlot;
-use crate::traits::stackful::{JoinHandleLike, ThreadSystem};
+use crate::traits::stackful::{JoinHandleLike, SpawnableStackfulTaskSystem};
 use crate::traits::system::stackful::{StackfulBuilder, StackfulInitSystem};
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::desc::{HasExternalQueue, RunningTaskToken, SuspendedTaskToken, TaskDescAlloc};
@@ -381,7 +381,7 @@ where
 
 /// [`StackfulBuilder`] implementation shared by every `resumable`-backed
 /// stackful system (blanket-derived in
-/// `resumable::stackful::system` for any `S: ThreadSystem +
+/// `resumable::stackful::system` for any `S: SpawnableStackfulTaskSystem +
 /// StackfulSchedulerSystem`).
 pub struct StackfulBuilderImpl<S> {
     num_workers: Option<usize>,
