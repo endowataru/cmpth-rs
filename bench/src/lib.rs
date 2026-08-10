@@ -75,7 +75,7 @@ pub struct CmpthBench;
 
 impl BenchSystem for CmpthBench {
     type JoinHandle<T: Send + 'static> =
-        <cmpth::DefaultDualTaskSystem as cmpth::ThreadSystem>::JoinHandle<T>;
+        <cmpth::DefaultDualTaskSystem as cmpth::SpawnableStackfulTaskSystem>::JoinHandle<T>;
 
     fn run(num_workers: usize, f: impl FnOnce() + Send + 'static) {
         use cmpth::{StackfulBuilder as _, StackfulInitSystem};
@@ -88,7 +88,7 @@ impl BenchSystem for CmpthBench {
     fn spawn<T: Send + 'static>(
         f: impl FnOnce() -> T + Send + 'static,
     ) -> Self::JoinHandle<T> {
-        use cmpth::ThreadSystem as _;
+        use cmpth::SpawnableStackfulTaskSystem as _;
         cmpth::DefaultDualTaskSystem::spawn(f)
     }
 }
@@ -101,7 +101,7 @@ impl BenchSystem for CmpthBench {
 // ---------------------------------------------------------------------------
 
 pub mod dual {
-    use cmpth::{BlockOnSystem, DefaultDualTaskSystem, StackfulBuilder, StackfulInitSystem, ThreadSystem};
+    use cmpth::{BlockOnSystem, DefaultDualTaskSystem, StackfulBuilder, StackfulInitSystem, SpawnableStackfulTaskSystem};
 
     pub fn run<F, R>(num_workers: usize, root: F) -> R
     where
@@ -112,7 +112,7 @@ pub mod dual {
         <DefaultDualTaskSystem as StackfulInitSystem>::builder().workers(num_workers).run(root)
     }
 
-    pub fn spawn<T, F>(f: F) -> <DefaultDualTaskSystem as ThreadSystem>::JoinHandle<T>
+    pub fn spawn<T, F>(f: F) -> <DefaultDualTaskSystem as SpawnableStackfulTaskSystem>::JoinHandle<T>
     where
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
@@ -120,7 +120,7 @@ pub mod dual {
         DefaultDualTaskSystem::spawn(f)
     }
 
-    pub fn spawn_async<T, F>(f: F) -> <DefaultDualTaskSystem as ThreadSystem>::JoinHandle<T>
+    pub fn spawn_async<T, F>(f: F) -> <DefaultDualTaskSystem as SpawnableStackfulTaskSystem>::JoinHandle<T>
     where
         F: std::future::Future<Output = T> + Send + 'static,
         T: Send + 'static,
@@ -144,7 +144,7 @@ pub struct StackfulOnlyBench;
 
 impl BenchSystem for StackfulOnlyBench {
     type JoinHandle<T: Send + 'static> =
-        <cmpth::DefaultStackfulOnlyTaskSystem as cmpth::ThreadSystem>::JoinHandle<T>;
+        <cmpth::DefaultStackfulOnlyTaskSystem as cmpth::SpawnableStackfulTaskSystem>::JoinHandle<T>;
 
     fn run(num_workers: usize, f: impl FnOnce() + Send + 'static) {
         use cmpth::{StackfulBuilder as _, StackfulInitSystem as _};
@@ -154,7 +154,7 @@ impl BenchSystem for StackfulOnlyBench {
     fn spawn<T: Send + 'static>(
         f: impl FnOnce() -> T + Send + 'static,
     ) -> Self::JoinHandle<T> {
-        use cmpth::ThreadSystem as _;
+        use cmpth::SpawnableStackfulTaskSystem as _;
         cmpth::DefaultStackfulOnlyTaskSystem::spawn(f)
     }
 }

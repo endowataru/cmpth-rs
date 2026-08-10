@@ -5,9 +5,9 @@ use std::task::Poll;
 use crate::traits::component::stackful::Poller;
 use crate::traits::system::TaskSystem;
 
-/// The `block_on` capability, split off from [`ThreadSystem`](crate::traits::system::stackful::ThreadSystem):
+/// The `block_on` capability, split off from [`SpawnableStackfulTaskSystem`](crate::traits::system::stackful::SpawnableStackfulTaskSystem):
 /// a system that only ever spawns/joins never needs a [`Poller`], so this
-/// stays a separate trait rather than a member of `ThreadSystem` itself.
+/// stays a separate trait rather than a member of `SpawnableStackfulTaskSystem` itself.
 pub trait BlockOnSystem: TaskSystem {
     /// Drives a single `block_on` call; the customisation point for async
     /// integration.  See [`Poller`].

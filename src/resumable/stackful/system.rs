@@ -6,7 +6,7 @@
 //!
 //! # Nesting
 //!
-//! Every `UltIdentity` implementor is a full `ThreadSystem`, so naming a
+//! Every `UltIdentity` implementor is a full `SpawnableStackfulTaskSystem`, so naming a
 //! second one as `Base` stacks one ULT scheduler on top of another without
 //! any extra boilerplate:
 //!
@@ -20,7 +20,7 @@
 
 use crate::traits::stackful::{
     BlockOnSystem, ContextPolicy, DelegationSystem, NestableSystem, StackfulSyncSystem,
-    SuspendableSystem, ThreadSystem,
+    SuspendableSystem, SpawnableStackfulTaskSystem,
 };
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::lookup::CurrentLookup;
@@ -186,16 +186,16 @@ impl<
 }
 
 // ---------------------------------------------------------------------------
-// Blanket ScopedStackfulTaskSystem/StackfulTaskSystem for every ThreadSystem
+// Blanket ScopedStackfulTaskSystem/StackfulTaskSystem for every SpawnableStackfulTaskSystem
 // ---------------------------------------------------------------------------
 
 /// `parallel_call`'s "nothing outlives this call" constraint is strictly
 /// stricter than `spawn`/`join`'s (a spawned task may outlive the caller),
-/// so anything with `ThreadSystem` capability trivially satisfies it too —
+/// so anything with `SpawnableStackfulTaskSystem` capability trivially satisfies it too —
 /// spawn `a`, run `b` inline, join. Same shape as
 /// `bench/src/lib.rs`'s `BenchSystem::par_join` default body, which this
 /// predates and mirrors.
-impl<S: ThreadSystem + StackfulSchedulerSystem> crate::traits::scoped::ScopedStackfulTaskSystem for S
+impl<S: SpawnableStackfulTaskSystem + StackfulSchedulerSystem> crate::traits::scoped::ScopedStackfulTaskSystem for S
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -206,7 +206,7 @@ where
         Ra: Send + 'static,
         Rb: Send + 'static,
     {
-        let h = <S as ThreadSystem>::spawn(a);
+        let h = <S as SpawnableStackfulTaskSystem>::spawn(a);
         let rb = b();
         (crate::traits::stackful::JoinHandleLike::join(h), rb)
     }
@@ -216,7 +216,7 @@ where
 /// replacing what used to be `ScopedStackfulTaskSystem::run` — same blanket
 /// condition as that trait's own impl just above, since both ultimately
 /// need the same "real ULTs on a real stack" capability.
-impl<S: ThreadSystem + StackfulSchedulerSystem> crate::traits::stackful::StackfulInitSystem for S
+impl<S: SpawnableStackfulTaskSystem + StackfulSchedulerSystem> crate::traits::stackful::StackfulInitSystem for S
 where
     S::Desc: StackfulTaskDesc,
     S: WorkerSystem<Worker = UltWorker<S>>,
@@ -229,11 +229,11 @@ where
     }
 }
 
-/// Empty bundle: `ThreadSystem` is implemented directly (via `UltIdentity`'s
+/// Empty bundle: `SpawnableStackfulTaskSystem` is implemented directly (via `UltIdentity`'s
 /// blanket impl or by hand); `ScopedStackfulTaskSystem` is blanket-derived
 /// from it just above. This impl just ties the four bounds together as one.
 impl<
-    S: crate::traits::scoped::ScopedStackfulTaskSystem + ThreadSystem + StackfulSyncSystem + BlockOnSystem,
+    S: crate::traits::scoped::ScopedStackfulTaskSystem + SpawnableStackfulTaskSystem + StackfulSyncSystem + BlockOnSystem,
 > crate::traits::stackful::StackfulTaskSystem for S
 {
 }
@@ -245,7 +245,7 @@ impl<
 /// Assembles a complete stackful-only ULT system from a handful of
 /// associated types — the config-trait replacement for what used to be the
 /// `ult_system!` macro. Implement this for your own marker type and a
-/// blanket `SchedulerSystem`/`StackfulSchedulerSystem`/`ThreadSystem` impl
+/// blanket `SchedulerSystem`/`StackfulSchedulerSystem`/`SpawnableStackfulTaskSystem` impl
 /// covers the rest.
 ///
 /// Not a generic struct (`UltSystem<Base, Ctx, ...>`) that callers would
@@ -273,7 +273,7 @@ impl<
 /// own `static`, anchored by its own function body.
 ///
 /// ```
-/// use cmpth::{ThreadSystem, NestableSystem, StackfulBuilder, StackfulInitSystem, JoinHandleLike};
+/// use cmpth::{SpawnableStackfulTaskSystem, NestableSystem, StackfulBuilder, StackfulInitSystem, JoinHandleLike};
 ///
 /// pub struct MySystem;
 ///
@@ -301,7 +301,7 @@ impl<
 /// const.
 pub trait UltIdentity: Sized + Send + Sync + 'static {
     /// The threading system this scheduler runs on.
-    type Base: ThreadSystem + NestableSystem;
+    type Base: SpawnableStackfulTaskSystem + NestableSystem;
 
     /// Context-switch implementation.
     type Ctx: ContextPolicy;
@@ -403,7 +403,7 @@ where
     type SuspendedThread = crate::resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>;
 }
 
-impl<M: UltIdentity + StackfulSchedulerSystem> ThreadSystem for M
+impl<M: UltIdentity + StackfulSchedulerSystem> SpawnableStackfulTaskSystem for M
 where
     <M as PoolSystem>::Desc: StackfulTaskDesc,
     M::Worker: crate::resumable::stackful::worker::StackfulWorker<M>,
@@ -413,7 +413,7 @@ where
         use crate::resumable::stackful::worker::StackfulWorker;
         match M::Worker::current() {
             Some(wk) => { wk.yield_now(); }
-            None => <<M as UltIdentity>::Base as ThreadSystem>::yield_now(),
+            None => <<M as UltIdentity>::Base as SpawnableStackfulTaskSystem>::yield_now(),
         }
     }
 

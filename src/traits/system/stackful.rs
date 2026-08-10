@@ -6,7 +6,7 @@ use crate::traits::system::TaskSystem;
 /// so that code which only wants `spawn` isn't forced to also supply a
 /// `Poller`, a `Mutex`, a `Barrier`, a `Delegator`, a TLS slot type, and a
 /// parked-continuation type.
-pub trait ThreadSystem: TaskSystem {
+pub trait SpawnableStackfulTaskSystem: TaskSystem {
     /// Spawn a new thread or ULT; returns a handle that can be joined.
     type JoinHandle<T: Send + 'static>: JoinHandleLike<T>;
     fn spawn<T, F>(f: F) -> Self::JoinHandle<T>
@@ -18,7 +18,7 @@ pub trait ThreadSystem: TaskSystem {
     fn yield_now();
 }
 
-/// Common interface for join handles returned by [`ThreadSystem::spawn`].
+/// Common interface for join handles returned by [`SpawnableStackfulTaskSystem::spawn`].
 pub trait JoinHandleLike<T: Send + 'static>: Send {
     fn join(self) -> T;
 }
@@ -40,7 +40,7 @@ pub trait JoinHandleLike<T: Send + 'static>: Send {
 /// of the scheduler loop, so the *caller's* continuation — not a
 /// separately-forked root task — is what keeps running).
 ///
-/// Blanket-derived for any `S: ThreadSystem + StackfulSchedulerSystem`
+/// Blanket-derived for any `S: SpawnableStackfulTaskSystem + StackfulSchedulerSystem`
 /// (`resumable::stackful::system`) — never implemented by hand for a
 /// `resumable`-backed system. [`crate::ScopedTaskSystem`] (the independent,
 /// non-`resumable` `parallel_call`-only engine) also implements it, using

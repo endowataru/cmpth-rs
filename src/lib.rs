@@ -6,8 +6,8 @@
 //! implemented by a concrete struct.  Three layers:
 //!
 //! * **`traits/`** — interface layer, no implementations:
-//!   [`ThreadSystem`], [`traits::Resumable`], [`traits::StackfulMutex`], [`traits::StackfulBarrier`], …
-//! * **`resumable/`** — implementation layer (parametric over [`ThreadSystem`])
+//!   [`SpawnableStackfulTaskSystem`], [`traits::Resumable`], [`traits::StackfulMutex`], [`traits::StackfulBarrier`], …
+//! * **`resumable/`** — implementation layer (parametric over [`SpawnableStackfulTaskSystem`])
 //!   for schedulers whose defining property is that a spawned computation's
 //!   *continuation* is reified into something independently resumable
 //!   later (a real context-switch continuation for stackful ULTs, a
@@ -19,8 +19,8 @@
 //! * **`lib.rs`** — instantiations: [`DefaultDualTaskSystem`], [`DefaultNestedDualTaskSystem`],
 //!   [`DefaultStackfulOnlyTaskSystem`], [`DefaultStacklessOnlyTaskSystem`].
 //!
-//! Every stackful system implements [`ThreadSystem`] directly, so schedulers
-//! nest: set `type Base = DefaultDualTaskSystem` in a second `ThreadSystem`
+//! Every stackful system implements [`SpawnableStackfulTaskSystem`] directly, so schedulers
+//! nest: set `type Base = DefaultDualTaskSystem` in a second `SpawnableStackfulTaskSystem`
 //! implementation to run ULTs on top of ULTs.
 
 pub mod traits;
@@ -30,7 +30,7 @@ pub mod interchange;
 pub mod resumable;
 pub mod scoped;
 
-pub use traits::{BarrierWaitResult, BlockOnSystem, CondTransfer, Context, ContextPolicy, DelegationSystem, DelegatorConsumer, Delegator, DualBarrier, DualMutex, HandoffTaskDesc, JoinHandleLike, NestableSystem, Poller, Resumable, ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, StackfulBuilder, StackfulInitSystem, StackfulResumable, StackfulSyncSystem, StacklessBuilder, StacklessInitSystem, StacklessSyncSystem, SuspendableSystem, TaskDesc, TaskExitSink, TaskSystem, TlsAnchor, TlsSlot, ThreadSystem, Transfer, WakerTaskDesc};
+pub use traits::{BarrierWaitResult, BlockOnSystem, CondTransfer, Context, ContextPolicy, DelegationSystem, DelegatorConsumer, Delegator, DualBarrier, DualMutex, HandoffTaskDesc, JoinHandleLike, NestableSystem, Poller, Resumable, ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, StackfulBuilder, StackfulInitSystem, StackfulResumable, StackfulSyncSystem, StacklessBuilder, StacklessInitSystem, StacklessSyncSystem, SuspendableSystem, TaskDesc, TaskExitSink, TaskSystem, TlsAnchor, TlsSlot, SpawnableStackfulTaskSystem, Transfer, WakerTaskDesc};
 pub use scoped::ScopedTaskSystem;
 pub use os::{available_parallelism, OsBarrier, OsCondvar, OsMutex, OsPoller, OsSystem, OsTls};
 pub use resumable::stackful::context::NativeContext;
@@ -64,12 +64,12 @@ pub use resumable::stackful::worker::ContextSwitcher;
 
 // Both default systems host stackless spawn_async-style tasks (the
 // blanket `StacklessTaskSystem` impl, automatic for any async-capable
-// `SchedulerSystem`) as well as stackful ULTs (`ThreadSystem`), and their
+// `SchedulerSystem`) as well as stackful ULTs (`SpawnableStackfulTaskSystem`), and their
 // `Mutex`/`Barrier` are meant to be contended-together from either
 // calling convention -- so `UltIdentity` (whose blanket-derived `Mutex`/
 // `Barrier` use the stackful-only `BasicStackfulOnlyResumable`, with no
 // async-wait capability) isn't used here. Everything it would have
-// generated is written out by hand instead, with `ThreadSystem::Mutex`/
+// generated is written out by hand instead, with `SpawnableStackfulTaskSystem::Mutex`/
 // `Barrier` bound to a `DualResumable`-parameterized `DualMutex`/
 // `DualBarrier`: since `DualResumable<S>` implements both
 // `StackfulResumable` and `StacklessResumable` (unlike `UltIdentity`'s
@@ -120,12 +120,12 @@ impl resumable::stackful::system::StackfulWorkerSystem for DefaultDualTaskSystem
     }
 }
 
-impl ThreadSystem for DefaultDualTaskSystem {
+impl SpawnableStackfulTaskSystem for DefaultDualTaskSystem {
     fn yield_now() {
         use resumable::stackful::worker::StackfulWorker;
         match UltWorker::<Self>::current() {
             Some(wk) => { wk.yield_now(); }
-            None => <<Self as WorkerSystem>::Base as ThreadSystem>::yield_now(),
+            None => <<Self as WorkerSystem>::Base as SpawnableStackfulTaskSystem>::yield_now(),
         }
     }
 
@@ -200,12 +200,12 @@ impl resumable::stackful::system::StackfulWorkerSystem for DefaultNestedDualTask
     }
 }
 
-impl ThreadSystem for DefaultNestedDualTaskSystem {
+impl SpawnableStackfulTaskSystem for DefaultNestedDualTaskSystem {
     fn yield_now() {
         use resumable::stackful::worker::StackfulWorker;
         match UltWorker::<Self>::current() {
             Some(wk) => { wk.yield_now(); }
-            None => <<Self as WorkerSystem>::Base as ThreadSystem>::yield_now(),
+            None => <<Self as WorkerSystem>::Base as SpawnableStackfulTaskSystem>::yield_now(),
         }
     }
 
@@ -312,7 +312,7 @@ pub type DefaultStacklessOnlyTaskSystem = UltAsyncSystem<DefaultStacklessOnlyMar
 // ---------------------------------------------------------------------------
 
 pub mod system {
-    pub use crate::traits::{JoinHandleLike, StackfulBarrier, StackfulMutex, ThreadSystem};
+    pub use crate::traits::{JoinHandleLike, StackfulBarrier, StackfulMutex, SpawnableStackfulTaskSystem};
     pub use crate::os::{OsBarrier, OsCondvar, OsMutex, OsSystem};
 
     pub type WssSystem = crate::DefaultDualTaskSystem;

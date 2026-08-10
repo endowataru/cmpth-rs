@@ -10,7 +10,7 @@ pub mod sync;
 
 /// Declares that a system provides an efficient (work-stealing) scheduler
 /// as its execution model — the shared foundation both
-/// [`ThreadSystem`](crate::traits::system::stackful::ThreadSystem) (spawn/join) and
+/// [`SpawnableStackfulTaskSystem`](crate::traits::system::stackful::SpawnableStackfulTaskSystem) (spawn/join) and
 /// the `scoped` family (`ScopedStackfulTaskSystem`/`ScopedStacklessTaskSystem`,
 /// in [`crate::traits::system::scoped`]) build on: both assume the same efficient
 /// scheduling underneath, just expose different capabilities on top of it.

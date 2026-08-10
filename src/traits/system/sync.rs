@@ -115,7 +115,7 @@ pub trait DualMutex<T: Send>: StackfulMutex<T> + StacklessMutex<T> {}
 impl<T: Send, M: StackfulMutex<T> + StacklessMutex<T>> DualMutex<T> for M {}
 
 /// The stackful mutex/barrier capability, split off from
-/// [`ThreadSystem`](crate::traits::system::stackful::ThreadSystem) so a
+/// [`SpawnableStackfulTaskSystem`](crate::traits::system::stackful::SpawnableStackfulTaskSystem) so a
 /// system that only wants `spawn`/`join` never has to name a `Mutex` or
 /// `Barrier` type.
 pub trait StackfulSyncSystem: TaskSystem {

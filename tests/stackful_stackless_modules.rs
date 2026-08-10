@@ -25,7 +25,7 @@ fn stackful_module_unlocks_lock_and_wait() {
         let r = b.wait();
         assert!(r.is_leader());
 
-        // ThreadSystem/ThreadSystem also in scope via the same bulk import.
+        // SpawnableStackfulTaskSystem/SpawnableStackfulTaskSystem also in scope via the same bulk import.
         assert!(DefaultDualTaskSystem::num_workers() >= 1);
     });
 }

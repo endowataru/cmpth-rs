@@ -4,7 +4,7 @@ use crate::traits::system::TaskSystem;
 use crate::traits::system::scoped::ScopedStacklessTaskSystem;
 
 /// `S::spawn(...)`/`S::recurse(...)` — the stackless counterpart of
-/// [`ThreadSystem`](crate::traits::system::stackful::ThreadSystem): a
+/// [`SpawnableStackfulTaskSystem`](crate::traits::system::stackful::SpawnableStackfulTaskSystem): a
 /// capability every [`SchedulerSystem`](crate::resumable::common::system::SchedulerSystem)
 /// with an async-capable descriptor gets automatically (see the blanket
 /// impl in [`resumable::stackless::system`](crate::resumable::stackless::system)),
@@ -74,13 +74,13 @@ pub trait StacklessTaskSystem: ScopedStacklessTaskSystem {
     /// its own.
     ///
     /// Deliberately shares its name with
-    /// [`ThreadSystem::yield_now`](crate::traits::system::stackful::ThreadSystem::yield_now)
+    /// [`SpawnableStackfulTaskSystem::yield_now`](crate::traits::system::stackful::SpawnableStackfulTaskSystem::yield_now)
     /// (the stackful, synchronous, whole-ULT-suspending version) rather than
     /// being renamed to dodge the collision — on a dual system
     /// implementing both traits, calling `Concrete::yield_now()` is
     /// ambiguous by design (same resolution as `spawn` above) and must be
     /// disambiguated with `<Concrete as StacklessTaskSystem>::yield_now()`
-    /// / `<Concrete as ThreadSystem>::yield_now()`; a generic caller
+    /// / `<Concrete as SpawnableStackfulTaskSystem>::yield_now()`; a generic caller
     /// bounded by only one of the two traits never sees the ambiguity.
     fn yield_now() -> impl Future<Output = ()>;
 }

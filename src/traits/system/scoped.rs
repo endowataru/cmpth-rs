@@ -27,7 +27,7 @@ pub trait ScopedStackfulTaskSystem: TaskSystem {
     /// this returns, so borrowing the caller's own stack data is sound —
     /// see `scoped::sync_engine`'s `borrows_non_static_data` test), but a
     /// system blanket-derived from
-    /// [`ThreadSystem`](crate::ThreadSystem) satisfies this via
+    /// [`SpawnableStackfulTaskSystem`](crate::SpawnableStackfulTaskSystem) satisfies this via
     /// `spawn`+`join`, and a plain (non-scoped) `spawn` can never promise a
     /// task won't outlive its caller — the type system has no way to know
     /// this particular spawned task always gets joined before returning.

@@ -11,7 +11,7 @@
 use std::future::Future;
 use std::marker::PhantomData;
 
-use crate::traits::stackful::{NestableSystem, ThreadSystem};
+use crate::traits::stackful::{NestableSystem, SpawnableStackfulTaskSystem};
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::system::{PoolSystem, SchedulerSystem, WorkerSystem};
@@ -197,7 +197,7 @@ where
 /// has none. Its only entry points are
 /// [`crate::resumable::stackless::scheduler::run_async`] (run) and
 /// [`crate::resumable::stackless::thread::spawn_async`] (spawn); there is no
-/// `spawn`, no `block_on`, no `ThreadSystem` impl at all for it (that
+/// `spawn`, no `block_on`, no `SpawnableStackfulTaskSystem` impl at all for it (that
 /// requires stackful capability this system deliberately doesn't have).
 ///
 /// This system's `RunnableItem` impl (`resumable::stackless::worker`) is
@@ -214,7 +214,7 @@ where
 ///
 /// ```
 /// use cmpth::SuspendedTaskToken;
-/// use cmpth::{NestableSystem, StacklessBuilder, StacklessInitSystem, StacklessTaskSystem, ThreadSystem};
+/// use cmpth::{NestableSystem, StacklessBuilder, StacklessInitSystem, StacklessTaskSystem, SpawnableStackfulTaskSystem};
 ///
 /// pub struct MyAsyncMarker;
 ///
@@ -239,7 +239,7 @@ where
 /// ```
 pub trait UltAsyncIdentity: Sized + Send + Sync + 'static {
     /// The threading system this scheduler runs on.
-    type Base: ThreadSystem + NestableSystem;
+    type Base: SpawnableStackfulTaskSystem + NestableSystem;
 
     /// Task descriptor type. Most implementors want
     /// [`StacklessOnlyTaskDesc<UltAsyncSystem<Self>>`](crate::resumable::stackless::desc::StacklessOnlyTaskDesc)

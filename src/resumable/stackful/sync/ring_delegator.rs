@@ -5,7 +5,7 @@ use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::system::PoolSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::stackful::worker::StackfulWorker;
-use crate::traits::{ThreadSystem, SuspendableSystem};
+use crate::traits::{SpawnableStackfulTaskSystem, SuspendableSystem};
 use crate::resumable::common::worker::WorkerOps;
 
 use super::delegator::{Delegator, DelegatorNode, SyncQueue};
@@ -14,23 +14,23 @@ use super::delegator::{Delegator, DelegatorNode, SyncQueue};
 // RingBufQueue
 // ---------------------------------------------------------------------------
 
-pub struct RingBufQueue<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, const N: usize> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+pub struct RingBufQueue<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, const N: usize> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     head:  AtomicUsize,
     tail:  AtomicUsize,
     nodes: Box<[RingSlot<S, C>; N]>,
 }
 
-struct RingSlot<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+struct RingSlot<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     ready: AtomicBool,
     node:  std::cell::UnsafeCell<DelegatorNode<S, C>>,
 }
 
-unsafe impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, const N: usize> Send
+unsafe impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, const N: usize> Send
     for RingBufQueue<S, C, N> where <S as PoolSystem>::Desc: StackfulTaskDesc {}
-unsafe impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, const N: usize> Sync
+unsafe impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, const N: usize> Sync
     for RingBufQueue<S, C, N> where <S as PoolSystem>::Desc: StackfulTaskDesc {}
 
-impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, const N: usize> Default
+impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, const N: usize> Default
     for RingBufQueue<S, C, N> where <S as PoolSystem>::Desc: StackfulTaskDesc
 {
     fn default() -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc {
@@ -52,7 +52,7 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
     }
 }
 
-impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, const N: usize> RingBufQueue<S, C, N> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, const N: usize> RingBufQueue<S, C, N> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     fn mask(idx: usize) -> usize where <S as PoolSystem>::Desc: StackfulTaskDesc { idx & (N - 1) }
 
     fn slot_node(&self, idx: usize) -> *mut DelegatorNode<S, C> where <S as PoolSystem>::Desc: StackfulTaskDesc {
@@ -60,7 +60,7 @@ impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: Delegator
     }
 }
 
-impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, const N: usize> SyncQueue<S, C>
+impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, const N: usize> SyncQueue<S, C>
     for RingBufQueue<S, C, N>
 where
     <S as PoolSystem>::Desc: StackfulTaskDesc,
@@ -142,7 +142,7 @@ where
     }
 }
 
-impl<S: StackfulSchedulerSystem + ThreadSystem + SuspendableSystem, C: DelegatorConsumer<S>, const N: usize> RingBufQueue<S, C, N> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, const N: usize> RingBufQueue<S, C, N> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     fn slot_index(&self, node: *mut DelegatorNode<S, C>) -> usize where <S as PoolSystem>::Desc: StackfulTaskDesc {
         let base = self.nodes[0].node.get() as usize;
         let size = std::mem::size_of::<RingSlot<S, C>>();

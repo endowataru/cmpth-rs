@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use cmpth::{
     BlockOnSystem, DefaultStackfulOnlyTaskSystem, JoinHandleLike, ScopedStackfulTaskSystem,
-    StackfulBuilder, StackfulInitSystem, ThreadSystem,
+    StackfulBuilder, StackfulInitSystem, SpawnableStackfulTaskSystem,
 };
 
 #[test]
@@ -76,7 +76,7 @@ fn yield_now_roundtrips() {
 
 // ---------------------------------------------------------------------------
 // block_on — exercises ResumablePoller's actual park/wake path, not just the
-// always-ready case (see `traits::stackful::ThreadSystem::block_on`'s
+// always-ready case (see `traits::stackful::SpawnableStackfulTaskSystem::block_on`'s
 // doctest, which only ever polls `async { 6 * 7 }` once and never parks).
 // ---------------------------------------------------------------------------
 

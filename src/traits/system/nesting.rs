@@ -2,8 +2,8 @@ use crate::traits::component::tls::TlsSlot;
 use crate::traits::system::TaskSystem;
 
 /// A system that can host a nested scheduler on top of it — the capability
-/// a nested `ThreadSystem`'s `worker_tls` needs from its `Base`. Split off
-/// from [`ThreadSystem`](crate::traits::system::stackful::ThreadSystem) so a
+/// a nested `SpawnableStackfulTaskSystem`'s `worker_tls` needs from its `Base`. Split off
+/// from [`SpawnableStackfulTaskSystem`](crate::traits::system::stackful::SpawnableStackfulTaskSystem) so a
 /// system that is never used as a nesting base doesn't need to name a
 /// `ThreadSpecific` slot type.
 pub trait NestableSystem: TaskSystem {

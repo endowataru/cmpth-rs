@@ -1,4 +1,4 @@
-//! `OsSystem`: the bottom-level implementation of [`ThreadSystem`], backed directly
+//! `OsSystem`: the bottom-level implementation of [`SpawnableStackfulTaskSystem`], backed directly
 //! by OS threads (`std::thread` + `std::sync`).  Every ULT scheduler is
 //! parameterized by a base system; `OsSystem` is the base of the first level.
 
@@ -12,7 +12,7 @@ use crate::traits::common::{Resumable, TaskSystem, TlsSlot};
 use crate::traits::component::stackful::noop_waker;
 use crate::traits::stackful::{
     BlockOnSystem, DelegationSystem, JoinHandleLike, NestableSystem, StackfulSyncSystem,
-    SuspendableSystem, ThreadSystem,
+    SuspendableSystem, SpawnableStackfulTaskSystem,
 };
 
 // ---------------------------------------------------------------------------
@@ -64,7 +64,7 @@ impl TaskSystem for OsSystem {
     }
 }
 
-impl ThreadSystem for OsSystem {
+impl SpawnableStackfulTaskSystem for OsSystem {
     fn yield_now() {
         std::thread::yield_now();
     }

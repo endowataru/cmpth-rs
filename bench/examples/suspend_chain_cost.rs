@@ -72,9 +72,9 @@ fn measure_build_and_run(depth: usize, iters: u64) -> f64 {
 }
 
 /// Real stackful ULT context switch cost: two ULTs ping-ponging via
-/// `ThreadSystem::yield_now`, `iters` round trips total.
+/// `SpawnableStackfulTaskSystem::yield_now`, `iters` round trips total.
 fn measure_stackful_switch(iters: u64) -> f64 {
-    use cmpth::{DefaultStackfulOnlyTaskSystem, StackfulBuilder, StackfulInitSystem, ThreadSystem};
+    use cmpth::{DefaultStackfulOnlyTaskSystem, StackfulBuilder, StackfulInitSystem, SpawnableStackfulTaskSystem};
     let counter = Arc::new(AtomicU64::new(0));
     let start = Instant::now();
     DefaultStackfulOnlyTaskSystem::builder().workers(2).run(move || {

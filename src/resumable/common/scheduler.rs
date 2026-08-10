@@ -7,7 +7,7 @@ use std::alloc::Layout;
 use std::sync::atomic::Ordering;
 
 use crate::traits::common::TlsSlot;
-use crate::traits::stackful::ThreadSystem;
+use crate::traits::stackful::SpawnableStackfulTaskSystem;
 use crate::resumable::common::deque::{Steal, WorkerRunQueue};
 use crate::resumable::common::external_queue::ExternalQueue;
 use crate::resumable::common::system::{RunnableItem, SchedulerSystem, WorkerSystem};

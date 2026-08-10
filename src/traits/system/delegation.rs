@@ -1,5 +1,5 @@
 use crate::traits::component::delegation::DelegatorConsumer;
-use crate::traits::system::stackful::ThreadSystem;
+use crate::traits::system::stackful::SpawnableStackfulTaskSystem;
 use crate::traits::system::suspend::SuspendableSystem;
 
 /// Delegator: a queue-based lock that serialises hardware access and batches
@@ -32,7 +32,7 @@ pub trait Delegator<S: SuspendableSystem, C: DelegatorConsumer<S>>:
 /// Everything needed to host a [`Delegator`]: `spawn`/`join` (the consumer
 /// runs as a real thread/ULT) plus a `SuspendedThread` type (what a
 /// delegating caller parks on).
-pub trait DelegationSystem: ThreadSystem + SuspendableSystem {
+pub trait DelegationSystem: SpawnableStackfulTaskSystem + SuspendableSystem {
     /// Delegator type for this system.
     type Delegator<C: DelegatorConsumer<Self>>: Delegator<Self, C>;
 }

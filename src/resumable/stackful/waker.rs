@@ -42,7 +42,7 @@ use std::task::{Context, RawWaker, RawWakerVTable, Waker};
 
 use crate::traits::Poller;
 use crate::traits::component::stackful::noop_waker;
-use crate::traits::stackful::ThreadSystem;
+use crate::traits::stackful::SpawnableStackfulTaskSystem;
 use crate::resumable::stackless::desc::WakerTaskDesc;
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::system::PoolSystem;
@@ -52,7 +52,7 @@ use crate::resumable::common::worker::WorkerOps;
 use crate::resumable::stackful::worker::StackfulWorker;
 
 // ---------------------------------------------------------------------------
-// Vtable singletons (one per concrete ThreadSystem type S)
+// Vtable singletons (one per concrete SpawnableStackfulTaskSystem type S)
 // ---------------------------------------------------------------------------
 
 struct PrivateVtable<S>(PhantomData<S>);
