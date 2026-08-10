@@ -417,7 +417,14 @@ impl<S: WorkerSystem> UltWorker<S> {
 impl<S: WorkerSystem> TaskPool<S> for UltWorker<S> {
     fn alloc_task(&self, has_handle: bool) -> SuspendedTaskToken<S::Desc> {
         let shared = self.shared();
-        shared.task_pool.alloc(self.num, has_handle, shared.stack_size)
+        let ptr = shared.task_pool.alloc(self.num, has_handle, shared.stack_size);
+        // SAFETY: `ptr` was just freshly allocated by `DescPool::alloc`
+        // (fresh memory, or a pool slot reinitialized with no live token
+        // pointing at it) — trivially exclusive. This is the one place
+        // that wraps it: `DescPool` itself stays raw-pointer-based since
+        // it's a pluggable `traits/component/` trait that must not have to
+        // name this crate's own `SuspendedTaskToken`.
+        unsafe { SuspendedTaskToken::from_raw(ptr) }
     }
 
     unsafe fn free_task(&self, desc: *mut S::Desc) {
@@ -429,7 +436,9 @@ impl<S: WorkerSystem> TaskPool<S> for UltWorker<S> {
 
 impl<S: WorkerSystem> AsyncTaskPool<S> for UltWorker<S> {
     fn alloc_async_task(&self, has_handle: bool, size: usize) -> SuspendedTaskToken<S::Desc> {
-        self.shared().async_task_pool.alloc(self.num, has_handle, size)
+        let ptr = self.shared().async_task_pool.alloc(self.num, has_handle, size);
+        // SAFETY: same reasoning as `TaskPool::alloc_task` above.
+        unsafe { SuspendedTaskToken::from_raw(ptr) }
     }
 
     unsafe fn free_async_task(&self, desc: *mut S::Desc) {
