@@ -10,7 +10,6 @@ use std::future::Future;
 
 use crate::traits::{
     ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, StackfulBuilder, StackfulInitSystem,
-    TaskSystem,
 };
 
 use super::sync_engine::SyncInit;
@@ -22,20 +21,15 @@ use super::{async_engine, sync_engine};
 /// `sync_engine`) for the duration of that call/guard.
 pub struct ScopedTaskSystem;
 
-impl TaskSystem for ScopedTaskSystem {
-    /// Checks both engines' thread-locals (only one is ever populated at a
-    /// time — `run`/`run_async` never overlap in the same call tree) and
-    /// falls back to `0`/`1` outside either, matching
-    /// `resumable`'s `TaskSystem` blanket's `UltWorker::current() ==
-    /// None` fallback.
-    fn worker_num() -> usize {
-        sync_engine::current_worker_num().or_else(async_engine::current_worker_num).unwrap_or(0)
-    }
-
-    fn num_workers() -> usize {
-        sync_engine::current_num_workers().or_else(async_engine::current_num_workers).unwrap_or(1)
-    }
-}
+// `TaskSystem for ScopedTaskSystem` is no longer hand-written here: it is
+// blanket-derived (`resumable::common::system`) now that `ScopedTaskSystem`
+// is a genuine `WorkerSystem`, exactly like every `resumable`-engine
+// flavor. `S::Worker::current()` (i.e. `ScopedWorker::current()`) reads the
+// same shared `worker_tls()` slot both `sync_engine` and `async_engine` set
+// while driving a worker (only one of the two is ever active on a given OS
+// thread at once — `run`/`run_async` never overlap in the same call tree),
+// so this needs no special-casing to check two separate thread-locals the
+// way the old hand-written impl did.
 
 impl ScopedStackfulTaskSystem for ScopedTaskSystem {
     fn parallel_call<Fa, Fb, Ra, Rb>(a: Fa, b: Fb) -> (Ra, Rb)

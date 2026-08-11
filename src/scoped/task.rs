@@ -48,7 +48,7 @@ impl Latch {
 /// `SuspendedTaskToken<D>`, but pointing at a stack value instead of a pooled
 /// descriptor.
 #[derive(Clone, Copy)]
-pub(super) struct TaskRef {
+pub struct TaskRef {
     pub(super) data: *const (),
     execute_fn: unsafe fn(*const ()),
 }

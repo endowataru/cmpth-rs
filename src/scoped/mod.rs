@@ -10,17 +10,21 @@
 //! spawned here outlives this call" property `std::thread::scope` names
 //! itself after, just restricted to exactly two branches.
 //!
-//! Deliberately *not* built on [`crate::resumable`]'s `SchedulerSystem`/
-//! `UltWorker` machinery: a `parallel_call` branch is represented as a
-//! plain value on the caller's own native stack frame (`task::TaskRef`),
-//! with a single-purpose completion latch, not a separately allocated,
-//! pooled task descriptor with a general join-protocol. That's what makes
-//! the common (unstolen) path cheap — see
-//! `docs/stackless-perf-investigation.md`'s measurements of the original
-//! `fork_join` prototype this replaces (~6-7x faster than
+//! Shares [`crate::resumable::common::system::WorkerSystem`]'s worker-pool
+//! machinery (`WorkerRunQueue`/`CurrentLookup`/`WorkerOps`/`LocalQueue` —
+//! see `worker.rs`) with the `resumable` engine, but deliberately *not*
+//! [`PoolSystem`](crate::resumable::common::system::PoolSystem)/`UltWorker`:
+//! a `parallel_call` branch is represented as a plain value on the caller's
+//! own native stack frame (`task::TaskRef`), with a single-purpose
+//! completion latch, not a separately allocated, pooled task descriptor
+//! with a general join-protocol. That's what makes the common (unstolen)
+//! path cheap — see `docs/stackless-perf-investigation.md`'s measurements
+//! of the original `fork_join` prototype this replaces (~6-7x faster than
 //! `spawn`/`spawn_async` on `fib`, because only the handful of calls that
 //! actually get stolen ever pay for deque/latch/help-first machinery at
-//! all).
+//! all). Integrating the worker pool without integrating task
+//! representation/pooling is exactly what `docs/traits-redesign.md`§11
+//! item 9 and `docs/design-vision.md`§4.1 call for.
 //!
 //! Two independent engines share `task::TaskRef`'s stack-resident,
 //! type-erased task representation:
@@ -37,6 +41,7 @@ mod async_engine;
 mod sync_engine;
 mod system;
 mod task;
+mod worker;
 
 pub use system::ScopedTaskSystem;
 // `SyncInit` is `ScopedTaskSystem`'s `StackfulInitSystem::Init` — a public

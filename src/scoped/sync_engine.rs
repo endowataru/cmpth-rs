@@ -19,90 +19,71 @@
 //! the handful of calls a steal actually happens to — the other 99.999%+
 //! degrade to two ordinary nested function calls plus one uncontended local
 //! deque push/pop.
+//!
+//! # Worker-pool machinery
+//!
+//! Bring-up/teardown/idle-loop reuse [`ScopedWorker`]/[`ScopedRegistry`]
+//! (`super::worker`) — the same `WorkerRunQueue`/`WorkerOps`/`LocalQueue`
+//! machinery `resumable`'s `Scheduler<S>`/`worker_idle_loop` use, not a
+//! bespoke deque/thread-local pair. Only `parallel_call` itself (the hot
+//! path this module exists for) stays engine-specific — dispatch elsewhere
+//! is structurally identical to `resumable::common::scheduler::worker_idle_loop`,
+//! just without a task-pool/external-queue axis to check (`scoped` has
+//! none).
 
-use crossbeam_deque::{Injector, Steal, Stealer, Worker as Deque};
-use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use super::task::{StackTask, TaskRef};
+use crate::resumable::common::deque::Steal;
+use crate::resumable::common::system::WorkerSystem;
+use crate::resumable::common::worker::{LocalQueue, WorkerOps};
+use crate::traits::stackful::SpawnableStackfulTaskSystem;
+
+use super::system::ScopedTaskSystem;
+use super::task::StackTask;
+use super::worker::{ScopedRegistry, ScopedWorker};
 
 // ---------------------------------------------------------------------------
-// Registry / worker context
+// Worker lookup / idle dispatch
 // ---------------------------------------------------------------------------
-
-struct Registry {
-    stealers: Vec<Stealer<TaskRef>>,
-    injector: Injector<TaskRef>,
-    shutdown: AtomicBool,
-}
-
-struct WorkerContext {
-    index: usize,
-    deque: Deque<TaskRef>,
-    registry: Arc<Registry>,
-}
-
-thread_local! {
-    static CURRENT: Cell<*const WorkerContext> = const { Cell::new(std::ptr::null()) };
-}
-
-fn current_context() -> &'static WorkerContext {
-    let p = CURRENT.with(|c| c.get());
-    assert!(!p.is_null(), "cmpth: scoped::parallel_call called outside scoped::run");
-    unsafe { &*p }
-}
-
-/// Non-panicking counterpart of [`current_context`], for `TaskSystem`'s
-/// `worker_num`/`num_workers` (which must report *something* even when
-/// called from outside a worker, unlike `parallel_call`/`run`).
-fn try_current_context() -> Option<&'static WorkerContext> {
-    let p = CURRENT.with(|c| c.get());
-    if p.is_null() { None } else { Some(unsafe { &*p }) }
-}
-
-pub(crate) fn current_worker_num() -> Option<usize> {
-    try_current_context().map(|wk| wk.index)
-}
-
-pub(crate) fn current_num_workers() -> Option<usize> {
-    try_current_context().map(|wk| wk.registry.stealers.len())
-}
 
 /// Try to make progress once: pop our own local task, else steal from
-/// another worker, else check the global injector. Returns `false` if
-/// nothing was found anywhere right now. Shared by the idle worker loop
-/// and `parallel_call`'s help-while-waiting loop — the same "what do I do
-/// when I have nothing of my own to run" logic either way.
-fn try_execute_one(wk: &WorkerContext) -> bool {
-    if let Some(task) = wk.deque.pop() {
+/// another worker. Returns `false` if nothing was found anywhere right now.
+/// Shared by the idle worker loop and `parallel_call`'s help-while-waiting
+/// loop — the same "what do I do when I have nothing of my own to run"
+/// logic either way. Mirrors
+/// [`worker_idle_loop`](crate::resumable::common::scheduler::worker_idle_loop)'s
+/// body, minus the task-pool/external-queue checks `scoped` has none of.
+fn try_execute_one(wk: &ScopedWorker) -> bool {
+    if let Some(task) = wk.try_pop() {
         unsafe { task.execute() };
         return true;
     }
-    let n = wk.registry.stealers.len();
-    for off in 1..n {
-        let i = (wk.index + off) % n;
-        loop {
-            match wk.registry.stealers[i].steal() {
-                Steal::Success(task) => {
-                    unsafe { task.execute() };
-                    return true;
-                }
-                Steal::Empty => break,
-                Steal::Retry => continue,
-            }
+    if let Steal::Success(task) = wk.try_steal() {
+        unsafe { task.execute() };
+        return true;
+    }
+    false
+}
+
+/// The idle/dispatch loop every worker OS thread (other than the one
+/// driving `run`'s root task inline) runs until shutdown.
+fn worker_idle_loop(wk: &ScopedWorker, registry: &ScopedRegistry) {
+    let mut idle_rounds = 0u32;
+    while !registry.finished.load(Ordering::Acquire) {
+        if try_execute_one(wk) {
+            idle_rounds = 0;
+            continue;
+        }
+        std::hint::spin_loop();
+        idle_rounds += 1;
+        if idle_rounds & 0x3F == 0 {
+            <ScopedTaskSystem as WorkerSystem>::Base::yield_now();
         }
     }
-    loop {
-        match wk.registry.injector.steal() {
-            Steal::Success(task) => {
-                unsafe { task.execute() };
-                return true;
-            }
-            Steal::Empty => return false,
-            Steal::Retry => continue,
-        }
-    }
+    // Drain anything left so a straggler steal doesn't miss work pushed
+    // just before shutdown was observed.
+    while try_execute_one(wk) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -123,14 +104,14 @@ where
     Ra: Send,
     Rb: Send,
 {
-    let wk = current_context();
+    let wk = ScopedWorker::current().expect("cmpth: scoped::parallel_call called outside scoped::run");
     let task_b = StackTask::new(b);
     let task_ref = task_b.as_task_ref();
-    wk.deque.push(task_ref);
+    wk.push(task_ref);
 
     let ra = a();
 
-    let rb = match wk.deque.pop() {
+    let rb = match wk.try_pop() {
         Some(popped) if std::ptr::eq(popped.data, task_ref.data) => {
             // Not stolen: finish it ourselves, one plain call — the whole
             // point. No latch, no steal-side traffic at all.
@@ -142,7 +123,7 @@ where
             // from `task_b` itself) — but if something else somehow came
             // back, put it back rather than dropping work.
             if let Some(other) = popped {
-                wk.deque.push(other);
+                wk.push(other);
             }
             // Stolen: help execute other stealable work while waiting.
             while !task_b.latch.probe() {
@@ -189,54 +170,43 @@ where
 /// crate-private; same opaque-struct shape as
 /// [`resumable::stackful::init::StackfulInit`](crate::resumable::stackful::init::StackfulInit).
 pub struct SyncInit {
-    // Heap-allocated so `CURRENT` (a raw pointer) stays valid no matter how
-    // this guard itself gets moved around by its caller after `init`
-    // returns it.
-    ctx0: Box<WorkerContext>,
-    registry: Arc<Registry>,
+    registry: Arc<ScopedRegistry>,
     handles: Vec<std::thread::JoinHandle<()>>,
 }
 
 pub(crate) fn init(num_workers: usize) -> SyncInit {
     assert!(num_workers >= 1, "need at least one worker");
     assert!(
-        try_current_context().is_none(),
+        ScopedWorker::current().is_none(),
         "cmpth: nested scoped::init() of the same engine on one thread"
     );
 
-    let deques: Vec<Deque<TaskRef>> = (0..num_workers).map(|_| Deque::new_lifo()).collect();
-    let stealers: Vec<Stealer<TaskRef>> = deques.iter().map(|d| d.stealer()).collect();
-    let registry = Arc::new(Registry { stealers, injector: Injector::new(), shutdown: AtomicBool::new(false) });
+    let workers: Vec<ScopedWorker> = (0..num_workers).map(ScopedWorker::new).collect();
+    let stealers = workers.iter().map(ScopedWorker::deque_stealer).collect();
+    let registry = Arc::new(ScopedRegistry {
+        workers: workers.into_boxed_slice(),
+        stealers,
+        finished: std::sync::atomic::AtomicBool::new(false),
+    });
+    for w in registry.workers.iter() {
+        w.bind_registry(Arc::as_ptr(&registry));
+    }
 
-    let mut deques = deques.into_iter();
-    let worker0_deque = deques.next().unwrap();
-
-    let handles: Vec<_> = deques
-        .enumerate()
-        .map(|(i, deque)| {
-            let idx = i + 1;
+    let handles: Vec<_> = (1..num_workers)
+        .map(|idx| {
             let registry = Arc::clone(&registry);
             std::thread::spawn(move || {
-                let ctx = WorkerContext { index: idx, deque, registry };
-                CURRENT.with(|c| c.set(&ctx as *const _));
-                loop {
-                    if try_execute_one(&ctx) {
-                        continue;
-                    }
-                    if ctx.registry.shutdown.load(Ordering::Acquire) {
-                        break;
-                    }
-                    std::hint::spin_loop();
-                }
-                while try_execute_one(&ctx) {}
+                let wk = &registry.workers[idx];
+                super::worker::set_current(wk as *const ScopedWorker);
+                worker_idle_loop(wk, &registry);
+                super::worker::set_current(std::ptr::null());
             })
         })
         .collect();
 
-    let ctx0 = Box::new(WorkerContext { index: 0, deque: worker0_deque, registry: Arc::clone(&registry) });
-    CURRENT.with(|c| c.set(ctx0.as_ref() as *const _));
+    super::worker::set_current(&registry.workers[0] as *const ScopedWorker);
 
-    SyncInit { ctx0, registry, handles }
+    SyncInit { registry, handles }
 }
 
 impl Drop for SyncInit {
@@ -247,12 +217,13 @@ impl Drop for SyncInit {
         // no suspended continuation to resume), so unlike the stackful ULT
         // initializer this has no panic-across-switch hazard: an ordinary
         // `Drop` while unwinding is perfectly sound here.
-        while try_execute_one(&self.ctx0) {}
-        self.registry.shutdown.store(true, Ordering::Release);
+        let wk0 = &self.registry.workers[0];
+        while try_execute_one(wk0) {}
+        self.registry.finished.store(true, Ordering::Release);
         for h in self.handles.drain(..) {
             h.join().expect("cmpth: parallel_call worker thread panicked");
         }
-        CURRENT.with(|c| c.set(std::ptr::null()));
+        super::worker::set_current(std::ptr::null());
     }
 }
 
@@ -265,49 +236,42 @@ where
     R: Send,
 {
     assert!(num_workers >= 1, "need at least one worker");
-    let deques: Vec<Deque<TaskRef>> = (0..num_workers).map(|_| Deque::new_lifo()).collect();
-    let stealers: Vec<Stealer<TaskRef>> = deques.iter().map(|d| d.stealer()).collect();
-    let registry = Arc::new(Registry { stealers, injector: Injector::new(), shutdown: AtomicBool::new(false) });
+    let workers: Vec<ScopedWorker> = (0..num_workers).map(ScopedWorker::new).collect();
+    let stealers = workers.iter().map(ScopedWorker::deque_stealer).collect();
+    let registry = Arc::new(ScopedRegistry {
+        workers: workers.into_boxed_slice(),
+        stealers,
+        finished: std::sync::atomic::AtomicBool::new(false),
+    });
+    for w in registry.workers.iter() {
+        w.bind_registry(Arc::as_ptr(&registry));
+    }
 
-    let mut deques = deques.into_iter();
-    let worker0_deque = deques.next().unwrap();
-
-    let handles: Vec<_> = deques
-        .enumerate()
-        .map(|(i, deque)| {
-            let idx = i + 1;
+    let handles: Vec<_> = (1..num_workers)
+        .map(|idx| {
             let registry = Arc::clone(&registry);
             std::thread::spawn(move || {
-                let ctx = WorkerContext { index: idx, deque, registry };
-                CURRENT.with(|c| c.set(&ctx as *const _));
-                loop {
-                    if try_execute_one(&ctx) {
-                        continue;
-                    }
-                    if ctx.registry.shutdown.load(Ordering::Acquire) {
-                        break;
-                    }
-                    std::hint::spin_loop();
-                }
-                // Drain anything left so a straggler steal doesn't miss
-                // work pushed just before shutdown was observed.
-                while try_execute_one(&ctx) {}
+                let wk = &registry.workers[idx];
+                super::worker::set_current(wk as *const ScopedWorker);
+                worker_idle_loop(wk, &registry);
+                super::worker::set_current(std::ptr::null());
             })
         })
         .collect();
 
     let root = StackTask::new(f);
     let root_ref = root.as_task_ref();
-    let ctx0 = WorkerContext { index: 0, deque: worker0_deque, registry: Arc::clone(&registry) };
-    CURRENT.with(|c| c.set(&ctx0 as *const _));
+    let wk0 = &registry.workers[0];
+    super::worker::set_current(wk0 as *const ScopedWorker);
     // Run the root task directly — no steal-check needed for the very first
     // one, nobody else has had a chance to touch it yet.
     unsafe { root_ref.execute() };
 
-    registry.shutdown.store(true, Ordering::Release);
+    registry.finished.store(true, Ordering::Release);
     for h in handles {
         h.join().expect("cmpth: parallel_call worker thread panicked");
     }
+    super::worker::set_current(std::ptr::null());
 
     root.take_result()
 }
