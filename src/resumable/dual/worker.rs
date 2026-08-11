@@ -8,8 +8,8 @@
 //! machinery this builds on.
 
 use crate::resumable::common::deque::WorkerRunQueue;
-use crate::resumable::common::worker::{AsyncTaskPool, TaskPool, UltWorker};
-use crate::resumable::common::system::{ReclaimableDesc, RunnableItem, WorkerSystem};
+use crate::resumable::common::worker::{AsyncTaskPool, DescWorkerOps, TaskPool, UltWorker};
+use crate::resumable::common::system::{PoolSystem, ReclaimableDesc, RunnableItem, WorkerSystem};
 use crate::resumable::stackful::system::StackfulWorkerSystem;
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulLocalQueue};
 use crate::resumable::common::desc::SuspendedTaskToken;
@@ -52,8 +52,9 @@ use crate::resumable::stackless::desc::AsyncTaskDesc;
 impl<S> RunnableItem<S> for SuspendedTaskToken<DualTaskDesc<S>>
 where
     S: StackfulWorkerSystem
-        + WorkerSystem<SuspendedToken = SuspendedTaskToken<<S as crate::resumable::common::system::PoolSystem>::Desc>, Desc = DualTaskDesc<S>>,
-    S::Worker: ContextSwitcher<S> + StackfulLocalQueue<S> + AsyncTaskPool<S>,
+        + WorkerSystem<SuspendedToken = SuspendedTaskToken<<S as PoolSystem>::Desc>>
+        + PoolSystem<Desc = DualTaskDesc<S>>,
+    S::Worker: ContextSwitcher<S> + StackfulLocalQueue<S> + AsyncTaskPool<S> + DescWorkerOps<S>,
 {
     fn run_on(self, wk: &S::Worker) {
         let desc = self.desc();
@@ -84,8 +85,10 @@ where
 /// neither `StackfulWorkerSystem` nor `StackfulTaskDesc`.
 pub fn pop_or_root_dual<S>(wk: &UltWorker<S>) -> SuspendedTaskToken<S::Desc>
 where
-    S: WorkerSystem,
+    S: WorkerSystem + PoolSystem,
     S::Desc: AsyncTaskDesc,
+    SuspendedTaskToken<S::Desc>: From<S::SuspendedToken>,
+    S::SuspendedToken: From<SuspendedTaskToken<S::Desc>>,
 {
     if let Some(c) = wk.deque.try_pop() {
         let c: SuspendedTaskToken<S::Desc> = c.into();
@@ -103,7 +106,7 @@ where
 
 /// Async tasks go through `S::AsyncPool` (a separate pool from the
 /// ULT-stack `S::Pool`, see
-/// [`PoolSystem::AsyncPool`](crate::resumable::common::system::PoolSystem::AsyncPool));
+/// [`PoolSystem::AsyncPool`]);
 /// everything else goes through the ULT-stack pool as usual.
 ///
 /// Bound: plain [`WorkerSystem`], `Desc` pinned directly (not via
@@ -113,9 +116,9 @@ where
 /// needs the separate `S::Worker: AsyncTaskPool<S>` bound stated below (not a
 /// `WorkerOps` supertrait) — so this needs neither `Worker = UltWorker<S>`
 /// nor any fold of `SchedulerSystem`.
-impl<S: WorkerSystem<Desc = DualTaskDesc<S>>> ReclaimableDesc<S> for DualTaskDesc<S>
+impl<S: WorkerSystem + PoolSystem<Desc = DualTaskDesc<S>>> ReclaimableDesc<S> for DualTaskDesc<S>
 where
-    S::Worker: AsyncTaskPool<S>,
+    S::Worker: AsyncTaskPool<S> + TaskPool<S>,
 {
     unsafe fn reclaim(wk: &S::Worker, desc: *mut Self) {
         // SAFETY: `desc` is finished (about to be freed) — `TaskDesc::join_state`'s

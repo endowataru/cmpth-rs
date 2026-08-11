@@ -48,7 +48,7 @@ use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::system::PoolSystem;
 use crate::resumable::common::waker::{self, WakeOutcome, desc_from_erased, drop_shared, push_continuation};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::worker::WorkerOps;
+use crate::resumable::common::worker::{DescWorkerOps, WorkerOps};
 use crate::resumable::stackful::worker::StackfulWorker;
 
 // ---------------------------------------------------------------------------
@@ -109,7 +109,7 @@ pub struct UltPoller<S: StackfulSchedulerSystem> where <S as PoolSystem>::Desc: 
 impl<S: StackfulSchedulerSystem> Poller for UltPoller<S>
 where
     <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc,
-    S::Worker: StackfulWorker<S>,
+    S::Worker: StackfulWorker<S> + DescWorkerOps<S>,
 {
     fn new() -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc + WakerTaskDesc {
         match S::Worker::current() {

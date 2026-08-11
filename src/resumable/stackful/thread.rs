@@ -14,7 +14,7 @@ use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::common::desc::{HasExternalQueue, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskExitSink};
 use crate::resumable::stackful::desc::{HasCtx, StackfulTaskDesc};
-use crate::resumable::common::worker::{LocalQueue, TaskPool, WorkerOps};
+use crate::resumable::common::worker::{DescWorkerOps, LocalQueue, TaskPool, WorkerOps};
 use crate::resumable::stackful::worker::{ContextSwitcher, StackfulWorker};
 
 // ---------------------------------------------------------------------------
@@ -30,7 +30,7 @@ use crate::resumable::stackful::worker::{ContextSwitcher, StackfulWorker};
 pub fn spawn<S, T, F>(f: F) -> JoinHandle<S, T>
 where
     S: StackfulSchedulerSystem,
-    S::Worker: ContextSwitcher<S>,
+    S::Worker: ContextSwitcher<S> + DescWorkerOps<S>,
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
     <S as PoolSystem>::Desc: StackfulTaskDesc,
@@ -103,6 +103,7 @@ impl<'a, S: StackfulSchedulerSystem, T: Send + 'static> TaskExitSink<S::Desc>
     for ExitWithResultSink<'a, S, T>
 where
     <S as PoolSystem>::Desc: StackfulTaskDesc,
+    S::Worker: TaskPool<S>,
 {
     fn resume(&self, cont: <S::Desc as TaskDesc>::Suspended) {
         self.wk.push(cont.into());
@@ -137,7 +138,7 @@ fn exit_with_result<S: StackfulSchedulerSystem, T: Send + 'static>(
 ) -> !
 where
     <S as PoolSystem>::Desc: StackfulTaskDesc,
-    S::Worker: StackfulWorker<S>,
+    S::Worker: StackfulWorker<S> + TaskPool<S>,
 {
     let desc_ptr = desc as *const S::Desc as *mut S::Desc;
     if let Some(j_token) = desc.try_take_handoff_target() {

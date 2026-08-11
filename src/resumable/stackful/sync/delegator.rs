@@ -122,6 +122,8 @@ impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSyste
     where
         <S as PoolSystem>::Desc: StackfulTaskDesc,
         <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>,
+        S::Worker: crate::resumable::stackful::worker::ContextSwitcher<S>
+            + crate::resumable::common::worker::DescWorkerOps<S>,
     {
         if self.consumer_started.load(Ordering::Acquire) {
             return;
@@ -372,6 +374,8 @@ impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSyste
 where
     <S as PoolSystem>::Desc: StackfulTaskDesc,
     <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>,
+    S::Worker: crate::resumable::stackful::worker::ContextSwitcher<S>
+        + crate::resumable::common::worker::DescWorkerOps<S>,
 {
     fn start(consumer: C) -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc {
         let del = Self::new(consumer);

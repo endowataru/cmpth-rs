@@ -23,7 +23,7 @@ pub trait StackfulOnlyResumableCore: Send + Default
 where
     <Self::StackfulWorkerSystem as PoolSystem>::Desc: crate::resumable::stackful::desc::StackfulTaskDesc,
 {
-    type StackfulWorkerSystem: StackfulWorkerSystem;
+    type StackfulWorkerSystem: StackfulWorkerSystem + PoolSystem;
 
     /// Access the raw continuation slot.
     ///
@@ -64,7 +64,11 @@ where
 /// switch here — the slot can only ever hold a real continuation, unlike
 /// `DualResumable`, which may hold an async waiter and has to fall back to
 /// a plain wake internally.
-impl<T: StackfulOnlyResumableCore> Resumable<T::StackfulWorkerSystem> for T {
+impl<T: StackfulOnlyResumableCore> Resumable<T::StackfulWorkerSystem> for T
+where
+    <T::StackfulWorkerSystem as WorkerSystem>::SuspendedToken:
+        From<SuspendedTaskToken<<T::StackfulWorkerSystem as PoolSystem>::Desc>>,
+{
     fn is_set(&self) -> bool {
         self.cont().is_set(Ordering::Acquire)
     }
@@ -136,24 +140,24 @@ where
 /// [`StackfulOnlyResumableCore`] by providing just the `cont()` accessor;
 /// all behaviour comes from the blanket [`Resumable`]/[`StackfulResumable`]
 /// impls above.
-pub struct BasicStackfulOnlyResumable<S: StackfulWorkerSystem> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+pub struct BasicStackfulOnlyResumable<S: StackfulWorkerSystem + PoolSystem> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     cont: AtomicSlot<SuspendedTaskToken<S::Desc>>,
     _marker: PhantomData<S>,
 }
 
-unsafe impl<S: StackfulWorkerSystem> Send for BasicStackfulOnlyResumable<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {}
+unsafe impl<S: StackfulWorkerSystem + PoolSystem> Send for BasicStackfulOnlyResumable<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {}
 
-impl<S: StackfulWorkerSystem> Default for BasicStackfulOnlyResumable<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulWorkerSystem + PoolSystem> Default for BasicStackfulOnlyResumable<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     fn default() -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc { Self::new() }
 }
 
-impl<S: StackfulWorkerSystem> BasicStackfulOnlyResumable<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulWorkerSystem + PoolSystem> BasicStackfulOnlyResumable<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     pub const fn new() -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc {
         BasicStackfulOnlyResumable { cont: AtomicSlot::empty(), _marker: PhantomData }
     }
 }
 
-impl<S: StackfulWorkerSystem> StackfulOnlyResumableCore for BasicStackfulOnlyResumable<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulWorkerSystem + PoolSystem> StackfulOnlyResumableCore for BasicStackfulOnlyResumable<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     type StackfulWorkerSystem = S;
     fn cont(&self) -> &AtomicSlot<SuspendedTaskToken<S::Desc>> where <S as PoolSystem>::Desc: StackfulTaskDesc { &self.cont }
 }

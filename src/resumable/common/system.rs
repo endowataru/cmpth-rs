@@ -71,29 +71,41 @@ pub trait PoolSystem: Sized + Send + Sync + 'static {
 /// ([`RunnableItem::run_on`]/[`ReclaimableDesc::reclaim`]), which now lives
 /// off `SchedulerSystem` entirely, on capability traits that must not
 /// require it.
-pub trait WorkerSystem: PoolSystem {
+///
+/// Deliberately **not** a supertrait of [`PoolSystem`] (nor the reverse):
+/// nothing here — `Base`/`SuspendedToken`/`RunQueue`/`Lookup`/`Worker`/
+/// `worker_tls` — ever names `Self::Desc` or any other `PoolSystem`
+/// associated type. The two are independent axes ("how do I find/drive a
+/// worker" vs. "how are task descriptors allocated/pooled") that happen to
+/// both be required by every `resumable`-engine flavor (stackful/stackless/
+/// dual), which fold them together explicitly at
+/// [`SchedulerSystem`]/[`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem)/
+/// [`StacklessSchedulerSystem`](crate::resumable::stackless::system::StacklessSchedulerSystem) —
+/// but a worker-pool-only system with no pooled descriptor concept at all
+/// (`scoped`'s stack-resident `TaskRef`,
+/// which becomes `Self::SuspendedToken` directly, never a `Desc`) can
+/// implement `WorkerSystem` alone, with no `PoolSystem` in sight. This is
+/// what makes the `SuspendedToken`/`Worker` axes genuinely swappable rather
+/// than merely declared as such — see `docs/traits-redesign.md`§11 item 9.
+pub trait WorkerSystem: Sized + Send + Sync + 'static {
     /// The threading system this scheduler runs on.
     type Base: SpawnableStackfulTaskSystem + NestableSystem;
 
-    /// The unit that goes on a worker run queue / the external queue. Every
-    /// concrete system sets this to `SuspendedTaskToken<Self::Desc>` — kept
-    /// as its own associated type (rather than folding it into `RunQueue`'s
-    /// bound directly) so [`WorkerRunQueue`] and [`ExternalQueue`] stay
-    /// generic over "whatever this system moves through them," with no need
-    /// to name `SuspendedTaskToken`/`Self::Desc` themselves.
+    /// The unit that goes on a worker run queue / the external queue. A
+    /// `resumable`-engine flavor (stackful/stackless/dual) sets this to
+    /// `SuspendedTaskToken<Self::Desc>`; `scoped` sets it directly to its
+    /// own stack-resident `TaskRef` — no
+    /// `PoolSystem`/`Desc` involved at all, since `WorkerSystem` doesn't
+    /// require one. Kept as its own associated type (rather than folding it
+    /// into `RunQueue`'s bound directly) so [`WorkerRunQueue`] stays generic
+    /// over "whatever this system moves through it."
     ///
-    /// The `Into`/`From` bounds let call sites cross between this opaque
-    /// type and the crate's own concrete `SuspendedTaskToken<Self::Desc>`
-    /// (e.g. a token freshly built from a raw descriptor pointer, or one
-    /// pulled out of `ExternalQueue::try_pop`, which is declared at the
-    /// `PoolSystem` level and so can only speak the concrete type) without
-    /// pinning the two equal — every concrete system today sets
-    /// `SuspendedToken = SuspendedTaskToken<Self::Desc>` as a literal type
-    /// alias, so both bounds are satisfied for free by `std`'s blanket
-    /// `impl<T> From<T> for T`.
-    type SuspendedToken: Send
-        + Into<SuspendedTaskToken<Self::Desc>>
-        + From<SuspendedTaskToken<Self::Desc>>;
+    /// For `resumable`-flavor systems, [`SchedulerSystem`] additionally nests
+    /// `Into<SuspendedTaskToken<Self::Desc>> + From<SuspendedTaskToken<Self::Desc>>`
+    /// on this same associated type — not required here, since a bare
+    /// `WorkerSystem` (like `scoped`'s) may have no `Self::Desc` to convert
+    /// to/from at all.
+    type SuspendedToken: Send;
 
     /// Work-stealing run queue implementation. `+ Default` here (rather than
     /// as a [`WorkerRunQueue`] supertrait) so that trait's contract stays
@@ -160,9 +172,24 @@ pub trait ReclaimableDesc<S: WorkerSystem> {
 /// allocator: a stackless-only system has no real stack to switch into, so
 /// requiring one here would force it to name machinery it never uses. See
 /// [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem) for the stackful extension.
-pub trait SchedulerSystem: WorkerSystem<SuspendedToken: RunnableItem<Self>, Desc: ReclaimableDesc<Self>> {}
+pub trait SchedulerSystem:
+    WorkerSystem<
+        SuspendedToken: RunnableItem<Self>
+                            + Into<SuspendedTaskToken<<Self as PoolSystem>::Desc>>
+                            + From<SuspendedTaskToken<<Self as PoolSystem>::Desc>>,
+    > + PoolSystem<Desc: ReclaimableDesc<Self>>
+{
+}
 
-impl<S: WorkerSystem<SuspendedToken: RunnableItem<S>, Desc: ReclaimableDesc<S>>> SchedulerSystem for S {}
+impl<
+    S: WorkerSystem<
+            SuspendedToken: RunnableItem<S>
+                                + Into<SuspendedTaskToken<<S as PoolSystem>::Desc>>
+                                + From<SuspendedTaskToken<<S as PoolSystem>::Desc>>,
+        > + PoolSystem<Desc: ReclaimableDesc<S>>,
+> SchedulerSystem for S
+{
+}
 
 // ---------------------------------------------------------------------------
 // Blanket TaskSystem for every WorkerSystem

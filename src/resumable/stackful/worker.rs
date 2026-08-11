@@ -12,7 +12,7 @@ use std::ptr;
 use crate::traits::stackful::{CondTransfer, Context, ContextPolicy, Transfer};
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, WorkerOps};
-use crate::resumable::common::system::{ReclaimableDesc, RunnableItem, WorkerSystem};
+use crate::resumable::common::system::{PoolSystem, ReclaimableDesc, RunnableItem, WorkerSystem};
 use crate::resumable::stackful::system::StackfulWorkerSystem;
 use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, TaskDescCore};
 use crate::interchange::Transferred;
@@ -36,7 +36,7 @@ use crate::resumable::stackful::desc::{StackfulOnlyTaskDesc, StackfulTaskDesc};
 /// concrete impl below (for [`UltWorker<S>`]) needs no `Worker` pin at all —
 /// every method is `Self`-typed (`Self` is already the concrete `UltWorker<S>`
 /// because that's the impl's own target), so `S::Worker` is never named.
-pub trait ContextSwitcher<S: StackfulWorkerSystem>: Sized
+pub trait ContextSwitcher<S: StackfulWorkerSystem + PoolSystem>: Sized
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -79,7 +79,7 @@ where
 /// Root-continuation management: only meaningful when there is a real
 /// scheduler-loop stack a suspending ULT can fall back into. Worker-layer
 /// (`S: StackfulWorkerSystem`), same reasoning as [`ContextSwitcher`].
-pub trait StackfulLocalQueue<S: StackfulWorkerSystem>: LocalQueue<S>
+pub trait StackfulLocalQueue<S: StackfulWorkerSystem + PoolSystem>: LocalQueue<S>
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -99,10 +99,11 @@ where
 
 /// Scheduler-level operations that only make sense with a real, switchable
 /// stack: suspending the calling ULT and resuming whatever's next.
-pub trait StackfulWorker<S: StackfulWorkerSystem>:
+pub trait StackfulWorker<S: StackfulWorkerSystem + PoolSystem>:
     WorkerOps<S> + ContextSwitcher<S> + StackfulLocalQueue<S>
 where
     S::Desc: StackfulTaskDesc,
+    S::SuspendedToken: From<SuspendedTaskToken<S::Desc>>,
 {
     /// Suspend to the next continuation from the local deque / root.
     fn suspend_to_sched<F>(&self, f: F) -> &Self
@@ -162,7 +163,8 @@ where
 /// happens here, so `S::Ctx` is never named) or `S::Desc: StackfulTaskDesc`.
 pub fn pop_or_root_stackful<S>(wk: &UltWorker<S>) -> SuspendedTaskToken<S::Desc>
 where
-    S: WorkerSystem,
+    S: WorkerSystem + PoolSystem,
+    SuspendedTaskToken<S::Desc>: From<S::SuspendedToken>,
 {
     if let Some(c) = wk.deque.try_pop() {
         return c.into();
@@ -196,7 +198,7 @@ where
 /// broke unrelated obligations on the same concrete descriptor, such as
 /// `DualTaskDesc`'s `HasPollFn`, once pinned), so there is nothing left to
 /// pin it *against*.
-impl<S: StackfulWorkerSystem + WorkerSystem<Desc = StackfulOnlyTaskDesc<S>>>
+impl<S: StackfulWorkerSystem + PoolSystem<Desc = StackfulOnlyTaskDesc<S>>>
     RunnableItem<S> for SuspendedTaskToken<StackfulOnlyTaskDesc<S>>
 where
     S::Worker: ContextSwitcher<S> + StackfulLocalQueue<S>,
@@ -214,7 +216,10 @@ where
 /// `DescScheduler`) — `wk.free_task` only needs `TaskPool<S>`, reachable
 /// through `S::Worker: WorkerOps<S>` alone, so this needs neither `Worker =
 /// UltWorker<S>` nor any fold of `SchedulerSystem`.
-impl<S: WorkerSystem<Desc = StackfulOnlyTaskDesc<S>>> ReclaimableDesc<S> for StackfulOnlyTaskDesc<S> {
+impl<S: WorkerSystem + PoolSystem<Desc = StackfulOnlyTaskDesc<S>>> ReclaimableDesc<S> for StackfulOnlyTaskDesc<S>
+where
+    S::Worker: TaskPool<S>,
+{
     unsafe fn reclaim(wk: &S::Worker, desc: *mut Self) {
         unsafe { wk.free_task(desc) };
     }
@@ -228,9 +233,11 @@ impl<S: WorkerSystem<Desc = StackfulOnlyTaskDesc<S>>> ReclaimableDesc<S> for Sta
 // that method's doc comment — it converts via `Into` now), and
 // `set_root_cont` only ever touches the concrete `root_cont` field, never
 // `S::SuspendedToken`.
-impl<S: StackfulWorkerSystem> StackfulLocalQueue<S> for UltWorker<S>
+impl<S: StackfulWorkerSystem + PoolSystem> StackfulLocalQueue<S> for UltWorker<S>
 where
     S::Desc: StackfulTaskDesc,
+    S::SuspendedToken: From<SuspendedTaskToken<S::Desc>>,
+    SuspendedTaskToken<S::Desc>: From<S::SuspendedToken>,
 {
     fn pop_or_root(&self) -> SuspendedTaskToken<S::Desc> {
         S::pop_or_root(self)
@@ -245,7 +252,7 @@ where
 
 // --- ContextSwitcher ---
 
-impl<S: StackfulWorkerSystem> ContextSwitcher<S> for UltWorker<S>
+impl<S: StackfulWorkerSystem + PoolSystem> ContextSwitcher<S> for UltWorker<S>
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -340,9 +347,10 @@ where
 
 // --- StackfulWorker ---
 
-impl<S: StackfulWorkerSystem, W: WorkerOps<S> + ContextSwitcher<S> + StackfulLocalQueue<S>> StackfulWorker<S> for W
+impl<S: StackfulWorkerSystem + PoolSystem, W: WorkerOps<S> + ContextSwitcher<S> + StackfulLocalQueue<S>> StackfulWorker<S> for W
 where
     S::Desc: StackfulTaskDesc,
+    S::SuspendedToken: From<SuspendedTaskToken<S::Desc>>,
 {
 }
 
@@ -354,7 +362,7 @@ where
 // anything that could allow the previous context to resume.
 // ---------------------------------------------------------------------------
 
-struct SuspendPayload<S: StackfulWorkerSystem, F>
+struct SuspendPayload<S: StackfulWorkerSystem + PoolSystem, F>
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -365,7 +373,7 @@ where
 
 unsafe extern "C" fn suspend_shim<S, F>(prev: Context, a1: *mut (), _a2: *mut ()) -> Transfer
 where
-    S: StackfulWorkerSystem,
+    S: StackfulWorkerSystem + PoolSystem,
     S::Desc: StackfulTaskDesc,
     F: FnOnce(&UltWorker<S>, SuspendedTaskToken<S::Desc>),
 {
@@ -382,7 +390,7 @@ where
     Transfer(wk as *const UltWorker<S> as *mut ())
 }
 
-struct CondSuspendPayload<S: StackfulWorkerSystem, F>
+struct CondSuspendPayload<S: StackfulWorkerSystem + PoolSystem, F>
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -393,7 +401,7 @@ where
 
 unsafe extern "C" fn cond_suspend_shim<S, F>(prev: Context, a1: *mut (), _a2: *mut ()) -> CondTransfer
 where
-    S: StackfulWorkerSystem,
+    S: StackfulWorkerSystem + PoolSystem,
     S::Desc: StackfulTaskDesc,
     F: FnOnce(&UltWorker<S>, &mut Option<SuspendedTaskToken<S::Desc>>),
 {
@@ -444,7 +452,7 @@ where
     }
 }
 
-struct ExitPayload<S: StackfulWorkerSystem, F>
+struct ExitPayload<S: StackfulWorkerSystem + PoolSystem, F>
 where
     S::Desc: StackfulTaskDesc,
 {
@@ -455,7 +463,7 @@ where
 
 unsafe extern "C" fn exit_shim<S, F>(a1: *mut (), _a2: *mut ()) -> Transfer
 where
-    S: StackfulWorkerSystem,
+    S: StackfulWorkerSystem + PoolSystem,
     S::Desc: StackfulTaskDesc,
     F: FnOnce(&UltWorker<S>),
 {
