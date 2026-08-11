@@ -91,6 +91,7 @@ pub trait StackfulWorkerSystem: WorkerSystem
     /// [`StackfulSchedulerSystem`] or a concrete `Desc` pin).
     type SuspendedThread: StackfulOnlyResumableCore<StackfulWorkerSystem = Self>
     where
+        Self: PoolSystem,
         Self::Desc: StackfulTaskDesc;
 
     /// Resolve what a suspending/exiting ULT switches into when its local
@@ -110,7 +111,11 @@ pub trait StackfulWorkerSystem: WorkerSystem
     /// continuation. Dual configs override with
     /// [`crate::resumable::dual::worker::pop_or_root_dual`], which requeues an async
     /// task popped off the top instead of trying to switch into it.
-    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedTaskToken<Self::Desc> {
+    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedTaskToken<Self::Desc>
+    where
+        Self: PoolSystem,
+        SuspendedTaskToken<Self::Desc>: From<Self::SuspendedToken>,
+    {
         crate::resumable::stackful::worker::pop_or_root_stackful(wk)
     }
 }
@@ -406,7 +411,8 @@ where
 impl<M: UltIdentity + StackfulSchedulerSystem> SpawnableStackfulTaskSystem for M
 where
     <M as PoolSystem>::Desc: StackfulTaskDesc,
-    M::Worker: crate::resumable::stackful::worker::StackfulWorker<M>,
+    M::Worker: crate::resumable::stackful::worker::StackfulWorker<M>
+        + crate::resumable::common::worker::DescWorkerOps<M>,
 {
     fn yield_now() {
         use crate::resumable::common::worker::WorkerOps;
@@ -453,6 +459,7 @@ where
 impl<M: UltIdentity + StackfulSchedulerSystem> DelegationSystem for M
 where
     <M as PoolSystem>::Desc: StackfulTaskDesc,
+    M::Worker: crate::resumable::common::worker::DescWorkerOps<M>,
 {
     type Delegator<C: crate::traits::stackful::DelegatorConsumer<Self>> =
         crate::resumable::stackful::sync::McsDelegator<Self, C>;
@@ -461,6 +468,7 @@ where
 impl<M: UltIdentity + StackfulSchedulerSystem> NestableSystem for M
 where
     <M as PoolSystem>::Desc: StackfulTaskDesc,
+    M::Worker: crate::resumable::common::worker::DescWorkerOps<M>,
 {
     type ThreadSpecific<T: 'static> = crate::resumable::stackful::tls::UltTls<Self, T>;
 }

@@ -357,6 +357,8 @@ where
     Q: SyncQueue<S, C> + Default + 'static,
     <S as PoolSystem>::Desc: StackfulTaskDesc,
     <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>,
+    S::Worker: crate::resumable::stackful::worker::ContextSwitcher<S>
+        + crate::resumable::common::worker::DescWorkerOps<S>,
 {
     let inner = Arc::new(Inner::<S, C, Q>::new(consumer));
 

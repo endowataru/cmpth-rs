@@ -12,7 +12,7 @@ use crate::interchange::{AtomicTaggedSlot, TaggedPtr};
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::stackless::desc::AsyncTaskDesc;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
-use crate::resumable::common::worker::{LocalQueue, WorkerOps};
+use crate::resumable::common::worker::{DescWorkerOps, LocalQueue, WorkerOps};
 use crate::resumable::stackful::worker::ContextSwitcher;
 
 const ASYNC_TAG: usize = 1;
@@ -53,6 +53,7 @@ impl<S: StackfulSchedulerSystem> Default for DualResumable<S> where S::Desc: Sta
 fn assert_on_real_ult<S: StackfulSchedulerSystem>(wk: &S::Worker)
 where
     S::Desc: StackfulTaskDesc,
+    S::Worker: DescWorkerOps<S>,
 {
     let is_root = wk.cur_task_ref().is_root();
     assert!(
@@ -101,7 +102,7 @@ impl<S: StackfulSchedulerSystem> Resumable<S> for DualResumable<S> where S::Desc
 impl<S: StackfulSchedulerSystem> StackfulResumable<S> for DualResumable<S>
 where
     S::Desc: StackfulTaskDesc + AsyncTaskDesc,
-    S::Worker: StackfulWorker<S>,
+    S::Worker: StackfulWorker<S> + DescWorkerOps<S>,
 {
     fn wait_with<F: FnOnce()>(&self, f: F) {
         let wk = S::Worker::current()

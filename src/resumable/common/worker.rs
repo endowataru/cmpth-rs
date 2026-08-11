@@ -19,15 +19,18 @@ use std::ptr;
 use crate::resumable::common::deque::{RunQueueStealer, Steal, WorkerRunQueue};
 use crate::resumable::common::pool::{DescPool, DynamicPool};
 use crate::resumable::common::scheduler::Scheduler;
-use crate::resumable::common::system::WorkerSystem;
+use crate::resumable::common::system::{PoolSystem, WorkerSystem};
 use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken, TaskDescAlloc};
 
 // ---------------------------------------------------------------------------
 // TaskPool (base)
 // ---------------------------------------------------------------------------
 
-/// Task-descriptor allocation with a per-worker free list.
-pub trait TaskPool<S: WorkerSystem> {
+/// Task-descriptor allocation with a per-worker free list. Descriptor-flavor
+/// only — `S: PoolSystem` too, unlike [`WorkerOps`]/[`LocalQueue`], which a
+/// bare `WorkerSystem` with no pooled descriptor concept at all (e.g.
+/// `scoped`'s stack-resident items) never needs.
+pub trait TaskPool<S: WorkerSystem + PoolSystem> {
     /// Allocate a descriptor for a ULT stack. The size comes from the
     /// pool's own configuration (`Scheduler::stack_size`, set by
     /// [`StackfulBuilder::stack_size`](crate::traits::system::stackful::StackfulBuilder::stack_size)),
@@ -49,12 +52,12 @@ pub trait TaskPool<S: WorkerSystem> {
 
 /// `spawn_async`-descriptor allocation with a per-worker free list. Separate
 /// from [`TaskPool`]: a `spawn_async` slot comes from
-/// [`PoolSystem::AsyncPool`](crate::resumable::common::system::PoolSystem::AsyncPool),
+/// [`PoolSystem::AsyncPool`],
 /// a different pool from the ULT-stack
 /// `S::Pool` `TaskPool` allocates from (a dual system needs both live at
-/// once — see [`PoolSystem::AsyncPool`](crate::resumable::common::system::PoolSystem::AsyncPool)'s doc comment) — and this trait
+/// once — see [`PoolSystem::AsyncPool`]'s doc comment) — and this trait
 /// is stackless-only, unlike `TaskPool`, which every system needs.
-pub trait AsyncTaskPool<S: WorkerSystem> {
+pub trait AsyncTaskPool<S: WorkerSystem + PoolSystem> {
     /// Allocate a descriptor with storage for at least `size` bytes.
     /// Returns it already wrapped as an owned token — see
     /// [`DescPool::alloc`], which this delegates to.
@@ -75,7 +78,7 @@ pub trait AsyncTaskPool<S: WorkerSystem> {
 /// [`stackless::thread::recurse`](crate::resumable::stackless::thread::recurse)'s
 /// per-frame storage. Unlike [`TaskPool`]/[`AsyncTaskPool`], this names no
 /// descriptor type in its signature — it is a plain sized allocator (see
-/// [`PoolSystem::RecursionPool`](crate::resumable::common::system::PoolSystem::RecursionPool)),
+/// [`PoolSystem::RecursionPool`]),
 /// unrelated to descriptors, so it needs neither `S` nor `D` to spell out
 /// what it hands back.
 pub trait RecursionAlloc {
@@ -133,16 +136,35 @@ pub trait LocalQueue<S: WorkerSystem> {
 // WorkerOps (base)
 // ---------------------------------------------------------------------------
 
-/// Base worker interface: locating the current worker, and running one
-/// popped continuation. Named `WorkerOps` (not `Worker`) to keep the name
-/// free for [`WorkerSystem::Worker`] — the associated type naming which
-/// concrete struct implements this trait for a given system.
-pub trait WorkerOps<S: WorkerSystem>: TaskPool<S> + LocalQueue<S> + Send + Sync + 'static {
+/// Base worker interface: locating the current worker. Named `WorkerOps`
+/// (not `Worker`) to keep the name free for [`WorkerSystem::Worker`] — the
+/// associated type naming which concrete struct implements this trait for a
+/// given system.
+///
+/// Deliberately minimal — just `current()` — so a bare `WorkerSystem` with
+/// no pooled descriptor concept at all (`scoped`'s stack-resident items,
+/// which have no `Desc`/`PoolSystem` at all) can satisfy
+/// `WorkerSystem::Worker: WorkerOps<Self>` without needing a `Desc` to name.
+/// The descriptor-flavor accessors that used to live here
+/// (`cur_task`/`external_queue`/`polling_async`/...) moved to
+/// [`DescWorkerOps`], which additionally requires `S: PoolSystem`.
+pub trait WorkerOps<S: WorkerSystem>: LocalQueue<S> + Send + Sync + 'static {
     /// The worker currently running on this base thread, if any.
     fn current() -> Option<&'static Self>
     where
         Self: Sized;
+}
 
+// ---------------------------------------------------------------------------
+// DescWorkerOps — the descriptor-flavor extension of WorkerOps
+// ---------------------------------------------------------------------------
+
+/// Descriptor-flavor worker accessors: everything a `resumable`-engine
+/// worker (stackful/stackless/dual) needs beyond plain [`WorkerOps`], all
+/// typed by `S::Desc`/`S::ExternalQueue` (so `S: PoolSystem` too). A bare
+/// `WorkerSystem` with no pooled descriptor concept (`scoped`) never
+/// implements this — its worker only needs [`WorkerOps`]/[`LocalQueue`].
+pub trait DescWorkerOps<S: WorkerSystem + PoolSystem>: WorkerOps<S> + TaskPool<S> {
     /// Raw pointer to the task currently running on this worker, without
     /// taking ownership; null if nothing is running. Crate-internal —
     /// lets call sites generic over `S::Worker` reach
@@ -150,8 +172,8 @@ pub trait WorkerOps<S: WorkerSystem>: TaskPool<S> + LocalQueue<S> + Send + Sync 
     /// because a trait method can't be narrowed below its trait's own
     /// visibility (same pattern as
     /// [`StackAlloc::alloc_stack`](crate::resumable::common::stack::StackAlloc::alloc_stack)) —
-    /// this is `pub` only because `WorkerOps` itself is, not because it's
-    /// meant to be called outside this crate.
+    /// this is `pub` only because `DescWorkerOps` itself is, not because
+    /// it's meant to be called outside this crate.
     #[doc(hidden)]
     fn cur_task(&self) -> *mut S::Desc;
 
@@ -179,7 +201,7 @@ pub trait WorkerOps<S: WorkerSystem>: TaskPool<S> + LocalQueue<S> + Send + Sync 
     /// this worker, or null. Crate-internal, see [`UltWorker`]'s
     /// `polling_async` field for the full invariant; `#[doc(hidden)]` for
     /// the same reason as [`cur_task`](Self::cur_task). Declared uniformly
-    /// here (like [`PoolSystem::AsyncPool`](crate::resumable::common::system::PoolSystem::AsyncPool))
+    /// here (like [`PoolSystem::AsyncPool`])
     /// even though only stackless dispatch (`run_async_poll`,
     /// `JoinHandle::poll`'s fast path, `yield_now`) ever reads it — a
     /// stackful-only worker simply never sets it.
@@ -207,7 +229,7 @@ pub trait WorkerOps<S: WorkerSystem>: TaskPool<S> + LocalQueue<S> + Send + Sync 
 // Concrete implementation: UltWorker<S>
 // ---------------------------------------------------------------------------
 
-pub struct UltWorker<S: WorkerSystem> {
+pub struct UltWorker<S: WorkerSystem + PoolSystem> {
     num: usize,
     pub(crate) deque: S::RunQueue,
     /// The task currently running on this worker, if any. `None` means
@@ -262,10 +284,10 @@ pub struct UltWorker<S: WorkerSystem> {
 // internally synchronized; `shared` is read-only after init. None of this
 // (nor the inherent methods below) touches dispatch, so `WorkerSystem` is
 // enough — no need for `SchedulerSystem`.
-unsafe impl<S: WorkerSystem> Send for UltWorker<S> {}
-unsafe impl<S: WorkerSystem> Sync for UltWorker<S> {}
+unsafe impl<S: WorkerSystem + PoolSystem> Send for UltWorker<S> {}
+unsafe impl<S: WorkerSystem + PoolSystem> Sync for UltWorker<S> {}
 
-impl<S: WorkerSystem> UltWorker<S> {
+impl<S: WorkerSystem + PoolSystem> UltWorker<S> {
     pub(crate) fn new(num: usize) -> Self {
         UltWorker {
             num,
@@ -414,7 +436,7 @@ impl<S: WorkerSystem> UltWorker<S> {
 
 // --- TaskPool ---
 
-impl<S: WorkerSystem> TaskPool<S> for UltWorker<S> {
+impl<S: WorkerSystem + PoolSystem> TaskPool<S> for UltWorker<S> {
     fn alloc_task(&self, has_handle: bool) -> SuspendedTaskToken<S::Desc> {
         let shared = self.shared();
         let ptr = shared.task_pool.alloc(self.num, has_handle, shared.stack_size);
@@ -434,7 +456,7 @@ impl<S: WorkerSystem> TaskPool<S> for UltWorker<S> {
 
 // --- AsyncTaskPool ---
 
-impl<S: WorkerSystem> AsyncTaskPool<S> for UltWorker<S> {
+impl<S: WorkerSystem + PoolSystem> AsyncTaskPool<S> for UltWorker<S> {
     fn alloc_async_task(&self, has_handle: bool, size: usize) -> SuspendedTaskToken<S::Desc> {
         let ptr = self.shared().async_task_pool.alloc(self.num, has_handle, size);
         // SAFETY: same reasoning as `TaskPool::alloc_task` above.
@@ -448,7 +470,7 @@ impl<S: WorkerSystem> AsyncTaskPool<S> for UltWorker<S> {
 
 // --- RecursionAlloc ---
 
-impl<S: WorkerSystem> RecursionAlloc for UltWorker<S> {
+impl<S: WorkerSystem + PoolSystem> RecursionAlloc for UltWorker<S> {
     fn alloc_recursion_frame(&self, layout: Layout) -> *mut u8 {
         self.shared().recursion_pool.alloc(self.num, layout)
     }
@@ -468,7 +490,7 @@ impl<S: WorkerSystem> RecursionAlloc for UltWorker<S> {
 // opaque item alone. The equality is still needed one layer up, wherever a
 // caller hands a concrete token to these methods — but that is the task
 // layer, which legitimately knows the descriptor type.
-impl<S: WorkerSystem> LocalQueue<S> for UltWorker<S> {
+impl<S: WorkerSystem + PoolSystem> LocalQueue<S> for UltWorker<S> {
     fn push(&self, c: S::SuspendedToken) {
         self.deque.push(c);
     }
@@ -519,11 +541,13 @@ impl<S: WorkerSystem> LocalQueue<S> for UltWorker<S> {
 
 // --- WorkerOps ---
 
-impl<S: WorkerSystem<Worker = UltWorker<S>>> WorkerOps<S> for UltWorker<S> {
+impl<S: WorkerSystem<Worker = UltWorker<S>> + PoolSystem> WorkerOps<S> for UltWorker<S> {
     fn current() -> Option<&'static Self> {
         <S::Lookup as crate::resumable::common::lookup::CurrentLookup<S>>::current()
     }
+}
 
+impl<S: WorkerSystem<Worker = UltWorker<S>> + PoolSystem> DescWorkerOps<S> for UltWorker<S> {
     fn cur_task(&self) -> *mut S::Desc {
         UltWorker::cur_task(self)
     }
@@ -563,7 +587,7 @@ impl<S: WorkerSystem<Worker = UltWorker<S>>> WorkerOps<S> for UltWorker<S> {
 
 pub fn current_worker<S>() -> Option<&'static UltWorker<S>>
 where
-    S: WorkerSystem<Worker = UltWorker<S>>,
+    S: WorkerSystem<Worker = UltWorker<S>> + PoolSystem,
 {
     UltWorker::<S>::current()
 }

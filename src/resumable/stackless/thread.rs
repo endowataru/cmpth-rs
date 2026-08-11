@@ -17,13 +17,16 @@ use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle
 use crate::resumable::common::desc::{HasExternalQueue, SuspendedTaskToken, TaskDesc, TaskDescAlloc, TaskDescCore, TaskExitSink};
 use crate::resumable::stackless::desc::WakerTaskDesc;
 use crate::resumable::stackless::desc::{AsyncTaskDesc, HasPollFn, TaskPollResult};
-use crate::resumable::common::worker::{AsyncTaskPool, LocalQueue, RecursionAlloc, UltWorker, WorkerOps};
+use crate::resumable::common::worker::{AsyncTaskPool, DescWorkerOps, LocalQueue, RecursionAlloc, UltWorker, WorkerOps};
 
 // ---------------------------------------------------------------------------
 // .await-ing a JoinHandle
 // ---------------------------------------------------------------------------
 
-impl<S: StacklessSchedulerSystem, T: Send + 'static> Future for JoinHandle<S, T> {
+impl<S: StacklessSchedulerSystem, T: Send + 'static> Future for JoinHandle<S, T>
+where
+    S::Worker: DescWorkerOps<S>,
+{
     type Output = T;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
@@ -105,6 +108,7 @@ impl<S: StacklessSchedulerSystem, T: Send + 'static> Future for JoinHandle<S, T>
 fn try_reclaim_and_run<S>(wk: &S::Worker, desc: *mut S::Desc)
 where
     S: StacklessSchedulerSystem,
+    S::Worker: DescWorkerOps<S>,
 {
     match wk.try_pop() {
         Some(popped) => {

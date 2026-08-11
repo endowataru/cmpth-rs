@@ -6,8 +6,8 @@
 
 use std::task::{RawWaker, Waker};
 
-use crate::resumable::common::worker::{AsyncTaskPool, LocalQueue, WorkerOps};
-use crate::resumable::common::system::{ReclaimableDesc, RunnableItem, WorkerSystem};
+use crate::resumable::common::worker::{AsyncTaskPool, DescWorkerOps, LocalQueue};
+use crate::resumable::common::system::{PoolSystem, ReclaimableDesc, RunnableItem, WorkerSystem};
 use crate::resumable::stackless::system::StacklessSchedulerSystem;
 use crate::resumable::common::desc::{RunningTaskToken, SuspendedTaskToken};
 use crate::resumable::stackless::desc::{StacklessOnlyTaskDesc, WakerTaskDesc};
@@ -42,6 +42,7 @@ pub(crate) fn run_async_poll<S>(
     mut poll_fn: TaskPollFn<S::Desc>,
 ) where
     S: StacklessSchedulerSystem,
+    S::Worker: DescWorkerOps<S>,
 {
     // Whatever this worker was polling (if anything) before this call —
     // restored once the chain below is done. Unlike the pre-2026-07-30
@@ -150,13 +151,13 @@ pub(crate) fn run_async_poll<S>(
 /// unrelated opaque type). It becomes derivable for `S` from this same
 /// bound once this impl (plus the matching `ReclaimableDesc` impl below)
 /// exist, so it doesn't need to be named here.
-impl<S: WorkerSystem<SuspendedToken = SuspendedTaskToken<<S as crate::resumable::common::system::PoolSystem>::Desc>, Desc = StacklessOnlyTaskDesc<S>>>
+impl<S: WorkerSystem<SuspendedToken = SuspendedTaskToken<<S as PoolSystem>::Desc>> + PoolSystem<Desc = StacklessOnlyTaskDesc<S>>>
     RunnableItem<S> for SuspendedTaskToken<StacklessOnlyTaskDesc<S>>
 where
     // Needed transitively: `run_async_poll` requires `S: StacklessSchedulerSystem`,
     // which requires `S::Desc: ReclaimableDesc<S>` (via `SchedulerSystem`),
     // and the matching `ReclaimableDesc` impl below needs exactly this.
-    S::Worker: AsyncTaskPool<S>,
+    S::Worker: AsyncTaskPool<S> + DescWorkerOps<S>,
 {
     fn run_on(self, wk: &S::Worker) {
         let desc = self.desc();
@@ -178,7 +179,7 @@ where
 /// supertrait); `desc` is a raw `*mut Self`, never `S::SuspendedToken`, so
 /// this needs neither `Worker = UltWorker<S>` nor any fold of
 /// `SchedulerSystem`.
-impl<S: WorkerSystem<Desc = StacklessOnlyTaskDesc<S>>> ReclaimableDesc<S> for StacklessOnlyTaskDesc<S>
+impl<S: WorkerSystem + PoolSystem<Desc = StacklessOnlyTaskDesc<S>>> ReclaimableDesc<S> for StacklessOnlyTaskDesc<S>
 where
     S::Worker: AsyncTaskPool<S>,
 {

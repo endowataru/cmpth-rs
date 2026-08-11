@@ -16,7 +16,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::resumable::common::system::WorkerSystem;
+use crate::resumable::common::system::{PoolSystem, WorkerSystem};
 use crate::resumable::common::worker::{LocalQueue, WorkerOps};
 use crate::resumable::common::desc::{HasExternalQueue, SuspendedTaskToken};
 use crate::resumable::common::external_queue::ExternalWakeQueue;
@@ -171,9 +171,10 @@ pub(crate) fn try_wake_state(state: &AtomicUsize) -> WakeOutcome {
 /// exclusive ownership at their call site don't have to hand off a raw
 /// pointer just to have this function immediately reconstruct a token from
 /// it — one `from_raw` per genuine ownership transfer, not two.
-pub(crate) fn push_continuation<S: WorkerSystem>(token: SuspendedTaskToken<S::Desc>)
+pub(crate) fn push_continuation<S: WorkerSystem + PoolSystem>(token: SuspendedTaskToken<S::Desc>)
 where
     <S::Desc as crate::resumable::common::desc::TaskDescCore>::Owned: HasExternalQueue<S::Desc>,
+    S::SuspendedToken: From<SuspendedTaskToken<S::Desc>>,
 {
     match S::Worker::current() {
         Some(wk) => wk.push(token.into()),

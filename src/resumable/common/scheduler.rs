@@ -10,7 +10,7 @@ use crate::traits::common::TlsSlot;
 use crate::traits::stackful::SpawnableStackfulTaskSystem;
 use crate::resumable::common::deque::{Steal, WorkerRunQueue};
 use crate::resumable::common::external_queue::ExternalQueue;
-use crate::resumable::common::system::{RunnableItem, SchedulerSystem, WorkerSystem};
+use crate::resumable::common::system::{PoolSystem, RunnableItem, SchedulerSystem, WorkerSystem};
 use crate::resumable::common::worker::{LocalQueue, UltWorker};
 
 /// State shared by all workers of one scheduler instance. Worker-layer
@@ -19,7 +19,13 @@ use crate::resumable::common::worker::{LocalQueue, UltWorker};
 /// dual, and (eventually) stackless-only systems alike — only
 /// [`init`](crate::resumable::stackful::init::init) (the stackful entry
 /// point) needs the stackful extension.
-pub struct Scheduler<S: WorkerSystem> {
+///
+/// `S: PoolSystem` too: this struct is entirely a `resumable`-engine
+/// construct (`UltWorker<S>` field, `task_pool`/`async_task_pool`/
+/// `recursion_pool`/`external_queue` — all `PoolSystem`-typed). A bare
+/// `WorkerSystem` with no pooled descriptor concept (`scoped`) gets its own,
+/// separate, leaner worker-pool struct instead of this one.
+pub struct Scheduler<S: WorkerSystem + PoolSystem> {
     pub(crate) workers: Box<[UltWorker<S>]>,
     /// Cloneable stealer handles, one per worker, indexed the same as
     /// `workers`. A thief reaches a victim's run queue exclusively through
