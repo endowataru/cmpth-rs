@@ -307,10 +307,6 @@ impl resumable::stackless::system::UltAsyncIdentity for DefaultStacklessOnlyMark
 /// `UltIdentity`.
 pub type DefaultStacklessOnlyTaskSystem = UltAsyncSystem<DefaultStacklessOnlyMarker>;
 
-// ---------------------------------------------------------------------------
-// Compatibility module for dependent crates (lite-rma, lite-dsm)
-// ---------------------------------------------------------------------------
-
 pub mod system {
     pub use crate::traits::{JoinHandleLike, StackfulBarrier, StackfulMutex, SpawnableStackfulTaskSystem};
     pub use crate::os::{OsBarrier, OsCondvar, OsMutex, OsSystem};
