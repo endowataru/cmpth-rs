@@ -476,3 +476,80 @@ fn nqueens_sum<S: BenchSystem>(
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// nqueens_parallel_invoke — same board-counting shape as `nqueens`, but via
+// `ScopedStackfulTaskSystem::parallel_call` instead of `BenchSystem::par_join`
+// — the N-Queens counterpart to `fib_parallel_invoke`/`run_fib_parallel_invoke`
+// above, needed because `nqueens`'s branching shape (wide candidate splits,
+// many workers) is exactly the case
+// `docs/scoped-ult-promotion.md` §9.8.5 flags as the one where case B/C might
+// diverge from `fib`'s (deep, narrow) shape.
+// ---------------------------------------------------------------------------
+
+pub fn nqueens_parallel_invoke<S: cmpth::ScopedStackfulTaskSystem>(
+    placed: Vec<u32>,
+    n: u32,
+    par_depth: usize,
+) -> u32 {
+    let row = placed.len() as u32;
+    if row == n {
+        return 1;
+    }
+    let candidates: Vec<u32> = (0..n)
+        .filter(|&col| {
+            placed.iter().enumerate().all(|(r, &c)| {
+                c != col
+                    && (r as i32 - row as i32).unsigned_abs()
+                        != (c as i32 - col as i32).unsigned_abs()
+            })
+        })
+        .collect();
+    nqueens_sum_parallel_invoke::<S>(candidates, placed, n, par_depth)
+}
+
+fn nqueens_sum_parallel_invoke<S: cmpth::ScopedStackfulTaskSystem>(
+    candidates: Vec<u32>,
+    placed: Vec<u32>,
+    n: u32,
+    par_depth: usize,
+) -> u32 {
+    match candidates.len() {
+        0 => 0,
+        1 => {
+            let mut next = placed;
+            next.push(candidates[0]);
+            nqueens_parallel_invoke::<S>(next, n, par_depth.saturating_sub(1))
+        }
+        _ if par_depth == 0 => candidates
+            .into_iter()
+            .map(|col| {
+                let mut next = placed.clone();
+                next.push(col);
+                nqueens_parallel_invoke::<S>(next, n, 0)
+            })
+            .sum(),
+        _ => {
+            let mid = candidates.len() / 2;
+            let right = candidates[mid..].to_vec();
+            let left = candidates[..mid].to_vec();
+            let placed_r = placed.clone();
+            let (l, r) = S::parallel_call(
+                move || nqueens_sum_parallel_invoke::<S>(left, placed, n, par_depth - 1),
+                move || nqueens_sum_parallel_invoke::<S>(right, placed_r, n, par_depth - 1),
+            );
+            l + r
+        }
+    }
+}
+
+/// Run [`nqueens_parallel_invoke`] to completion on `num_workers` and return
+/// the result. Mirrors [`run_fib_parallel_invoke`].
+pub fn run_nqueens_parallel_invoke<S: cmpth::ScopedStackfulTaskSystem + cmpth::StackfulInitSystem>(
+    num_workers: usize,
+    n: u32,
+    par_depth: usize,
+) -> u32 {
+    use cmpth::StackfulBuilder as _;
+    S::builder().workers(num_workers).run(move || nqueens_parallel_invoke::<S>(vec![], n, par_depth))
+}

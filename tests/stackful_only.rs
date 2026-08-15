@@ -6,7 +6,7 @@
 //! here — so this exercises exactly the branch-free path
 //! `execute_stackful`/`pop_or_root_stackful` were built for.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use cmpth::{
@@ -72,6 +72,126 @@ fn yield_now_roundtrips() {
             DefaultStackfulOnlyTaskSystem::yield_now();
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// parallel_call — the make_context-backed fork-parent-first path
+// (`docs/scoped-ult-promotion.md` §9.8.4). `standalone_init_then_spawn_join_and_parallel_call_work`
+// above already covers the un-stolen path under normal conditions; these
+// exercise the two things nothing else does: `branch_entry` actually being
+// switched into for the first time on a *different* worker (`make_context`
+// built the context correctly), and panic propagation through each of the
+// two very differently-shaped completion routes (plain inline call vs. the
+// full `JoinHandle`/`join_state` protocol).
+// ---------------------------------------------------------------------------
+
+/// Forces the branch to be stolen: `a` spins until `b` has actually run,
+/// which — since `parallel_call` only pops `b` back locally *after* `a`
+/// returns — is only possible if the idle second worker steals and runs it
+/// first. This can only pass by actually switching into a
+/// `make_context`-built context for the first time (`branch_entry`); if
+/// that machinery were broken, this hangs (bounded, so it fails loudly
+/// instead of wedging the test run) rather than silently passing.
+#[test]
+fn parallel_call_stolen_branch_actually_runs() {
+    DefaultStackfulOnlyTaskSystem::builder().workers(2).run(|| {
+        let b_ran = Arc::new(AtomicBool::new(false));
+        let b_ran2 = Arc::clone(&b_ran);
+        let (ra, rb) = DefaultStackfulOnlyTaskSystem::parallel_call(
+            move || {
+                let mut spins: u64 = 0;
+                while !b_ran2.load(Ordering::Acquire) {
+                    std::hint::spin_loop();
+                    spins += 1;
+                    assert!(spins < 200_000_000, "b never ran -- steal did not happen (or branch_entry is broken)");
+                }
+                1u64
+            },
+            move || {
+                b_ran.store(true, Ordering::Release);
+                2u64
+            },
+        );
+        assert_eq!((ra, rb), (1, 2));
+    });
+}
+
+/// Un-stolen `b` panics: only one worker, so `b` can never be stolen —
+/// forces the plain-inline-call fast path, which propagates the panic
+/// directly (no `catch_unwind` wrapper there, matching `scoped`'s own
+/// inline fast path).
+#[test]
+fn parallel_call_unstolen_branch_panic_propagates() {
+    DefaultStackfulOnlyTaskSystem::builder().workers(1).run(|| {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            DefaultStackfulOnlyTaskSystem::parallel_call(|| 1u64, || -> u64 { panic!("boom-b-inline") })
+        }));
+        assert!(result.is_err(), "un-stolen branch panic should propagate through parallel_call");
+    });
+}
+
+/// Stolen `b` panics: same forced-steal shape as
+/// `parallel_call_stolen_branch_actually_runs`, but `b` panics right after
+/// signalling `a`. The panic must propagate through `branch_entry`'s
+/// `catch_unwind` -> `exit_with_result` -> `JoinHandle::join`'s
+/// `resume_unwind`, exactly like `spawn`+`join` already does
+/// (`spawn_panic_propagates`) — this is the first test exercising that same
+/// route reached via `parallel_call` instead.
+#[test]
+fn parallel_call_stolen_branch_panic_propagates() {
+    DefaultStackfulOnlyTaskSystem::builder().workers(2).run(|| {
+        let b_ran = Arc::new(AtomicBool::new(false));
+        let b_ran2 = Arc::clone(&b_ran);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            DefaultStackfulOnlyTaskSystem::parallel_call(
+                move || {
+                    let mut spins: u64 = 0;
+                    while !b_ran2.load(Ordering::Acquire) {
+                        std::hint::spin_loop();
+                        spins += 1;
+                        assert!(spins < 200_000_000, "b never ran -- steal did not happen");
+                    }
+                    1u64
+                },
+                move || -> u64 {
+                    b_ran.store(true, Ordering::Release);
+                    panic!("boom-b-stolen");
+                },
+            )
+        }));
+        assert!(result.is_err(), "stolen branch panic should propagate through parallel_call");
+    });
+}
+
+/// Regression guard: `parallel_call` must re-derive its worker after `a`
+/// returns, not keep using the one captured before `a` ran. `a` here
+/// recurses through nested `parallel_call`s of its own, so any inner branch
+/// that gets stolen and joined migrates the calling ULT to a different
+/// worker before this call's own `a` returns. The bug this catches (found
+/// via `cargo bench --bench fib`, not by any of the tests above — they only
+/// ever used a non-recursive `a`, which can never migrate): using the stale
+/// worker afterward manipulates a *different* worker's deque/pool from a
+/// different OS thread, corrupting shared queue state and eventually
+/// producing a "double-resume" (`SIGSEGV` in release, a `debug_assert!` in
+/// debug) once some other, unrelated task happens to reuse the same
+/// descriptor. A single call with a trivial `a` cannot exercise this — the
+/// bug needs real recursive depth and enough workers that a steal actually
+/// happens, repeated enough times to hit it reliably.
+fn parallel_fib(n: u64) -> u64 {
+    if n <= 1 {
+        return n;
+    }
+    let (a, b) = DefaultStackfulOnlyTaskSystem::parallel_call(move || parallel_fib(n - 1), move || parallel_fib(n - 2));
+    a + b
+}
+
+#[test]
+fn parallel_call_nested_recursive_nothing_corrupts_across_worker_migration() {
+    for _ in 0..30 {
+        DefaultStackfulOnlyTaskSystem::builder().workers(4).run(|| {
+            assert_eq!(parallel_fib(24), 46_368);
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
