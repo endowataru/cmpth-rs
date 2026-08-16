@@ -73,6 +73,49 @@ where
 }
 
 // ---------------------------------------------------------------------------
+// BranchWarmPool (stackful-only)
+// ---------------------------------------------------------------------------
+
+/// Per-worker warm-reuse cache for `parallel_call` branch descriptors
+/// (`resumable::stackful::thread::parallel_call`), backed by
+/// [`UltWorker::branch_warm`](crate::resumable::common::worker::UltWorker).
+///
+/// A descriptor is only ever pushed here after an un-stolen round trip
+/// (pushed as a branch, never switched into, popped back by identity) —
+/// its `ctx`/fixed-offset header are exactly as `ContextPolicy::make_context`
+/// last left them, so a later `parallel_call` on this same worker can reuse
+/// it without calling `make_context` again. Never touched by a thief: a
+/// stolen-and-executed branch returns to the *general* pool via the
+/// ordinary `ReclaimableDesc::reclaim`/`TaskPool::free_task` path instead
+/// (its context frame's memory was consumed as real stack space during
+/// execution, so it isn't warm-reusable), never to this cache — so, unlike
+/// `TaskPool`, no cross-worker traffic is possible here and no
+/// synchronization is needed.
+pub trait BranchWarmPool<S: StackfulWorkerSystem + PoolSystem>
+where
+    S::Desc: StackfulTaskDesc,
+{
+    /// Pop a warm descriptor, if the cache has one.
+    fn branch_warm_pop(&self) -> Option<*mut S::Desc>;
+
+    /// Push a descriptor back onto the cache after an un-stolen round trip.
+    fn branch_warm_push(&self, desc: *mut S::Desc);
+}
+
+impl<S: StackfulWorkerSystem + PoolSystem> BranchWarmPool<S> for UltWorker<S>
+where
+    S::Desc: StackfulTaskDesc,
+{
+    fn branch_warm_pop(&self) -> Option<*mut S::Desc> {
+        unsafe { &mut *self.branch_warm.get() }.pop()
+    }
+
+    fn branch_warm_push(&self, desc: *mut S::Desc) {
+        unsafe { &mut *self.branch_warm.get() }.push(desc);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // StackfulLocalQueue (stackful-only)
 // ---------------------------------------------------------------------------
 

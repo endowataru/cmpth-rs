@@ -15,7 +15,7 @@ use crate::resumable::stackful::system::StackfulSchedulerSystem;
 use crate::resumable::common::desc::{HasExternalQueue, SuspendedTaskToken, TaskDesc, TaskDescCore, TaskExitSink};
 use crate::resumable::stackful::desc::{HasCtx, StackfulTaskDesc};
 use crate::resumable::common::worker::{DescWorkerOps, LocalQueue, TaskPool, WorkerOps};
-use crate::resumable::stackful::worker::{ContextSwitcher, StackfulWorker};
+use crate::resumable::stackful::worker::{BranchWarmPool, ContextSwitcher, StackfulWorker};
 
 // ---------------------------------------------------------------------------
 // spawn (child-first fork)
@@ -95,8 +95,45 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// parallel_call (fork-parent-first, pool-backed via make_context)
+// parallel_call (fork-parent-first, pool-backed via make_context, with a
+// warm-reuse cache that skips make_context on repeat calls)
 // ---------------------------------------------------------------------------
+
+/// Type-erased dispatch function for a `parallel_call` branch: the
+/// type-specific half of [`branch_entry`], stored as *data* (a function
+/// pointer written into a fixed stack slot) rather than baked into the
+/// `make_context`-built ctx frame as machine code. See [`branch_entry`]'s
+/// doc comment for why this indirection exists.
+type DispatchFn = unsafe extern "C" fn(usize) -> !;
+
+/// Size of the reserved slot (at `stack_top - DISPATCH_SLOT_SIZE`) holding
+/// the branch's [`DispatchFn`].
+const DISPATCH_SLOT_SIZE: usize = std::mem::size_of::<DispatchFn>();
+
+/// Fixed budget (below the dispatch slot) reserved for `Fb` +
+/// `StackResult<Rb>` when a branch is eligible for
+/// [`BranchWarmPool`]'s reuse cache (see [`header_fits`]). Generous enough
+/// for realistic closures (a handful of captured `Vec`s/primitives —
+/// `nqueens_parallel_invoke`'s branch closures, the widest in this crate's
+/// own benches, run ~65 bytes); oversized ones fall back to the fully
+/// dynamic path below, exactly like every `parallel_call` did before this
+/// cache existed — just never warm-cached.
+const BRANCH_HEADER_BUDGET: usize = 256;
+
+/// Whether `Fb`/`StackResult<Rb>` fit [`BRANCH_HEADER_BUDGET`]. `size`/
+/// `align` are used as a conservative combined padding estimate per slot —
+/// this only needs to guarantee no overlap with `exec_top`, not be tight.
+/// `Layout::new` is `const`, so for any concrete `Fb`/`Rb` this reduces to
+/// a compile-time-constant `bool`; the `if` reading it in [`parallel_call`]
+/// is expected to fold to a single branch at codegen, though nothing here
+/// depends on that for correctness — a stray runtime check would just be
+/// one perfectly-predicted branch (same outcome every call at a given call
+/// site).
+fn header_fits<Fb, Rb>() -> bool {
+    let f = std::alloc::Layout::new::<Fb>();
+    let r = std::alloc::Layout::new::<StackResult<Rb>>();
+    f.size() + f.align() + r.size() + r.align() + DISPATCH_SLOT_SIZE <= BRANCH_HEADER_BUDGET
+}
 
 /// Run `a` and `b`, potentially in parallel: `b` is built as a real,
 /// switchable task and pushed to the ordinary run queue *without* a context
@@ -111,6 +148,14 @@ where
 /// needed is [`branch_entry`] itself, and finishing joins the existing
 /// `JoinHandle` protocol verbatim.
 ///
+/// When `Fb`/`StackResult<Rb>` fit [`BRANCH_HEADER_BUDGET`], an un-stolen
+/// branch's descriptor goes to [`BranchWarmPool`] instead of back to the
+/// general pool: its `ctx` was never touched (never switched into), so a
+/// later call on this same worker can reuse it — same stack, same
+/// `exec_top`, same cached ctx frame — skipping `alloc_task`,
+/// `commit_as_ctx`, `set_external_queue`, and `make_context` entirely, down
+/// to just writing the new closure and dispatch function.
+///
 /// `Fa`/`Ra` don't need `Send + 'static` here — `a` never leaves the
 /// caller's stack — but callers (the `ScopedStackfulTaskSystem` blanket
 /// impl) may still pass values satisfying stricter bounds; this function
@@ -118,7 +163,7 @@ where
 pub fn parallel_call<S, Ra, Fa, Rb, Fb>(a: Fa, b: Fb) -> (Ra, Rb)
 where
     S: StackfulSchedulerSystem,
-    S::Worker: ContextSwitcher<S> + DescWorkerOps<S>,
+    S::Worker: ContextSwitcher<S> + DescWorkerOps<S> + BranchWarmPool<S>,
     Fa: FnOnce() -> Ra,
     Fb: FnOnce() -> Rb + Send + 'static,
     Rb: Send + 'static,
@@ -126,27 +171,55 @@ where
 {
     let wk = <S::Worker as WorkerOps<S>>::current().expect("cmpth: parallel_call called outside a worker");
 
-    let mut token = wk.alloc_task(true);
-    token.commit_as_ctx();
-    token.set_external_queue(wk.external_queue() as *const _);
-    let stack_top = token.as_desc().stack_top() as usize;
+    let fits = header_fits::<Fb, Rb>();
+    let warm = if fits { wk.branch_warm_pop() } else { None };
 
-    let (f_ptr, result_ptr) = branch_layout::<Fb, Rb>(stack_top);
-    let exec_top = align_down(f_ptr as usize, 16) as *mut u8;
+    let (desc, f_ptr, result_ptr, dispatch_slot) = match warm {
+        Some(desc) => {
+            // Warm: `ctx` and the fixed-offset header are exactly as the
+            // previous un-stolen round trip left them — no alloc_task, no
+            // commit_as_ctx/set_external_queue (worker-stable, set once
+            // when this descriptor was first built), no make_context.
+            let stack_top = unsafe { (*desc).stack_top() } as usize;
+            let dispatch_slot = (stack_top - DISPATCH_SLOT_SIZE) as *mut DispatchFn;
+            let (f_ptr, result_ptr) = branch_layout::<Fb, Rb>(stack_top - DISPATCH_SLOT_SIZE);
+            (desc, f_ptr, result_ptr, dispatch_slot)
+        }
+        None => {
+            // Cold: either the cache was empty, or `Fb`/`Rb` don't fit the
+            // warm budget. Build a context exactly as before — the only
+            // difference from the pre-warm-cache version is `entry` is now
+            // the type-erased `branch_entry::<S>` (see its doc comment),
+            // and `exec_top` is the fixed warm-cacheable offset whenever
+            // `fits` allows a later reuse, or the dynamic one otherwise.
+            let mut token = wk.alloc_task(true);
+            token.commit_as_ctx();
+            token.set_external_queue(wk.external_queue() as *const _);
+            let stack_top = token.as_desc().stack_top() as usize;
+            let dispatch_slot = (stack_top - DISPATCH_SLOT_SIZE) as *mut DispatchFn;
+            let (f_ptr, result_ptr) = branch_layout::<Fb, Rb>(stack_top - DISPATCH_SLOT_SIZE);
+            let exec_top = if fits {
+                align_down(stack_top - BRANCH_HEADER_BUDGET, 16)
+            } else {
+                align_down(f_ptr as usize, 16)
+            } as *mut u8;
+            let ctx = unsafe { S::Ctx::make_context(exec_top, branch_entry::<S>, std::ptr::null_mut()) };
+            token.set_ctx(ctx.0);
+            (token.desc(), f_ptr, result_ptr, dispatch_slot)
+        }
+    };
 
-    // Write `b` onto the not-yet-(and maybe never-)switched-to stack.
+    // Write `b` and the type-specific dispatch shim onto the not-yet-(and
+    // maybe never-)switched-to stack.
     unsafe { f_ptr.write(b) };
+    unsafe { dispatch_slot.write(dispatch_shim::<S, Fb, Rb>) };
 
-    // Prepare a context that, if ever switched into, enters `branch_entry`
-    // — without switching now. `arg` is unused: `branch_entry` recomputes
-    // `f_ptr`/`result_ptr` from `stack_top` via `branch_layout`, same as
-    // this function just did, rather than threading them through as a
-    // separate payload.
-    let ctx = unsafe { S::Ctx::make_context(exec_top, branch_entry::<S, Fb, Rb>, std::ptr::null_mut()) };
-    token.set_ctx(ctx.0);
-
-    let desc = token.desc();
-    wk.push(token.into());
+    // SAFETY: `desc` is either freshly allocated above (never wrapped in a
+    // token before) or popped from `BranchWarmPool`, which only ever holds
+    // descriptors this same function pushed after popping them back
+    // un-stolen (never shared, never handed to a thief) — exclusively ours
+    // either way.
+    wk.push(unsafe { SuspendedTaskToken::from_raw(desc) }.into());
 
     let ra = a();
 
@@ -162,9 +235,16 @@ where
         Some(raw) => {
             let popped: SuspendedTaskToken<S::Desc> = raw.into();
             if std::ptr::eq(popped.desc(), desc) {
-                // Not stolen: discard the never-switched-into context and
-                // stack reservation, and run `b` as a plain function call.
-                unsafe { wk.free_task(popped.into_raw()) };
+                // Not stolen: `ctx` was never touched. If it fits the warm
+                // budget, cache it for a later call on this worker instead
+                // of returning it to the general pool; either way, run `b`
+                // as a plain function call — no context ever touched.
+                let desc = popped.into_raw();
+                if fits {
+                    wk.branch_warm_push(desc);
+                } else {
+                    unsafe { wk.free_task(desc) };
+                }
                 let rb = unsafe { f_ptr.read() }();
                 (ra, rb)
             } else {
@@ -184,13 +264,44 @@ where
 
 /// [`EntryFn`](crate::traits::stackful::EntryFn) for a `parallel_call`
 /// branch that got stolen: the first (and only) time this context is ever
-/// switched into. Runs on the destination stack *after* the generic
-/// dispatch bookkeeping (`RunnableItem::run_on` → `suspend_shim`) already
-/// parked the thief's own previous continuation as its `root_cont` — this
-/// function never needs to touch `prev` itself, unlike `spawn`'s child
-/// closure (which switches directly via `save_context`, bypassing that
-/// generic wrapper).
-unsafe extern "C" fn branch_entry<S, Fb, Rb>(_transfer: Transfer, _arg: *mut ()) -> !
+/// switched into. Generic only in `S` — never in the branch's `Fb`/`Rb` —
+/// so the same 56-byte `make_context`-built ctx frame can be reused
+/// ([`BranchWarmPool`]) across calls of *different* closure types on the
+/// same worker: the type-specific behavior lives in the [`DispatchFn`]
+/// pointer stored as data in the fixed slot at
+/// `stack_top - DISPATCH_SLOT_SIZE` (written by [`parallel_call`] on every
+/// push, warm or cold alike), not baked into this function's own machine
+/// code the way it would be if this were still generic over `Fb`/`Rb`.
+///
+/// Runs on the destination stack *after* the generic dispatch bookkeeping
+/// (`RunnableItem::run_on` → `suspend_shim`) already parked the thief's own
+/// previous continuation as its `root_cont` — this function never needs to
+/// touch `prev` itself, unlike `spawn`'s child closure (which switches
+/// directly via `save_context`, bypassing that generic wrapper).
+unsafe extern "C" fn branch_entry<S>(_transfer: Transfer, _arg: *mut ()) -> !
+where
+    S: StackfulSchedulerSystem,
+    S::Worker: ContextSwitcher<S> + DescWorkerOps<S>,
+    <S as PoolSystem>::Desc: StackfulTaskDesc,
+{
+    let wk = <S::Worker as WorkerOps<S>>::current().expect("cmpth: worker vanished");
+    let desc = wk.cur_task();
+    let stack_top = unsafe { (*desc).stack_top() } as usize;
+    let dispatch_fn = unsafe { ((stack_top - DISPATCH_SLOT_SIZE) as *const DispatchFn).read() };
+    unsafe { dispatch_fn(stack_top) }
+}
+
+/// Type-specific half of a stolen `parallel_call` branch's execution —
+/// the [`DispatchFn`] [`branch_entry`] reads from the fixed slot and
+/// tail-calls, monomorphized once per `(Fb, Rb)`. Recomputes
+/// `f_ptr`/`result_ptr` from `stack_top` via [`branch_layout`] (anchored
+/// below the dispatch slot — the same formula regardless of whether this
+/// branch used the fixed warm-cache `exec_top` or the dynamic
+/// oversized-fallback one, since that choice only affects where
+/// `exec_top`/the ctx frame sit, never this computation), runs the
+/// closure, and finishes via [`exit_with_result`] exactly as `spawn`'s
+/// child does.
+unsafe extern "C" fn dispatch_shim<S, Fb, Rb>(stack_top: usize) -> !
 where
     S: StackfulSchedulerSystem,
     S::Worker: ContextSwitcher<S> + DescWorkerOps<S>,
@@ -198,14 +309,9 @@ where
     Rb: Send + 'static,
     <S as PoolSystem>::Desc: StackfulTaskDesc,
 {
-    // Raw fn pointer, no closure capture available — re-derive everything
-    // via TLS, same as `spawn`'s child re-derives `wk` after running its
-    // closure (in case of migration); here we need it up front too, to
-    // locate `f_ptr`/`result_ptr` on our own stack.
     let wk = <S::Worker as WorkerOps<S>>::current().expect("cmpth: worker vanished");
     let desc = wk.cur_task();
-    let stack_top = unsafe { (*desc).stack_top() } as usize;
-    let (f_ptr, result_ptr) = branch_layout::<Fb, Rb>(stack_top);
+    let (f_ptr, result_ptr) = branch_layout::<Fb, Rb>(stack_top - DISPATCH_SLOT_SIZE);
 
     let val = catch_unwind(AssertUnwindSafe(|| unsafe { f_ptr.read() }()));
     // The closure may have suspended and resumed on a different worker, so

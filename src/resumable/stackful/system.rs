@@ -206,7 +206,8 @@ impl<S: SpawnableStackfulTaskSystem + StackfulSchedulerSystem> crate::traits::sc
 where
     S::Desc: StackfulTaskDesc,
     S::Worker: crate::resumable::stackful::worker::ContextSwitcher<S>
-        + crate::resumable::common::worker::DescWorkerOps<S>,
+        + crate::resumable::common::worker::DescWorkerOps<S>
+        + crate::resumable::stackful::worker::BranchWarmPool<S>,
 {
     fn parallel_call<Fa, Fb, Ra, Rb>(a: Fa, b: Fb) -> (Ra, Rb)
     where

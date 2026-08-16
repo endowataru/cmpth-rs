@@ -195,6 +195,73 @@ fn parallel_call_nested_recursive_nothing_corrupts_across_worker_migration() {
 }
 
 // ---------------------------------------------------------------------------
+// parallel_call's warm-reuse cache (`BranchWarmPool`,
+// `docs/scoped-ult-promotion.md` §9.10): un-stolen branches keep their
+// `ctx`/fixed-offset header valid and get reused across calls, skipping
+// `ContextPolicy::make_context`. These tests are the ones that can actually
+// distinguish "correct because it happens to rebuild everything every time"
+// from "correct even when reusing a stale-looking descriptor".
+// ---------------------------------------------------------------------------
+
+/// A single worker, so every branch below takes the un-stolen fast path —
+/// the *only* path that ever populates or reads back from the warm cache.
+/// Alternates several genuinely different closure shapes (captured byte
+/// count, alignment, and result type all differ) back to back on the same
+/// worker: each later call should be popping a descriptor whose `ctx` was
+/// built — and whose header region was last written — for a *different*
+/// type than the one it's about to run. Wrong results here would mean the
+/// fixed dispatch-slot/`f_ptr`/`result_ptr` offsets aren't actually
+/// type-independent the way the design assumes.
+#[test]
+fn parallel_call_warm_cache_reused_correctly_across_different_closure_types() {
+    DefaultStackfulOnlyTaskSystem::builder().workers(1).run(|| {
+        for round in 0..50u64 {
+            // Round shape 1: tiny closures, u64 result.
+            let (a, b) = DefaultStackfulOnlyTaskSystem::parallel_call(move || round + 1, move || round + 2);
+            assert_eq!((a, b), (round + 1, round + 2));
+
+            // Round shape 2: a `Vec` + several scalars captured, `u32` result
+            // — a different size, alignment, and result type than shape 1.
+            let v = vec![round as u32, round as u32 + 1, round as u32 + 2];
+            let x = round;
+            let y = round * 2;
+            let (a2, b2) = DefaultStackfulOnlyTaskSystem::parallel_call(
+                move || v.iter().sum::<u32>(),
+                move || (x + y) as u32,
+            );
+            assert_eq!(a2, (round as u32) + (round as u32 + 1) + (round as u32 + 2));
+            assert_eq!(b2, (round + round * 2) as u32);
+
+            // Round shape 3: unit result, to exercise a zero-sized `Rb`.
+            let touched = Arc::new(AtomicBool::new(false));
+            let touched2 = Arc::clone(&touched);
+            let ((), rc) = DefaultStackfulOnlyTaskSystem::parallel_call(
+                move || { touched2.store(true, Ordering::Relaxed); },
+                move || round,
+            );
+            assert!(touched.load(Ordering::Relaxed));
+            assert_eq!(rc, round);
+        }
+    });
+}
+
+/// A closure whose captured data exceeds `BRANCH_HEADER_BUDGET`: exercises
+/// the oversized-fallback path (dynamic `exec_top`, never warm-cached —
+/// exactly what every `parallel_call` did before this cache existed).
+/// Correctness only, since this path is deliberately never sped up.
+#[test]
+fn parallel_call_oversized_closure_falls_back_correctly() {
+    DefaultStackfulOnlyTaskSystem::builder().workers(2).run(|| {
+        let big = [7u64; 40]; // 320 bytes, well over the fixed budget
+        let (a, b) = DefaultStackfulOnlyTaskSystem::parallel_call(
+            || 1u64,
+            move || big.iter().sum::<u64>(),
+        );
+        assert_eq!((a, b), (1, 7 * 40));
+    });
+}
+
+// ---------------------------------------------------------------------------
 // block_on — exercises ResumablePoller's actual park/wake path, not just the
 // always-ready case (see `traits::stackful::SpawnableStackfulTaskSystem::block_on`'s
 // doctest, which only ever polls `async { 6 * 7 }` once and never parks).

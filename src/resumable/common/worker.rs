@@ -13,7 +13,7 @@
 //! live in `stackful::worker`.
 
 use std::alloc::Layout;
-use std::cell::Cell;
+use std::cell::{Cell, UnsafeCell};
 use std::ptr;
 
 use crate::resumable::common::deque::{RunQueueStealer, Steal, WorkerRunQueue};
@@ -278,11 +278,24 @@ pub struct UltWorker<S: WorkerSystem + PoolSystem> {
     /// (`resumable/stackless/worker.rs`) and `yield_now`'s blanket impl
     /// (`resumable/stackless/system.rs`).
     pub(crate) yield_requested: Cell<bool>,
+    /// Per-worker warm-reuse cache for `parallel_call` branch descriptors
+    /// (`resumable::stackful::thread::parallel_call` /
+    /// `resumable::stackful::worker::BranchWarmPool`): descriptors that were
+    /// pushed as a branch, never actually switched into, and popped back
+    /// un-stolen -- their `ctx` (and fixed-offset header) are therefore
+    /// still exactly as `ContextPolicy::make_context` last left them, so a
+    /// later `parallel_call` on this same worker can reuse one without
+    /// calling `make_context` again. Only ever touched by the owning
+    /// worker (mirrors `SimplePool`'s own per-worker
+    /// `UnsafeCell<Vec<*mut Node<D>>>`, `resumable/common/pool.rs`) — a
+    /// stackless-only system simply never populates it.
+    pub(crate) branch_warm: UnsafeCell<Vec<*mut S::Desc>>,
 }
 
-// `Cell` fields are only accessed by the owning base thread; `deque` is
-// internally synchronized; `shared` is read-only after init. None of this
-// (nor the inherent methods below) touches dispatch, so `WorkerSystem` is
+// `Cell`/`UnsafeCell` fields (including `branch_warm`) are only accessed by
+// the owning base thread; `deque` is internally synchronized; `shared` is
+// read-only after init. None of this (nor the inherent methods below)
+// touches dispatch, so `WorkerSystem` is
 // enough — no need for `SchedulerSystem`.
 unsafe impl<S: WorkerSystem + PoolSystem> Send for UltWorker<S> {}
 unsafe impl<S: WorkerSystem + PoolSystem> Sync for UltWorker<S> {}
@@ -299,6 +312,7 @@ impl<S: WorkerSystem + PoolSystem> UltWorker<S> {
             shared: Cell::new(ptr::null()),
             polling_async: Cell::new(ptr::null_mut()),
             yield_requested: Cell::new(false),
+            branch_warm: UnsafeCell::new(Vec::new()),
         }
     }
 
@@ -431,6 +445,30 @@ impl<S: WorkerSystem + PoolSystem> UltWorker<S> {
         );
         let opt: &mut Option<RunningTaskToken<S::Desc>> = unsafe { &mut *self.cur_task_cell.as_ptr() };
         opt.as_mut().expect("cmpth: no current task on worker")
+    }
+}
+
+// --- Drop ---
+
+/// Drains [`branch_warm`](UltWorker::branch_warm) back to the general pool
+/// at teardown so a scheduler that never fully un-caches every warm
+/// `parallel_call` branch (entirely normal — nothing forces the cache
+/// empty before `run`/`init` tears down) doesn't leak their stacks.
+///
+/// Sound to call [`free_task`](TaskPool::free_task) (which reaches
+/// `self.shared().task_pool`) from here: `Scheduler<S>` has no `Drop` impl
+/// of its own, so its fields drop in declaration order
+/// (`resumable/common/scheduler.rs`) — `workers` is declared before
+/// `task_pool`, so `task_pool` is still alive for every `UltWorker` this
+/// runs on. `shared` is bound once, before any worker runs, and never
+/// cleared (`bind_scheduler`'s own doc comment) — if `branch_warm` is
+/// non-empty at all, `parallel_call` must have already run successfully on
+/// this worker, which itself requires `shared` to already be bound.
+impl<S: WorkerSystem + PoolSystem> Drop for UltWorker<S> {
+    fn drop(&mut self) {
+        for &desc in unsafe { &*self.branch_warm.get() }.iter() {
+            unsafe { self.free_task(desc) };
+        }
     }
 }
 
