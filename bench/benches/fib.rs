@@ -65,6 +65,10 @@ fn bench_fib(c: &mut Criterion) {
     // §9.8.4) against the old spawn+join blanket it replaced, at every
     // worker count.
     bench_fib_parallel_invoke::<cmpth::DefaultStackfulOnlyTaskSystem>(&mut group, "cmpth-stackful-ult-parallel-invoke");
+    // Same again on a dual system: `DualTaskDesc`'s existing `TaskDispatch::Ctx`
+    // path carries the make_context-backed branch unmodified (§9.8.7), so this
+    // measures the extra tag-check cost dual pays on top of stackful-only.
+    bench_fib_parallel_invoke::<cmpth::DefaultDualTaskSystem>(&mut group, "cmpth-dual-parallel-invoke");
     bench_fib_system::<RayonBench>(&mut group, "rayon");
     #[cfg(feature = "massivethreads")]
     bench_fib_system::<MythBench>(&mut group, "myth");

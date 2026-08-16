@@ -986,3 +986,160 @@ fn poller_ult_queue_external_thread_wake() {
 
     os_thread.join().unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// parallel_call on DefaultDualTaskSystem — the make_context-backed,
+// warm-cached blanket (`resumable::stackful::thread::parallel_call`,
+// `docs/scoped-ult-promotion.md` §9.8.4/§9.10) is generic over any
+// `S: SpawnableStackfulTaskSystem + StackfulSchedulerSystem`, which
+// `DefaultDualTaskSystem` already satisfies — so it applies here with zero
+// code changes, riding on `DualTaskDesc`'s existing `TaskDispatch::Ctx`
+// path exactly as predicted (§9.8.7). Nothing previously exercised this:
+// every other `parallel_call` test in the crate uses a stackful-only
+// system. Mirrors `tests/stackful_only.rs`'s own suite.
+// ---------------------------------------------------------------------------
+
+/// Forces the branch to be stolen — see `tests/stackful_only.rs`'s test of
+/// the same name for why this is the only way to actually exercise
+/// `branch_entry` being switched into for the first time (here, additionally,
+/// through dual's tag-checked dispatch instead of stackful-only's untagged
+/// one).
+#[test]
+fn dual_parallel_call_stolen_branch_actually_runs() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    run(2, || {
+        let b_ran = Arc::new(AtomicBool::new(false));
+        let b_ran2 = Arc::clone(&b_ran);
+        let (a, b) = <DefaultDualTaskSystem as ScopedStackfulTaskSystem>::parallel_call(
+            move || {
+                let mut spins: u64 = 0;
+                while !b_ran2.load(Ordering::Acquire) {
+                    std::hint::spin_loop();
+                    spins += 1;
+                    assert!(spins < 200_000_000, "b never ran -- steal did not happen");
+                }
+                1u64
+            },
+            move || {
+                b_ran.store(true, Ordering::Release);
+                2u64
+            },
+        );
+        assert_eq!((a, b), (1, 2));
+    });
+}
+
+#[test]
+fn dual_parallel_call_unstolen_branch_panic_propagates() {
+    run(1, || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            <DefaultDualTaskSystem as ScopedStackfulTaskSystem>::parallel_call(|| 1u64, || -> u64 { panic!("boom-b-inline") })
+        }));
+        assert!(result.is_err(), "un-stolen branch panic should propagate through parallel_call");
+    });
+}
+
+#[test]
+fn dual_parallel_call_stolen_branch_panic_propagates() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    run(2, || {
+        let b_ran = Arc::new(AtomicBool::new(false));
+        let b_ran2 = Arc::clone(&b_ran);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            <DefaultDualTaskSystem as ScopedStackfulTaskSystem>::parallel_call(
+                move || {
+                    let mut spins: u64 = 0;
+                    while !b_ran2.load(Ordering::Acquire) {
+                        std::hint::spin_loop();
+                        spins += 1;
+                        assert!(spins < 200_000_000, "b never ran -- steal did not happen");
+                    }
+                    1u64
+                },
+                move || -> u64 {
+                    b_ran.store(true, Ordering::Release);
+                    panic!("boom-b-stolen");
+                },
+            )
+        }));
+        assert!(result.is_err(), "stolen branch panic should propagate through parallel_call");
+    });
+}
+
+/// Regression guard mirroring `tests/stackful_only.rs`'s test of the same
+/// name (that one caught a real bug: `parallel_call` using a worker
+/// reference captured before a migrating `a` ran). `a` here recurses
+/// through nested `parallel_call`s of its own, so any inner branch that
+/// gets stolen and joined migrates the calling ULT to a different worker
+/// before this call's own `a` returns.
+fn dual_parallel_fib(n: u64) -> u64 {
+    if n <= 1 {
+        return n;
+    }
+    let (a, b) = <DefaultDualTaskSystem as ScopedStackfulTaskSystem>::parallel_call(move || dual_parallel_fib(n - 1), move || dual_parallel_fib(n - 2));
+    a + b
+}
+
+#[test]
+fn dual_parallel_call_nested_recursive_nothing_corrupts_across_worker_migration() {
+    for _ in 0..30 {
+        run(4, || {
+            assert_eq!(dual_parallel_fib(24), 46_368);
+        });
+    }
+}
+
+/// Mirrors `tests/stackful_only.rs`'s warm-cache test: a single worker, so
+/// every branch takes the un-stolen fast path that populates/reads back
+/// from `BranchWarmPool`, alternating closure shapes to catch a wrong
+/// fixed-offset or stale-`dispatch_fn` bug.
+#[test]
+fn dual_parallel_call_warm_cache_reused_correctly_across_different_closure_types() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    run(1, || {
+        for round in 0..50u64 {
+            let (a, b) = <DefaultDualTaskSystem as ScopedStackfulTaskSystem>::parallel_call(move || round + 1, move || round + 2);
+            assert_eq!((a, b), (round + 1, round + 2));
+
+            let v = vec![round as u32, round as u32 + 1, round as u32 + 2];
+            let x = round;
+            let y = round * 2;
+            let (a2, b2) = <DefaultDualTaskSystem as ScopedStackfulTaskSystem>::parallel_call(
+                move || v.iter().sum::<u32>(),
+                move || (x + y) as u32,
+            );
+            assert_eq!(a2, (round as u32) + (round as u32 + 1) + (round as u32 + 2));
+            assert_eq!(b2, (round + round * 2) as u32);
+
+            let touched = Arc::new(AtomicBool::new(false));
+            let touched2 = Arc::clone(&touched);
+            let ((), rc) = <DefaultDualTaskSystem as ScopedStackfulTaskSystem>::parallel_call(
+                move || { touched2.store(true, Ordering::Relaxed); },
+                move || round,
+            );
+            assert!(touched.load(Ordering::Relaxed));
+            assert_eq!(rc, round);
+        }
+    });
+}
+
+/// Mirrors `tests/stackful_only.rs`'s oversized-closure test: exercises the
+/// dynamic-layout fallback (never warm-cached) that `header_fits` routes to
+/// when `Fb`/`StackResult<Rb>` exceed the fixed budget.
+#[test]
+fn dual_parallel_call_oversized_closure_falls_back_correctly() {
+    run(2, || {
+        let big = [7u64; 40]; // 320 bytes, well over the fixed budget
+        let (a, b) = <DefaultDualTaskSystem as ScopedStackfulTaskSystem>::parallel_call(
+            || 1u64,
+            move || big.iter().sum::<u64>(),
+        );
+        assert_eq!((a, b), (1, 7 * 40));
+    });
+}

@@ -42,6 +42,7 @@ fn bench_nqueens(c: &mut Criterion) {
     // the standalone scoped engine it's trying to approach.
     bench_nqueens_parallel_invoke::<cmpth::ScopedTaskSystem>(&mut group, "cmpth-parallel-invoke");
     bench_nqueens_parallel_invoke::<cmpth::DefaultStackfulOnlyTaskSystem>(&mut group, "cmpth-stackful-ult-parallel-invoke");
+    bench_nqueens_parallel_invoke::<cmpth::DefaultDualTaskSystem>(&mut group, "cmpth-dual-parallel-invoke");
     bench_nqueens_system::<RayonBench>(&mut group, "rayon");
     #[cfg(feature = "massivethreads")]
     bench_nqueens_system::<MythBench>(&mut group, "myth");
