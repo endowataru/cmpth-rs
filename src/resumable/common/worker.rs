@@ -290,10 +290,22 @@ pub struct UltWorker<S: WorkerSystem + PoolSystem> {
     /// `UnsafeCell<Vec<*mut Node<D>>>`, `resumable/common/pool.rs`) — a
     /// stackless-only system simply never populates it.
     pub(crate) branch_warm: UnsafeCell<Vec<*mut S::Desc>>,
+    /// Per-worker warm-reuse cache for `parallel_call`'s *stackless* pushed
+    /// branch (`resumable::stackless::thread::BranchPoll`,
+    /// `resumable::stackless::system::ScopedStacklessTaskSystem::parallel_call`).
+    /// Deliberately a **separate** field from `branch_warm`, even though
+    /// both are `*mut S::Desc` and for a dual system name the same concrete
+    /// `S::Desc` type: a `ctx`-committed descriptor (`branch_warm`) and a
+    /// `poll_fn`-committed one (this field) must never cross-pollinate —
+    /// `HasCtx::commit_as_ctx`/`HasPollFn::commit_as_poll_fn` are one-time
+    /// union pins on `DualTaskDesc`'s `Owned`, not something to flip back
+    /// and forth. A stackful-only system simply never populates this one.
+    pub(crate) branch_warm_async: UnsafeCell<Vec<*mut S::Desc>>,
 }
 
-// `Cell`/`UnsafeCell` fields (including `branch_warm`) are only accessed by
-// the owning base thread; `deque` is internally synchronized; `shared` is
+// `Cell`/`UnsafeCell` fields (including `branch_warm`/`branch_warm_async`)
+// are only accessed by the owning base thread; `deque` is internally
+// synchronized; `shared` is
 // read-only after init. None of this (nor the inherent methods below)
 // touches dispatch, so `WorkerSystem` is
 // enough — no need for `SchedulerSystem`.
@@ -313,7 +325,21 @@ impl<S: WorkerSystem + PoolSystem> UltWorker<S> {
             polling_async: Cell::new(ptr::null_mut()),
             yield_requested: Cell::new(false),
             branch_warm: UnsafeCell::new(Vec::new()),
+            branch_warm_async: UnsafeCell::new(Vec::new()),
         }
+    }
+
+    /// `parallel_call`'s stackless warm-reuse cache pop — see
+    /// `branch_warm_async`'s own doc comment. Only ever touched by the
+    /// owning worker.
+    pub(crate) fn branch_warm_async_pop(&self) -> Option<*mut S::Desc> {
+        unsafe { &mut *self.branch_warm_async.get() }.pop()
+    }
+
+    /// Push a descriptor back onto the stackless warm-reuse cache after an
+    /// un-stolen round trip.
+    pub(crate) fn branch_warm_async_push(&self, desc: *mut S::Desc) {
+        unsafe { &mut *self.branch_warm_async.get() }.push(desc);
     }
 
     pub(crate) fn root_desc(&self) -> &S::Desc {
@@ -468,6 +494,9 @@ impl<S: WorkerSystem + PoolSystem> Drop for UltWorker<S> {
     fn drop(&mut self) {
         for &desc in unsafe { &*self.branch_warm.get() }.iter() {
             unsafe { self.free_task(desc) };
+        }
+        for &desc in unsafe { &*self.branch_warm_async.get() }.iter() {
+            unsafe { self.free_async_task(desc) };
         }
     }
 }

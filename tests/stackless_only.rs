@@ -375,3 +375,67 @@ fn parallel_call_nested_recursive_e0733_regression_and_stress() {
         });
     }
 }
+
+// ---------------------------------------------------------------------------
+// parallel_call's warm-reuse cache for `b`'s pool-backed descriptor
+// (`UltWorker::branch_warm_async`, `docs/scoped-ult-promotion.md` §9.12):
+// un-stolen branches keep their pool slot and get reused across calls,
+// skipping `alloc_async_task`.
+// ---------------------------------------------------------------------------
+
+/// Single worker, so every branch below takes the un-stolen fast path — the
+/// only path that populates or reads back from the warm cache. Alternates
+/// several genuinely different closure/future shapes back to back: each
+/// later call should be popping a descriptor whose storage was last written
+/// for a *different* `Fb` than the one about to run.
+#[test]
+fn parallel_call_warm_cache_reused_correctly_across_different_closure_types() {
+    DefaultStacklessOnlyTaskSystem::builder().workers(1).run_async(async {
+        for round in 0..50u64 {
+            let (a, b) = DefaultStacklessOnlyTaskSystem::parallel_call(
+                move || async move { round + 1 },
+                move || async move { round + 2 },
+            )
+            .await;
+            assert_eq!((a, b), (round + 1, round + 2));
+
+            let v = vec![round as u32, round as u32 + 1, round as u32 + 2];
+            let x = round;
+            let y = round * 2;
+            let (a2, b2) = DefaultStacklessOnlyTaskSystem::parallel_call(
+                move || async move { v.iter().sum::<u32>() },
+                move || async move { (x + y) as u32 },
+            )
+            .await;
+            assert_eq!(a2, (round as u32) + (round as u32 + 1) + (round as u32 + 2));
+            assert_eq!(b2, (round + round * 2) as u32);
+
+            let touched = Arc::new(AtomicBool::new(false));
+            let touched2 = Arc::clone(&touched);
+            let ((), rc) = DefaultStacklessOnlyTaskSystem::parallel_call(
+                move || async move { touched2.store(true, Ordering::Relaxed); },
+                move || async move { round },
+            )
+            .await;
+            assert!(touched.load(Ordering::Relaxed));
+            assert_eq!(rc, round);
+        }
+    });
+}
+
+/// A closure/future whose captured data exceeds `ASYNC_POOL_SIZE` (512
+/// bytes): exercises the oversized-fallback path (dynamic per-call
+/// allocation, never warm-cached — exactly what every `parallel_call` did
+/// before this cache existed).
+#[test]
+fn parallel_call_oversized_closure_falls_back_correctly() {
+    DefaultStacklessOnlyTaskSystem::builder().workers(2).run_async(async {
+        let big = [7u64; 80]; // 640 bytes, well over ASYNC_POOL_SIZE
+        let (a, b) = DefaultStacklessOnlyTaskSystem::parallel_call(
+            || async { 1u64 },
+            move || async move { big.iter().sum::<u64>() },
+        )
+        .await;
+        assert_eq!((a, b), (1, 7 * 80));
+    });
+}

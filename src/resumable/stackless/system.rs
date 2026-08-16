@@ -101,13 +101,38 @@ impl<S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>> ScopedSt
         use crate::resumable::common::desc::SuspendedTaskToken;
         use crate::resumable::common::thread::{drop_stack_result, JoinHandle};
         use crate::resumable::common::worker::LocalQueue;
-        use crate::resumable::stackless::thread::{build_async_task, recurse, BranchPoll};
+        use crate::resumable::stackless::thread::{
+            async_branch_stack_size, build_async_task, recurse, write_async_branch, BranchPoll,
+            BuiltAsyncTask,
+        };
 
         let wk = UltWorker::<Self>::current().expect("cmpth: parallel_call called outside a worker");
 
-        let built = build_async_task::<Self, Rb, Fb, MkB>(wk, mk_b);
-        // SAFETY: `built.desc` was freshly built above and has never been
-        // wrapped in a token before — trivially exclusive.
+        // Warm-cache-eligible iff a pool-path descriptor's fixed buffer
+        // (always exactly `ASYNC_POOL_SIZE` bytes, regardless of the
+        // smaller size any one call requests — `ReturnPool::alloc`) is big
+        // enough for this call's own `Fb`/`StackResult<Rb>`. Oversized ones
+        // fall back to today's dynamic per-call allocation, exactly as
+        // before this cache existed — just never cached.
+        let fits = async_branch_stack_size::<Rb, Fb>() <= <Self as PoolSystem>::ASYNC_POOL_SIZE;
+        let warm = if fits { wk.branch_warm_async_pop() } else { None };
+
+        let built = match warm {
+            Some(desc) => {
+                // SAFETY: popped from our own warm cache, which only ever
+                // holds descriptors this same function pushed back after
+                // popping them un-stolen (never shared, never handed to a
+                // thief) — exclusively ours, with storage already proven
+                // >= `ASYNC_POOL_SIZE` >= this call's own stack_size (same
+                // `fits` gate on both the push and pop sides).
+                let (f_ptr, result_ptr) = unsafe { write_async_branch::<Self, Rb, Fb, MkB>(desc, mk_b) };
+                BuiltAsyncTask { desc, f_ptr, result_ptr }
+            }
+            None => build_async_task::<Self, Rb, Fb, MkB>(wk, mk_b),
+        };
+        // SAFETY: `built.desc` is either freshly built above (never wrapped
+        // in a token before) or came from the warm cache (see above) —
+        // exclusively ours either way.
         wk.push(unsafe { SuspendedTaskToken::from_raw(built.desc) }.into());
 
         // `built` (not a bare `*mut _`) is what survives the await — see
@@ -135,7 +160,7 @@ impl<S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>> ScopedSt
                     // Not stolen: b's task never actually ran through the
                     // scheduler — poll it directly, no poll_fn indirection.
                     let desc = popped.into_raw();
-                    let rb = BranchPoll::<Self, Fb> { desc, f_ptr: built.f_ptr }.await;
+                    let rb = BranchPoll::<Self, Fb> { desc, f_ptr: built.f_ptr, fits }.await;
                     (ra, rb)
                 } else {
                     wk.push(popped.into());
