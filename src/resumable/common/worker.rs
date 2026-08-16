@@ -450,7 +450,7 @@ impl<S: WorkerSystem + PoolSystem> UltWorker<S> {
 
 // --- Drop ---
 
-/// Drains [`branch_warm`](UltWorker::branch_warm) back to the general pool
+/// Drains `branch_warm` back to the general pool
 /// at teardown so a scheduler that never fully un-caches every warm
 /// `parallel_call` branch (entirely normal — nothing forces the cache
 /// empty before `run`/`init` tears down) doesn't leak their stacks.

@@ -145,10 +145,10 @@ fn header_fits<Fb, Rb>() -> bool {
 /// (`RunnableItem::run_on`) already knows how to run a
 /// `SuspendedTaskToken`; a `make_context`-built one is indistinguishable
 /// from an ordinarily-suspended one to that machinery, so the only new code
-/// needed is [`branch_entry`] itself, and finishing joins the existing
+/// needed is `branch_entry` itself, and finishing joins the existing
 /// `JoinHandle` protocol verbatim.
 ///
-/// When `Fb`/`StackResult<Rb>` fit [`BRANCH_HEADER_BUDGET`], an un-stolen
+/// When `Fb`/`StackResult<Rb>` fit the fixed header budget, an un-stolen
 /// branch's descriptor goes to [`BranchWarmPool`] instead of back to the
 /// general pool: its `ctx` was never touched (never switched into), so a
 /// later call on this same worker can reuse it — same stack, same
