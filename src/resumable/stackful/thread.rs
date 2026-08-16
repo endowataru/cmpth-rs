@@ -21,12 +21,6 @@ use crate::resumable::stackful::worker::{BranchWarmPool, ContextSwitcher, Stackf
 // spawn (child-first fork)
 // ---------------------------------------------------------------------------
 
-/// Spawn a ULT.  Child-first: the child starts immediately on this worker and
-/// the parent's continuation is pushed to the deque for stealing.
-///
-/// The closure `F` and the result slot `StackResult<T>` are placed directly on
-/// the child's stack, avoiding two heap allocations that the old Box-erasure
-/// approach required.
 // Reserve space at the top of a task's stack (high addresses) for its
 // closure and result slot.  The execution stack gets the rest below.
 //
@@ -54,6 +48,12 @@ fn branch_layout<F, T>(stack_top: usize) -> (*mut F, *mut StackResult<T>) {
     (f_addr as *mut F, result_addr as *mut StackResult<T>)
 }
 
+/// Spawn a ULT.  Child-first: the child starts immediately on this worker and
+/// the parent's continuation is pushed to the deque for stealing.
+///
+/// The closure `F` and the result slot `StackResult<T>` are placed directly on
+/// the child's stack, avoiding two heap allocations that the old Box-erasure
+/// approach required.
 pub fn spawn<S, T, F>(f: F) -> JoinHandle<S, T>
 where
     S: StackfulSchedulerSystem,
