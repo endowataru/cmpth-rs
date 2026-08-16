@@ -1143,3 +1143,157 @@ fn dual_parallel_call_oversized_closure_falls_back_correctly() {
         assert_eq!((a, b), (1, 7 * 40));
     });
 }
+
+// ---------------------------------------------------------------------------
+// ScopedStacklessTaskSystem::parallel_call on DefaultDualTaskSystem — the
+// recurse(a)/push-and-maybe-direct-poll(b) blanket
+// (`resumable::stackless::system::ScopedStacklessTaskSystem::parallel_call`,
+// `docs/scoped-ult-promotion.md`) is generic over any
+// `S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>`, which
+// `DefaultDualTaskSystem` already satisfies — applies here with zero code
+// changes. Mirrors `tests/stackless_only.rs`'s own suite (the async
+// counterpart to the `dual_parallel_call_*` stackful tests above).
+// ---------------------------------------------------------------------------
+
+// Small extension trait so panic tests can catch a panic across an
+// `.await` point — same shape as `tests/stackless_only.rs`'s own
+// `AwaitCatch`/`AwaitCatchFuture` (not shared across the two test binaries,
+// each is a separate compilation unit).
+trait DualAwaitCatch: std::future::Future + Sized {
+    fn await_catch(self) -> DualAwaitCatchFuture<Self> {
+        DualAwaitCatchFuture(self)
+    }
+}
+impl<F: std::future::Future> DualAwaitCatch for F {}
+
+struct DualAwaitCatchFuture<F>(F);
+
+impl<F: std::future::Future> std::future::Future for DualAwaitCatchFuture<F> {
+    type Output = Result<F::Output, ()>;
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let inner = unsafe { self.map_unchecked_mut(|s| &mut s.0) };
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| inner.poll(cx))) {
+            Ok(std::task::Poll::Ready(v)) => std::task::Poll::Ready(Ok(v)),
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Err(_) => std::task::Poll::Ready(Err(())),
+        }
+    }
+}
+
+#[test]
+fn dual_async_parallel_call_basic() {
+    <DefaultDualTaskSystem as StacklessInitSystem>::builder().workers(1).run_async(async {
+        let (a, b) = <DefaultDualTaskSystem as ScopedStacklessTaskSystem>::parallel_call(|| async { 1 + 1 }, || async { 2 + 2 }).await;
+        assert_eq!((a, b), (2, 4));
+    });
+}
+
+/// Mirrors `tests/stackless_only.rs::parallel_call_stolen_branch_actually_runs`.
+#[test]
+fn dual_async_parallel_call_stolen_branch_actually_runs() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    <DefaultDualTaskSystem as StacklessInitSystem>::builder().workers(2).run_async(async {
+        let b_ran = Arc::new(AtomicBool::new(false));
+        let b_ran2 = Arc::clone(&b_ran);
+        let (a, b) = <DefaultDualTaskSystem as ScopedStacklessTaskSystem>::parallel_call(
+            move || async move {
+                let mut spins: u64 = 0;
+                while !b_ran2.load(Ordering::Acquire) {
+                    std::hint::spin_loop();
+                    spins += 1;
+                    assert!(spins < 200_000_000, "b never ran -- steal did not happen");
+                }
+                1u64
+            },
+            move || async move {
+                b_ran.store(true, Ordering::Release);
+                2u64
+            },
+        )
+        .await;
+        assert_eq!((a, b), (1, 2));
+    });
+}
+
+/// Mirrors `tests/stackless_only.rs::parallel_call_unstolen_branch_panic_propagates`.
+#[test]
+fn dual_async_parallel_call_unstolen_branch_panic_propagates() {
+    <DefaultDualTaskSystem as StacklessInitSystem>::builder().workers(1).run_async(async {
+        let result = <DefaultDualTaskSystem as ScopedStacklessTaskSystem>::parallel_call(
+            || async { 1u64 },
+            || async {
+                panic!("boom-b-inline");
+                #[allow(unreachable_code)]
+                0u64
+            },
+        )
+        .await_catch()
+        .await;
+        assert!(result.is_err(), "un-stolen branch panic should propagate through parallel_call");
+    });
+}
+
+/// Mirrors `tests/stackless_only.rs::parallel_call_stolen_branch_panic_propagates`.
+#[test]
+fn dual_async_parallel_call_stolen_branch_panic_propagates() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    <DefaultDualTaskSystem as StacklessInitSystem>::builder().workers(2).run_async(async {
+        let b_ran = Arc::new(AtomicBool::new(false));
+        let b_ran2 = Arc::clone(&b_ran);
+        let result = <DefaultDualTaskSystem as ScopedStacklessTaskSystem>::parallel_call(
+            move || async move {
+                let mut spins: u64 = 0;
+                while !b_ran2.load(Ordering::Acquire) {
+                    std::hint::spin_loop();
+                    spins += 1;
+                    assert!(spins < 200_000_000, "b never ran -- steal did not happen");
+                }
+                1u64
+            },
+            move || async move {
+                b_ran.store(true, Ordering::Release);
+                panic!("boom-b-stolen");
+                #[allow(unreachable_code)]
+                2u64
+            },
+        )
+        .await_catch()
+        .await;
+        assert!(result.is_err(), "stolen branch panic should propagate through parallel_call");
+    });
+}
+
+/// E0733 regression + nested-recursion/worker-migration stress — this is
+/// the exact test shape that caught a real bug during development (stale
+/// `wk` used after `recurse(mk_a).await`, which can resume this poll chain
+/// on a different worker's OS thread with no native-stack continuity to
+/// rely on, unlike stackful's analogous migration case).
+fn dual_parallel_fib_async(n: u64) -> impl std::future::Future<Output = u64> + Send {
+    async move {
+        if n <= 1 {
+            return n;
+        }
+        let (a, b) = <DefaultDualTaskSystem as ScopedStacklessTaskSystem>::parallel_call(
+            move || dual_parallel_fib_async(n - 1),
+            move || dual_parallel_fib_async(n - 2),
+        )
+        .await;
+        a + b
+    }
+}
+
+#[test]
+fn dual_async_parallel_call_nested_recursive_e0733_regression_and_stress() {
+    for _ in 0..30 {
+        <DefaultDualTaskSystem as StacklessInitSystem>::builder().workers(4).run_async(async {
+            assert_eq!(dual_parallel_fib_async(20).await, 6_765);
+        });
+    }
+}
