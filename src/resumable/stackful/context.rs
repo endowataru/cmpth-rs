@@ -91,7 +91,49 @@ macro_rules! call_switch {
 unsafe impl ContextPolicy for NativeContext {
     #[inline(always)]
     unsafe fn swap_context(to: Context, func: SwitchFn, a1: *mut (), a2: *mut ()) -> Transfer {
-        unsafe { Transfer(call_switch!(cmpth_swap_context, to.0, func, a1, a2)) }
+        // Fully inlined: the return address pushed into the saved frame is
+        // the local label `3:` at the end of *this* block, so a resume lands
+        // straight back in the caller instead of in a separate symbol.  Only
+        // numeric local labels may be used — the compiler is free to
+        // duplicate an `asm!` block, and a named label would then be a
+        // duplicate symbol.
+        let ret: *mut ();
+        unsafe {
+            core::arch::asm!(
+                "sub  sp, sp, #96",
+                "stp  x19, x20, [sp,  #0]",
+                "stp  x21, x22, [sp, #16]",
+                "stp  x23, x24, [sp, #32]",
+                "stp  x25, x26, [sp, #48]",
+                "stp  x27, x28, [sp, #64]",
+                "adr  x30, 3f",          // resume address = end of this block
+                "stp  x29, x30, [sp, #80]",
+
+                "mov  x9,  x0",          // x9  = destination context
+                "mov  x10, x1",          // x10 = func
+                "mov  x0,  sp",          // arg0 = prev_ctx (our saved frame)
+                "mov  x1,  x2",          // arg1 = a1
+                "mov  x2,  x3",          // arg2 = a2
+
+                "ldp  x19, x20, [x9,  #0]",
+                "ldp  x21, x22, [x9, #16]",
+                "ldp  x23, x24, [x9, #32]",
+                "ldp  x25, x26, [x9, #48]",
+                "ldp  x27, x28, [x9, #64]",
+                "ldp  x29, x30, [x9, #80]",
+                "add  sp,  x9, #96",     // pop the destination frame
+                "br   x10",              // func(prev_ctx, a1, a2); ret -> destination
+                "3:",                    // resumed: x0 = the resumer's Transfer
+                inout("x0") to.0 => ret,
+                inout("x1") func => _,
+                inout("x2") a1 => _,
+                inout("x3") a2 => _,
+                lateout("v8") _, lateout("v9") _, lateout("v10") _, lateout("v11") _,
+                lateout("v12") _, lateout("v13") _, lateout("v14") _, lateout("v15") _,
+                clobber_abi("C"),
+            );
+        }
+        Transfer(ret)
     }
 
     #[inline(always)]
