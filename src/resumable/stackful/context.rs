@@ -122,6 +122,18 @@ unsafe fn native_make_context(stack_top: *mut u8, entry: EntryFn, arg: *mut ()) 
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 compile_error!("cmpth: no ContextPolicy implementation for this architecture");
 
+// Both implementations take their inputs in the registers `func` already
+// wants them in, rather than in the C-ABI argument registers.  Out of line
+// that was not a choice — the arguments arrived where the ABI put them and
+// had to be shuffled into place.  Inlined it is free, and it is why these
+// blocks end up with a single `mov` of setup (`arg0 = prev_ctx`, which can
+// only be computed once the frame is on the stack) instead of five.
+//
+// The register has to be named explicitly rather than left to `in(reg)`:
+// `clobber_abi("C")` marks every caller-saved register as clobbered, so the
+// allocator would pick a callee-saved one — exactly the registers the
+// destination frame is about to overwrite.
+
 // x86-64 (System V).  Same shape as the AArch64 implementation below; the two
 // differences worth calling out:
 //
@@ -153,12 +165,7 @@ unsafe impl ContextPolicy for NativeContext {
                 "push r12",
                 "push rbp",
                 "push rbx",
-                // rsp = prev_ctx
-                "mov  r8, rdi",          // r8 = destination context
-                "mov  r9, rsi",          // r9 = func
-                "mov  rdi, rsp",         // arg0 = prev_ctx
-                "mov  rsi, rdx",         // arg1 = a1
-                "mov  rdx, rcx",         // arg2 = a2
+                "mov  rdi, rsp",         // arg0 = prev_ctx (our saved frame)
 
                 "mov  rsp, r8",          // switch to the destination
                 "pop  rbx",
@@ -169,10 +176,10 @@ unsafe impl ContextPolicy for NativeContext {
                 "pop  r15",
                 "jmp  r9",               // func(prev_ctx, a1, a2); ret -> destination
                 "3:",                    // resumed: rax = the resumer's Transfer
-                inout("rdi") to.0 => _,
-                inout("rsi") func => _,
-                inout("rdx") a1 => _,
-                inout("rcx") a2 => _,
+                in("r8") to.0,
+                in("r9") func,
+                inout("rsi") a1 => _,    // func's arg1, already in place
+                inout("rdx") a2 => _,    // func's arg2, already in place
                 lateout("rax") ret,
                 clobber_abi("C"),
             );
@@ -198,16 +205,11 @@ unsafe impl ContextPolicy for NativeContext {
                 "push r12",
                 "push rbp",
                 "push rbx",
-                // rsp = prev_ctx
-                "mov  r8, rdi",          // r8  = new stack top
-                "mov  r9, rsi",          // r9  = func
-                "mov  r10, rsp",         // r10 = prev_ctx
                 "mov  rdi, rsp",         // arg0 = prev_ctx
-                "mov  rsi, rdx",         // arg1 = a1
-                "mov  rdx, rcx",         // arg2 = a2
+                "mov  r10, rsp",         // r10 = prev_ctx, for the return path
 
                 "and  r8, -16",          // align the new stack top
-                "mov  [r8 - 8], r10",    // prev_ctx, for the return path below
+                "mov  [r8 - 8], r10",
                 "lea  r11, [rip + 4f]",
                 "mov  [r8 - 24], r11",   // func's return address
                 "lea  rsp, [r8 - 24]",   // == 8 (mod 16): func enters as if called
@@ -224,10 +226,10 @@ unsafe impl ContextPolicy for NativeContext {
                 "pop  r15",
                 "ret",                   // -> `3:` (the address pushed above)
                 "3:",
-                inout("rdi") new_sp => _,
-                inout("rsi") func => _,
-                inout("rdx") a1 => _,
-                inout("rcx") a2 => _,
+                inout("r8") new_sp => _,
+                inout("r9") func => _,
+                inout("rsi") a1 => _,
+                inout("rdx") a2 => _,
                 lateout("rax") ret,
                 clobber_abi("C"),
             );
@@ -256,12 +258,10 @@ unsafe impl ContextPolicy for NativeContext {
                 // rsp = prev_ctx.  r12/r13/r14 are ours to use now: the
                 // previous values are in the frame and both exit paths
                 // restore every callee-saved register from a frame.
-                "mov  r12, rdi",         // r12 = destination context
+                "mov  r12, r8",          // r12 = destination context
                 "mov  r13, rsp",         // r13 = prev_ctx
-                "mov  r14, rsi",         // r14 = func
+                "mov  r14, r9",          // r14 = func
                 "mov  rdi, rsp",         // arg0 = prev_ctx
-                "mov  rsi, rdx",         // arg1 = a1
-                "mov  rdx, rcx",         // arg2 = a2
 
                 // Run func on the destination stack, below its intact frame.
                 // ctx == 8 (mod 16), so sub 8 aligns rsp for the call.
@@ -286,10 +286,10 @@ unsafe impl ContextPolicy for NativeContext {
                 "ret",                   // cancel -> `3:`; commit -> the
                                          // destination's own resume label
                 "3:",
-                inout("rdi") to.0 => _,
-                inout("rsi") func => _,
-                inout("rdx") a1 => _,
-                inout("rcx") a2 => _,
+                in("r8") to.0,
+                in("r9") func,
+                inout("rsi") a1 => _,
+                inout("rdx") a2 => _,
                 lateout("rax") ret,
                 clobber_abi("C"),
             );
@@ -301,13 +301,10 @@ unsafe impl ContextPolicy for NativeContext {
     unsafe fn restore_context(to: Context, func: RestoreFn, a1: *mut (), a2: *mut ()) -> ! {
         // The current context is abandoned: nothing needs saving, and this
         // block never returns, so no clobber bookkeeping is needed either.
+        // `func` takes (a1, a2), so both are passed in place and no setup
+        // instruction is left at all.
         unsafe {
             core::arch::asm!(
-                "mov  r8, rdi",          // r8 = destination context
-                "mov  r9, rsi",          // r9 = func
-                "mov  rdi, rdx",         // arg0 = a1
-                "mov  rsi, rcx",         // arg1 = a2
-
                 "mov  rsp, r8",
                 "pop  rbx",
                 "pop  rbp",
@@ -316,10 +313,10 @@ unsafe impl ContextPolicy for NativeContext {
                 "pop  r14",
                 "pop  r15",
                 "jmp  r9",               // func(a1, a2); ret -> destination
-                in("rdi") to.0,
-                in("rsi") func,
-                in("rdx") a1,
-                in("rcx") a2,
+                in("r8") to.0,
+                in("r9") func,
+                in("rdi") a1,            // func's arg0
+                in("rsi") a2,            // func's arg1
                 options(noreturn),
             );
         }
@@ -363,12 +360,7 @@ unsafe impl ContextPolicy for NativeContext {
                 "stp  x27, x28, [sp, #64]",
                 "adr  x30, 3f",          // resume address = end of this block
                 "stp  x29, x30, [sp, #80]",
-
-                "mov  x9,  x0",          // x9  = destination context
-                "mov  x10, x1",          // x10 = func
                 "mov  x0,  sp",          // arg0 = prev_ctx (our saved frame)
-                "mov  x1,  x2",          // arg1 = a1
-                "mov  x2,  x3",          // arg2 = a2
 
                 "ldp  x19, x20, [x9,  #0]",
                 "ldp  x21, x22, [x9, #16]",
@@ -379,10 +371,11 @@ unsafe impl ContextPolicy for NativeContext {
                 "add  sp,  x9, #96",     // pop the destination frame
                 "br   x10",              // func(prev_ctx, a1, a2); ret -> destination
                 "3:",                    // resumed: x0 = the resumer's Transfer
-                inout("x0") to.0 => ret,
-                inout("x1") func => _,
-                inout("x2") a1 => _,
-                inout("x3") a2 => _,
+                in("x9") to.0,
+                in("x10") func,
+                inout("x1") a1 => _,     // func's arg1, already in place
+                inout("x2") a2 => _,     // func's arg2, already in place
+                lateout("x0") ret,
                 lateout("v8") _, lateout("v9") _, lateout("v10") _, lateout("v11") _,
                 lateout("v12") _, lateout("v13") _, lateout("v14") _, lateout("v15") _,
                 clobber_abi("C"),
@@ -412,12 +405,7 @@ unsafe impl ContextPolicy for NativeContext {
                 "stp  x27, x28, [sp, #64]",
                 "adr  x30, 3f",          // resume address = end of this block
                 "stp  x29, x30, [sp, #80]",
-
-                "mov  x9,  x0",          // x9  = new stack top
-                "mov  x10, x1",          // x10 = func
                 "mov  x0,  sp",          // arg0 = prev_ctx
-                "mov  x1,  x2",          // arg1 = a1
-                "mov  x2,  x3",          // arg2 = a2
 
                 "bic  x9, x9, #15",      // align the new stack top
                 "mov  x11, sp",          // keep prev frame for the return path
@@ -437,10 +425,11 @@ unsafe impl ContextPolicy for NativeContext {
                 "add  sp,  x9, #96",
                 "ret",                   // -> `3:` (the address stored above)
                 "3:",
-                inout("x0") new_sp => ret,
-                inout("x1") func => _,
-                inout("x2") a1 => _,
-                inout("x3") a2 => _,
+                inout("x9") new_sp => _,
+                in("x10") func,
+                inout("x1") a1 => _,
+                inout("x2") a2 => _,
+                lateout("x0") ret,
                 lateout("v8") _, lateout("v9") _, lateout("v10") _, lateout("v11") _,
                 lateout("v12") _, lateout("v13") _, lateout("v14") _, lateout("v15") _,
                 clobber_abi("C"),
@@ -471,12 +460,9 @@ unsafe impl ContextPolicy for NativeContext {
                 // x19/x20 are ours to use now: the previous values are in the
                 // frame and both exit paths restore every callee-saved
                 // register from a frame.
-                "mov  x19, x0",          // x19 = destination context
+                "mov  x19, x9",          // x19 = destination context
                 "mov  x20, sp",          // x20 = previous frame
-                "mov  x10, x1",          // x10 = func
                 "mov  x0,  sp",          // arg0 = prev_ctx
-                "mov  x1,  x2",          // arg1 = a1
-                "mov  x2,  x3",          // arg2 = a2
 
                 "mov  sp,  x19",         // run func on the destination stack,
                                          // below the destination's frame
@@ -498,10 +484,11 @@ unsafe impl ContextPolicy for NativeContext {
                 "ret",                   // cancel -> `3:`; commit -> the
                                          // destination's own resume label
                 "3:",
-                inout("x0") to.0 => ret,
-                inout("x1") func => _,
-                inout("x2") a1 => _,
-                inout("x3") a2 => _,
+                inout("x9") to.0 => _,
+                in("x10") func,
+                inout("x1") a1 => _,
+                inout("x2") a2 => _,
+                lateout("x0") ret,
                 lateout("v8") _, lateout("v9") _, lateout("v10") _, lateout("v11") _,
                 lateout("v12") _, lateout("v13") _, lateout("v14") _, lateout("v15") _,
                 clobber_abi("C"),
@@ -514,13 +501,10 @@ unsafe impl ContextPolicy for NativeContext {
     unsafe fn restore_context(to: Context, func: RestoreFn, a1: *mut (), a2: *mut ()) -> ! {
         // The current context is abandoned: nothing needs saving, and this
         // block never returns, so no clobber bookkeeping is needed either.
+        // `func` takes (a1, a2), so both are passed in place and no setup
+        // instruction is left at all.
         unsafe {
             core::arch::asm!(
-                "mov  x9,  x0",          // x9  = destination context
-                "mov  x10, x1",          // x10 = func
-                "mov  x0,  x2",          // arg0 = a1
-                "mov  x1,  x3",          // arg1 = a2
-
                 "ldp  x19, x20, [x9,  #0]",
                 "ldp  x21, x22, [x9, #16]",
                 "ldp  x23, x24, [x9, #32]",
@@ -529,10 +513,10 @@ unsafe impl ContextPolicy for NativeContext {
                 "ldp  x29, x30, [x9, #80]",
                 "add  sp,  x9, #96",
                 "br   x10",              // func(a1, a2); ret -> destination
-                in("x0") to.0,
-                in("x1") func,
-                in("x2") a1,
-                in("x3") a2,
+                in("x9") to.0,
+                in("x10") func,
+                in("x0") a1,             // func's arg0
+                in("x1") a2,             // func's arg1
                 options(noreturn),
             );
         }
