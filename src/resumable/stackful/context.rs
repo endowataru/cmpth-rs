@@ -69,25 +69,6 @@ unsafe impl ContextPolicy for NativeContext {
 // covers the ordinary caller-saved set; x19–x28 stay with the callee (the
 // assembly saves them, as the C ABI promises).
 #[cfg(target_arch = "aarch64")]
-macro_rules! call_switch {
-    ($sym:ident, $x0:expr, $x1:expr, $x2:expr, $x3:expr) => {{
-        let ret: *mut ();
-        core::arch::asm!(
-            "bl {f}",
-            f = sym $sym,
-            inout("x0") $x0 => ret,
-            in("x1") $x1,
-            in("x2") $x2,
-            in("x3") $x3,
-            lateout("v8") _, lateout("v9") _, lateout("v10") _, lateout("v11") _,
-            lateout("v12") _, lateout("v13") _, lateout("v14") _, lateout("v15") _,
-            clobber_abi("C"),
-        );
-        ret
-    }};
-}
-
-#[cfg(target_arch = "aarch64")]
 unsafe impl ContextPolicy for NativeContext {
     #[inline(always)]
     unsafe fn swap_context(to: Context, func: SwitchFn, a1: *mut (), a2: *mut ()) -> Transfer {
@@ -143,7 +124,55 @@ unsafe impl ContextPolicy for NativeContext {
         a1: *mut (),
         a2: *mut (),
     ) -> Transfer {
-        unsafe { Transfer(call_switch!(cmpth_save_context, new_sp, func, a1, a2)) }
+        // Two local labels: `4:` is where `func` returns to (the switch was
+        // never committed to a destination context, so the previous one is
+        // resumed at once), `3:` is where a genuine resume lands.
+        let ret: *mut ();
+        unsafe {
+            core::arch::asm!(
+                "sub  sp, sp, #96",
+                "stp  x19, x20, [sp,  #0]",
+                "stp  x21, x22, [sp, #16]",
+                "stp  x23, x24, [sp, #32]",
+                "stp  x25, x26, [sp, #48]",
+                "stp  x27, x28, [sp, #64]",
+                "adr  x30, 3f",          // resume address = end of this block
+                "stp  x29, x30, [sp, #80]",
+
+                "mov  x9,  x0",          // x9  = new stack top
+                "mov  x10, x1",          // x10 = func
+                "mov  x0,  sp",          // arg0 = prev_ctx
+                "mov  x1,  x2",          // arg1 = a1
+                "mov  x2,  x3",          // arg2 = a2
+
+                "bic  x9, x9, #15",      // align the new stack top
+                "mov  x11, sp",          // keep prev frame for the return path
+                "mov  sp, x9",
+                "str  x11, [sp, #-16]!", // push prev frame on the new stack
+                "adr  x30, 4f",
+                "br   x10",              // func(prev_ctx, a1, a2) on the new stack
+
+                "4:",                    // func returned: resume the saved context
+                "ldr  x9, [sp]",
+                "ldp  x19, x20, [x9,  #0]",
+                "ldp  x21, x22, [x9, #16]",
+                "ldp  x23, x24, [x9, #32]",
+                "ldp  x25, x26, [x9, #48]",
+                "ldp  x27, x28, [x9, #64]",
+                "ldp  x29, x30, [x9, #80]",
+                "add  sp,  x9, #96",
+                "ret",                   // -> `3:` (the address stored above)
+                "3:",
+                inout("x0") new_sp => ret,
+                inout("x1") func => _,
+                inout("x2") a1 => _,
+                inout("x3") a2 => _,
+                lateout("v8") _, lateout("v9") _, lateout("v10") _, lateout("v11") _,
+                lateout("v12") _, lateout("v13") _, lateout("v14") _, lateout("v15") _,
+                clobber_abi("C"),
+            );
+        }
+        Transfer(ret)
     }
 
     #[inline(always)]
@@ -153,17 +182,79 @@ unsafe impl ContextPolicy for NativeContext {
         a1: *mut (),
         a2: *mut (),
     ) -> Transfer {
-        unsafe { Transfer(call_switch!(cmpth_cond_swap_context, to.0, func, a1, a2)) }
+        let ret: *mut ();
+        unsafe {
+            core::arch::asm!(
+                "sub  sp, sp, #96",
+                "stp  x19, x20, [sp,  #0]",
+                "stp  x21, x22, [sp, #16]",
+                "stp  x23, x24, [sp, #32]",
+                "stp  x25, x26, [sp, #48]",
+                "stp  x27, x28, [sp, #64]",
+                "adr  x30, 3f",          // resume address = end of this block
+                "stp  x29, x30, [sp, #80]",
+
+                // x19/x20 are ours to use now: the previous values are in the
+                // frame and both exit paths restore every callee-saved
+                // register from a frame.
+                "mov  x19, x0",          // x19 = destination context
+                "mov  x20, sp",          // x20 = previous frame
+                "mov  x10, x1",          // x10 = func
+                "mov  x0,  sp",          // arg0 = prev_ctx
+                "mov  x1,  x2",          // arg1 = a1
+                "mov  x2,  x3",          // arg2 = a2
+
+                "mov  sp,  x19",         // run func on the destination stack,
+                                         // below the destination's frame
+                "blr  x10",              // (x0, x1) = func(prev_ctx, a1, a2)
+
+                "cbnz x1, 4f",
+                "mov  x9, x20",          // cancel: restore the previous context
+                "b    5f",
+                "4:",
+                "mov  x9, x19",          // commit: restore the destination
+                "5:",
+                "ldp  x19, x20, [x9,  #0]",
+                "ldp  x21, x22, [x9, #16]",
+                "ldp  x23, x24, [x9, #32]",
+                "ldp  x25, x26, [x9, #48]",
+                "ldp  x27, x28, [x9, #64]",
+                "ldp  x29, x30, [x9, #80]",
+                "add  sp,  x9, #96",
+                "ret",                   // cancel -> `3:`; commit -> the
+                                         // destination's own resume label
+                "3:",
+                inout("x0") to.0 => ret,
+                inout("x1") func => _,
+                inout("x2") a1 => _,
+                inout("x3") a2 => _,
+                lateout("v8") _, lateout("v9") _, lateout("v10") _, lateout("v11") _,
+                lateout("v12") _, lateout("v13") _, lateout("v14") _, lateout("v15") _,
+                clobber_abi("C"),
+            );
+        }
+        Transfer(ret)
     }
 
     #[inline(always)]
     unsafe fn restore_context(to: Context, func: RestoreFn, a1: *mut (), a2: *mut ()) -> ! {
-        // The current context is abandoned: nothing needs preserving, so a
-        // plain tail-jump without clobber bookkeeping is enough.
+        // The current context is abandoned: nothing needs saving, and this
+        // block never returns, so no clobber bookkeeping is needed either.
         unsafe {
             core::arch::asm!(
-                "b {f}",
-                f = sym cmpth_restore_context,
+                "mov  x9,  x0",          // x9  = destination context
+                "mov  x10, x1",          // x10 = func
+                "mov  x0,  x2",          // arg0 = a1
+                "mov  x1,  x3",          // arg1 = a2
+
+                "ldp  x19, x20, [x9,  #0]",
+                "ldp  x21, x22, [x9, #16]",
+                "ldp  x23, x24, [x9, #32]",
+                "ldp  x25, x26, [x9, #48]",
+                "ldp  x27, x28, [x9, #64]",
+                "ldp  x29, x30, [x9, #80]",
+                "add  sp,  x9, #96",
+                "br   x10",              // func(a1, a2); ret -> destination
                 in("x0") to.0,
                 in("x1") func,
                 in("x2") a1,
