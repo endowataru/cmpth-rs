@@ -1,11 +1,18 @@
 //! [`NativeContext`]: the default [`ContextPolicy`] implementation.
 //!
 //! The switch primitives are hand-written assembly, but they are *inlined*
-//! into their call sites with `asm!` rather than called out of line.  What
-//! that buys is not the elided call instruction — it is that the compiler
-//! gets to see the switch as part of the surrounding function and spills
-//! only the registers actually live across it, instead of the assembly
-//! unconditionally saving the whole callee-saved set on every switch.
+//! into their call sites with `asm!` rather than called out of line: the
+//! return address stored in a saved frame is a label inside the caller, so
+//! resuming a context lands straight back in the caller's own code.
+//!
+//! Inlining does not, by itself, reduce what the caller spills around a
+//! switch: the frame format is fixed (every switch must produce a frame any
+//! other switch can resume), so the callee-saved set is still saved
+//! unconditionally, and declaring the caller-saved set as clobbers achieves
+//! the same spill decisions an ordinary call already did.  What it does
+//! remove is the call/return pair, the argument shuffling across the ABI
+//! boundary, and — on AArch64 — the need for a separate stub whose only job
+//! was to carry the `v8`–`v15` clobber list.
 //!
 //! `make_context` needs no assembly at all (it switches nothing, it only
 //! writes a frame), and the only symbol left is the entry trampoline, which
