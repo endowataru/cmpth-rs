@@ -7,6 +7,7 @@ use crate::traits::stackful::{CondSwitchFn, Context, ContextPolicy, EntryFn, Res
 // Native (assembly) implementation
 // ---------------------------------------------------------------------------
 
+#[cfg(not(target_arch = "aarch64"))]
 unsafe extern "C" {
     fn cmpth_swap_context(to: Context, func: SwitchFn, a1: *mut (), a2: *mut ()) -> Transfer;
     fn cmpth_save_context(new_sp: *mut u8, func: SwitchFn, a1: *mut (), a2: *mut ()) -> Transfer;
@@ -17,11 +18,106 @@ unsafe extern "C" {
         a2: *mut (),
     ) -> Transfer;
     fn cmpth_restore_context(to: Context, func: RestoreFn, a1: *mut (), a2: *mut ()) -> !;
-    fn cmpth_make_context(stack_top: *mut u8, entry: EntryFn, arg: *mut ()) -> Context;
 }
 
 /// Default `ContextPolicy` backed by the hand-written assembly in `asm/`.
 pub struct NativeContext;
+
+// ---------------------------------------------------------------------------
+// make_context
+// ---------------------------------------------------------------------------
+//
+// Unlike the switch primitives, `make_context` performs no context switch at
+// all: it never reads or writes a live CPU register, it only stores pointers
+// at fixed offsets of a fresh stack.  So it needs no assembly — plain Rust
+// stores build the very same frame the switch routines save and restore, and
+// a resuming switch cannot tell the two apart (the frame format is identical
+// by construction; see `docs/scoped-ult-promotion.md` §9.14.2).
+//
+// The one part that *must* be assembly is the entry trampoline, because it is
+// reached by `ret`/`br` rather than by a call: the switcher's `func` leaves
+// its Transfer in the return-value register while `entry`/`arg` sit in the
+// callee-saved registers the frame just restored, which is not a shape any
+// Rust function signature can describe.  Bridging that to the ordinary C ABI
+// takes three instructions.
+//
+// Both Mach-O (`_cmpth_*`) and ELF (`cmpth_*`) symbol names are provided, the
+// same way `asm/*.s` does it, so no `cfg` on the symbol name is needed.
+
+#[cfg(target_arch = "aarch64")]
+core::arch::global_asm!(
+    ".p2align 2",
+    ".global _cmpth_entry_trampoline",
+    ".global cmpth_entry_trampoline",
+    "_cmpth_entry_trampoline:",
+    "cmpth_entry_trampoline:",
+    // x0 = Transfer (the switcher's func returned it), x19 = entry, x20 = arg.
+    "mov x1, x20",
+    "blr x19", // entry(transfer, arg) -> !
+    "brk #0",  // entry must never return
+);
+
+#[cfg(target_arch = "x86_64")]
+core::arch::global_asm!(
+    ".p2align 4",
+    ".global _cmpth_entry_trampoline",
+    ".global cmpth_entry_trampoline",
+    "_cmpth_entry_trampoline:",
+    "cmpth_entry_trampoline:",
+    // rax = Transfer, r12 = entry, r13 = arg; rsp is 16-byte aligned.
+    "mov rdi, rax",
+    "mov rsi, r13",
+    "call r12", // entry(transfer, arg) -> !
+    "ud2",      // entry must never return
+);
+
+unsafe extern "C" {
+    fn cmpth_entry_trampoline();
+}
+
+/// Build the context frame that [`ContextPolicy::make_context`] promises.
+///
+/// # Safety
+/// `stack_top` must be the top of an unused stack with at least one frame's
+/// worth of space below it (96 bytes on AArch64, 56 on x86-64).
+#[inline(always)]
+unsafe fn native_make_context(stack_top: *mut u8, entry: EntryFn, arg: *mut ()) -> Context {
+    let aligned = (stack_top as usize & !0xF) as *mut u8;
+    let trampoline = cmpth_entry_trampoline as *const () as usize;
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        // 96-byte frame: x19..x28, x29 (fp), x30 (resume address).
+        let ctx = aligned.wrapping_sub(96);
+        let w = ctx as *mut usize;
+        unsafe {
+            w.add(0).write(entry as usize); // x19 = entry
+            w.add(1).write(arg as usize); // x20 = arg
+            for i in 2..11 {
+                w.add(i).write(0); // x21..x28, x29 = 0 (fp terminates backtraces)
+            }
+            w.add(11).write(trampoline); // x30 = trampoline
+        }
+        Context(ctx)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        // 56-byte frame: rbx, rbp, r12, r13, r14, r15, return address.
+        let ctx = aligned.wrapping_sub(56);
+        let w = ctx as *mut usize;
+        unsafe {
+            w.add(0).write(0); // rbx
+            w.add(1).write(0); // rbp = 0 (terminates backtraces)
+            w.add(2).write(entry as usize); // r12 = entry
+            w.add(3).write(arg as usize); // r13 = arg
+            w.add(4).write(0); // r14
+            w.add(5).write(0); // r15
+            w.add(6).write(trampoline); // resume address = trampoline
+        }
+        Context(ctx)
+    }
+}
 
 #[cfg(not(target_arch = "aarch64"))]
 unsafe impl ContextPolicy for NativeContext {
@@ -51,8 +147,9 @@ unsafe impl ContextPolicy for NativeContext {
         unsafe { cmpth_restore_context(to, func, a1, a2) }
     }
 
+    #[inline(always)]
     unsafe fn make_context(stack_top: *mut u8, entry: EntryFn, arg: *mut ()) -> Context {
-        unsafe { cmpth_make_context(stack_top, entry, arg) }
+        unsafe { native_make_context(stack_top, entry, arg) }
     }
 }
 
@@ -264,8 +361,8 @@ unsafe impl ContextPolicy for NativeContext {
         }
     }
 
+    #[inline(always)]
     unsafe fn make_context(stack_top: *mut u8, entry: EntryFn, arg: *mut ()) -> Context {
-        // Ordinary function: no context is switched, the plain call is fine.
-        unsafe { cmpth_make_context(stack_top, entry, arg) }
+        unsafe { native_make_context(stack_top, entry, arg) }
     }
 }
