@@ -1,13 +1,19 @@
-//! [`NativeContext`]: the default [`ContextPolicy`] implementation, backed
-//! by the hand-written assembly in `asm/`.
+//! [`NativeContext`]: the default [`ContextPolicy`] implementation.
+//!
+//! The switch primitives are hand-written assembly, but they are *inlined*
+//! into their call sites with `asm!` rather than called out of line.  What
+//! that buys is not the elided call instruction — it is that the compiler
+//! gets to see the switch as part of the surrounding function and spills
+//! only the registers actually live across it, instead of the assembly
+//! unconditionally saving the whole callee-saved set on every switch.
+//!
+//! `make_context` needs no assembly at all (it switches nothing, it only
+//! writes a frame), and the only symbol left is the entry trampoline, which
+//! has to be assembly because it is entered by `ret` rather than by a call.
 
 use crate::traits::stackful::{CondSwitchFn, Context, ContextPolicy, EntryFn, RestoreFn, SwitchFn, Transfer};
 
-// ---------------------------------------------------------------------------
-// Native (assembly) implementation
-// ---------------------------------------------------------------------------
-
-/// Default `ContextPolicy` backed by the hand-written assembly in `asm/`.
+/// Default `ContextPolicy`, implemented with inline assembly.
 pub struct NativeContext;
 
 // ---------------------------------------------------------------------------
@@ -319,17 +325,16 @@ unsafe impl ContextPolicy for NativeContext {
 }
 
 // On AArch64 the C ABI makes v8–v15 (lower halves) callee-saved, but the
-// switch routines in `asm/aarch64.s` save only the general-purpose set — a
-// task suspended with live floating-point state could resume with another
-// task's register contents.  Saving v8–v15 unconditionally in the assembly
-// would cost 8 extra stores + 8 loads on every switch, even though integer
-// code (the common case for a scheduler hot path) has nothing live there.
+// switch code below saves only the general-purpose set — a task suspended
+// with live floating-point state could otherwise resume with another task's
+// register contents.  Saving v8–v15 unconditionally would cost 8 extra
+// stores + 8 loads on every switch, even though integer code (the common
+// case for a scheduler hot path) has nothing live there.
 //
-// Instead the routines are invoked through inline-asm stubs that declare
-// v8–v15 as clobbered: the *compiler* spills exactly the live ones, which is
-// free for integer code and correct for floating-point code.  `clobber_abi`
-// covers the ordinary caller-saved set; x19–x28 stay with the callee (the
-// assembly saves them, as the C ABI promises).
+// So they are declared as clobbered instead, and the *compiler* spills
+// exactly the live ones: free for integer code, correct for floating-point
+// code.  `clobber_abi` covers the ordinary caller-saved set; x19–x28 are
+// saved and restored by the blocks themselves.
 #[cfg(target_arch = "aarch64")]
 unsafe impl ContextPolicy for NativeContext {
     #[inline(always)]

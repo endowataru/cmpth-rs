@@ -290,9 +290,12 @@ check for themselves.
 
 ## Platform support
 
-x86-64 and AArch64, on macOS and Linux (hand-written context-switch
-assembly for both, with the AArch64 v8–v15 callee-saved contract enforced
-via inline-asm clobbers).  Requires Rust 1.85+ (edition 2024).
+x86-64 and AArch64, on macOS and Linux.  The context switch is hand-written
+assembly for both, inlined into its call sites via `asm!` rather than
+called out of line, so the compiler spills only what is actually live
+across a switch (on AArch64 that includes the callee-saved v8–v15, declared
+as clobbers).  No build script and no assembler are needed.  Requires Rust
+1.85+ (edition 2024).
 
 ## License
 
