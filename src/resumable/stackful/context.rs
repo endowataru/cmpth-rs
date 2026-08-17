@@ -41,8 +41,8 @@ pub struct NativeContext;
 // Rust function signature can describe.  Bridging that to the ordinary C ABI
 // takes three instructions.
 //
-// Both Mach-O (`_cmpth_*`) and ELF (`cmpth_*`) symbol names are provided, the
-// same way `asm/*.s` does it, so no `cfg` on the symbol name is needed.
+// Both the Mach-O (`_cmpth_*`) and the ELF (`cmpth_*`) spelling are defined,
+// so no `cfg` is needed to pick the right one for the platform.
 
 #[cfg(target_arch = "aarch64")]
 core::arch::global_asm!(
@@ -126,10 +126,10 @@ compile_error!("cmpth: no ContextPolicy implementation for this architecture");
 // differences worth calling out:
 //
 // * There is no `call` any more, so the return address a `call` used to push
-//   is pushed explicitly.  That keeps the frame exactly as `asm/x86_64.s`
-//   built it — 7 pushes from a 16-byte-aligned rsp put ctx at 8 (mod 16) —
-//   which matters because a resuming switch must not be able to tell frames
-//   of different origins apart.
+//   is pushed explicitly: 7 pushes from a 16-byte-aligned rsp put ctx at
+//   8 (mod 16), the alignment the rest of the protocol assumes.  Getting
+//   this right matters because a resuming switch must not be able to tell
+//   frames of different origins apart.
 // * No vector register needs declaring: every xmm/ymm/zmm is caller-saved
 //   under System V, so `clobber_abi("C")` already covers them (LLVM handles
 //   the aliasing of the wider names by itself).  The `v8`–`v15` `lateout`
