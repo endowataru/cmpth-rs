@@ -287,7 +287,14 @@ unsafe impl ContextPolicy for NativeContext {
                 "pop  r13",
                 "pop  r14",
                 "pop  r15",
-                "ret",                   // -> `3:` (the address pushed above)
+                // `4:` means func returned without ever diverging into
+                // another switch, so the only possible destination is this
+                // same instance's own `3:` -- unlike the exits below (whose
+                // target genuinely varies at runtime), a direct jump is
+                // correct here, not just cheaper.  `add rsp, 8` accounts for
+                // the return-address slot `ret` would otherwise have popped.
+                "add  rsp, 8",
+                "jmp  3f",               // -> `3:` (this instance's own)
                 "3:",
                 inout("rdi") new_sp => _,
                 inout("rsi") func => _,
@@ -489,7 +496,13 @@ unsafe impl ContextPolicy for NativeContext {
                 "ldp  x27, x28, [x9, #64]",
                 "ldp  x29, x30, [x9, #80]",
                 "add  sp,  x9, #96",
-                "ret",                   // -> `3:` (the address stored above)
+                // `4:` means func returned without ever diverging into
+                // another switch, so the only possible destination is this
+                // same instance's own `3:` -- a direct branch is correct
+                // here (unlike the dynamic exits below), and `sp` is already
+                // fully restored by the `add` above, so no adjustment like
+                // x86-64's is needed.
+                "b    3f",               // -> `3:` (this instance's own)
                 "3:",
                 inout("x0") new_sp => ret,
                 inout("x1") func => _,
@@ -736,7 +749,14 @@ unsafe impl ContextPolicy for LeanFrameContext {
                 "pop  rbp",
                 "pop  r12",
                 "pop  r13",
-                "ret",                   // -> `3:` (the address pushed above)
+                // `4:` means func returned without ever diverging into
+                // another switch, so the only possible destination is this
+                // same instance's own `3:` -- a direct jump is correct here
+                // (unlike the dynamic exits below).  `add rsp, 8` accounts
+                // for the return-address slot `ret` would otherwise have
+                // popped.
+                "add  rsp, 8",
+                "jmp  3f",               // -> `3:` (this instance's own)
                 "3:",
                 inout("rdi") new_sp => _,
                 inout("rsi") func => _,
@@ -929,7 +949,12 @@ unsafe impl ContextPolicy for LeanFrameContext {
                 "ldp  x19, x20, [x9,  #0]",
                 "ldp  x29, x30, [x9, #16]",
                 "add  sp,  x9, #32",
-                "ret",                   // -> `3:` (the address stored above)
+                // `4:` means func returned without ever diverging into
+                // another switch, so the only possible destination is this
+                // same instance's own `3:` -- a direct branch is correct
+                // here (unlike the dynamic exits below), and `sp` is already
+                // fully restored by the `add` above.
+                "b    3f",               // -> `3:` (this instance's own)
                 "3:",
                 inout("x0") new_sp => ret,
                 inout("x1") func => _,
