@@ -166,20 +166,46 @@ pub struct CondTransfer {
     pub flag: isize,
 }
 
-/// Callback run on the destination stack after `swap_context`/`save_context`.
-/// `prev` is the context that was just saved.
-pub type SwitchFn = unsafe extern "C" fn(prev: Context, a1: *mut (), a2: *mut ()) -> Transfer;
+/// Callback run on the destination stack after `swap_context`/`save_context`,
+/// named via a type rather than passed as a runtime function-pointer value.
+///
+/// Implementations must be pooled onto a zero-sized marker type (e.g.
+/// `struct SuspendShim<S, F>(PhantomData<(S, F)>)`); one exists per distinct
+/// callback. Passing the callback as a *type* parameter to
+/// [`ContextPolicy::swap_context`]/[`save_context`](ContextPolicy::save_context)
+/// rather than as a value lets the implementation reference `Self::call` with
+/// `asm!`'s `sym` operand — a direct branch resolved at compile time — instead
+/// of loading a function-pointer value into a register for an indirect branch.
+/// `sym` requires a path to an item, not an arbitrary (even `const`) value of
+/// function-pointer type, which is why this has to be a trait rather than a
+/// `const F: SwitchFn` generic.
+pub trait SwitchFnLike {
+    /// `prev` is the context that was just saved.
+    unsafe extern "C" fn call(prev: Context, a1: *mut (), a2: *mut ()) -> Transfer;
+}
 
-/// Callback run on the destination stack after `cond_swap_context`.
-pub type CondSwitchFn =
-    unsafe extern "C" fn(prev: Context, a1: *mut (), a2: *mut ()) -> CondTransfer;
+/// Callback run on the destination stack after `cond_swap_context`, named via
+/// a type for the same reason as [`SwitchFnLike`].
+pub trait CondSwitchFnLike {
+    unsafe extern "C" fn call(prev: Context, a1: *mut (), a2: *mut ()) -> CondTransfer;
+}
 
-/// Callback run on the destination stack after `restore_context`.
-/// There is no `prev`: the calling context is abandoned, not saved.
-pub type RestoreFn = unsafe extern "C" fn(a1: *mut (), a2: *mut ()) -> Transfer;
+/// Callback run on the destination stack after `restore_context`, named via a
+/// type for the same reason as [`SwitchFnLike`]. There is no `prev`: the
+/// calling context is abandoned, not saved.
+pub trait RestoreFnLike {
+    unsafe extern "C" fn call(a1: *mut (), a2: *mut ()) -> Transfer;
+}
 
 /// Entry point of a context created with `make_context`.  `transfer` is the
 /// value returned by the first switcher's callback.
+///
+/// Unlike the switch callbacks above, this stays a plain function-pointer
+/// value: it is read out of the ctx frame by the (shared, non-generic)
+/// entry trampoline on the *first* resume of a freshly `make_context`-built
+/// task — a cold, once-per-task path, not a hot per-switch one — and the
+/// trampoline has no type parameter to hang a `SwitchFnLike`-style `sym`
+/// reference on.
 pub type EntryFn = unsafe extern "C" fn(transfer: Transfer, arg: *mut ()) -> !;
 
 /// Swappable context-switch implementation (the Rust counterpart of
@@ -190,42 +216,41 @@ pub type EntryFn = unsafe extern "C" fn(transfer: Transfer, arg: *mut ()) -> !;
 /// a context saved by `swap`/`save`/`cond_swap` must be resumable exactly once
 /// and must return to its caller with the resumer's `Transfer` value.
 pub unsafe trait ContextPolicy: 'static {
-    /// Save the current context, switch to `to`, run `func` there.
+    /// Save the current context, switch to `to`, run `F::call` there.
     ///
     /// # Safety
     /// `to` must be a live, never-yet-resumed context; `a1`/`a2` must satisfy
     /// whatever `func` requires of them.
-    unsafe fn swap_context(to: Context, func: SwitchFn, a1: *mut (), a2: *mut ()) -> Transfer;
+    unsafe fn swap_context<F: SwitchFnLike>(to: Context, a1: *mut (), a2: *mut ()) -> Transfer;
 
     /// Save the current context, switch to the fresh stack `new_sp`, run
-    /// `func` there.  If `func` returns, the saved context resumes at once.
+    /// `F::call` there.  If it returns, the saved context resumes at once.
     ///
     /// # Safety
     /// `new_sp` must be the top of a stack that is unused and large enough
-    /// for everything `func` executes.
-    unsafe fn save_context(new_sp: *mut u8, func: SwitchFn, a1: *mut (), a2: *mut ())
+    /// for everything `F::call` executes.
+    unsafe fn save_context<F: SwitchFnLike>(new_sp: *mut u8, a1: *mut (), a2: *mut ())
     -> Transfer;
 
-    /// Like `swap_context`, but `func` may cancel the switch by returning
+    /// Like `swap_context`, but `F::call` may cancel the switch by returning
     /// `flag == 0`, in which case the caller resumes immediately and the
     /// destination context stays saved.
     ///
     /// # Safety
     /// As for [`swap_context`](Self::swap_context); additionally, on the
-    /// cancel path `func` must leave the destination context untouched.
-    unsafe fn cond_swap_context(
+    /// cancel path `F::call` must leave the destination context untouched.
+    unsafe fn cond_swap_context<F: CondSwitchFnLike>(
         to: Context,
-        func: CondSwitchFn,
         a1: *mut (),
         a2: *mut (),
     ) -> Transfer;
 
-    /// Abandon the current context, switch to `to`, run `func` there.
+    /// Abandon the current context, switch to `to`, run `F::call` there.
     ///
     /// # Safety
     /// As for [`swap_context`](Self::swap_context); the current stack is
     /// abandoned without unwinding, so no live destructors may remain on it.
-    unsafe fn restore_context(to: Context, func: RestoreFn, a1: *mut (), a2: *mut ()) -> !;
+    unsafe fn restore_context<F: RestoreFnLike>(to: Context, a1: *mut (), a2: *mut ()) -> !;
 
     /// Prepare a context on a fresh stack that enters `entry` when first
     /// switched to.

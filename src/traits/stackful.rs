@@ -9,8 +9,8 @@
 //! stackful flavor needs in one `use`.
 
 pub use crate::traits::component::stackful::{
-    CondSwitchFn, CondTransfer, Context, ContextPolicy, EntryFn, HandoffTaskDesc, Poller,
-    RestoreFn, StackfulResumable, SwitchFn, Transfer,
+    CondSwitchFnLike, CondTransfer, Context, ContextPolicy, EntryFn, HandoffTaskDesc, Poller,
+    RestoreFnLike, StackfulResumable, SwitchFnLike, Transfer,
 };
 pub use crate::traits::component::delegation::DelegatorConsumer;
 pub use crate::traits::component::wait::Resumable;

@@ -6,10 +6,13 @@
 //! [`common::worker`](crate::resumable::common::worker) for the base
 //! traits and [`UltWorker<S>`](crate::resumable::common::worker::UltWorker) itself.
 
+use std::marker::PhantomData;
 use std::mem::ManuallyDrop;
 use std::ptr;
 
-use crate::traits::stackful::{CondTransfer, Context, ContextPolicy, Transfer};
+use crate::traits::stackful::{
+    CondSwitchFnLike, CondTransfer, Context, ContextPolicy, RestoreFnLike, SwitchFnLike, Transfer,
+};
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, WorkerOps};
 use crate::resumable::common::system::{PoolSystem, ReclaimableDesc, RunnableItem, WorkerSystem};
@@ -311,9 +314,8 @@ where
             f: ManuallyDrop::new(f),
         };
         let tr = unsafe {
-            S::Ctx::swap_context(
+            S::Ctx::swap_context::<SuspendShimLike<S, F>>(
                 next_ctx,
-                suspend_shim::<S, F>,
                 &mut payload as *mut _ as *mut (),
                 ptr::null_mut(),
             )
@@ -335,9 +337,8 @@ where
             f: ManuallyDrop::new(f),
         };
         let tr = unsafe {
-            S::Ctx::cond_swap_context(
+            S::Ctx::cond_swap_context::<CondSuspendShimLike<S, F>>(
                 next_ctx,
-                cond_suspend_shim::<S, F>,
                 &mut payload as *mut _ as *mut (),
                 ptr::null_mut(),
             )
@@ -356,9 +357,8 @@ where
         let next = unsafe { Transferred::<SuspendedTaskToken<S::Desc>>::from_raw(next) };
         let mut payload = SuspendPayload::<S, F> { wk: self, next, f: ManuallyDrop::new(f) };
         let tr = unsafe {
-            S::Ctx::save_context(
+            S::Ctx::save_context::<SuspendShimLike<S, F>>(
                 stack_top,
-                suspend_shim::<S, F>,
                 &mut payload as *mut _ as *mut (),
                 ptr::null_mut(),
             )
@@ -378,9 +378,8 @@ where
             f: ManuallyDrop::new(f),
         };
         unsafe {
-            S::Ctx::restore_context(
+            S::Ctx::restore_context::<ExitShimLike<S, F>>(
                 next_ctx,
-                exit_shim::<S, F>,
                 &mut payload as *mut _ as *mut (),
                 ptr::null_mut(),
             )
@@ -431,6 +430,22 @@ where
     wk.set_cur_task(next_running);
     f(wk, prev_task.into_suspended());
     Transfer(wk as *const UltWorker<S> as *mut ())
+}
+
+/// Names [`suspend_shim::<S, F>`] as a type, so [`ContextPolicy::swap_context`]/
+/// [`save_context`](ContextPolicy::save_context) can branch into it via
+/// `asm!`'s `sym` operand instead of a runtime function-pointer value.
+struct SuspendShimLike<S, F>(PhantomData<(S, F)>);
+
+impl<S, F> SwitchFnLike for SuspendShimLike<S, F>
+where
+    S: StackfulWorkerSystem + PoolSystem,
+    S::Desc: StackfulTaskDesc,
+    F: FnOnce(&UltWorker<S>, SuspendedTaskToken<S::Desc>),
+{
+    unsafe extern "C" fn call(prev: Context, a1: *mut (), a2: *mut ()) -> Transfer {
+        unsafe { suspend_shim::<S, F>(prev, a1, a2) }
+    }
 }
 
 struct CondSuspendPayload<S: StackfulWorkerSystem + PoolSystem, F>
@@ -495,6 +510,20 @@ where
     }
 }
 
+/// Names [`cond_suspend_shim::<S, F>`] as a type; see [`SuspendShimLike`].
+struct CondSuspendShimLike<S, F>(PhantomData<(S, F)>);
+
+impl<S, F> CondSwitchFnLike for CondSuspendShimLike<S, F>
+where
+    S: StackfulWorkerSystem + PoolSystem,
+    S::Desc: StackfulTaskDesc,
+    F: FnOnce(&UltWorker<S>, &mut Option<SuspendedTaskToken<S::Desc>>),
+{
+    unsafe extern "C" fn call(prev: Context, a1: *mut (), a2: *mut ()) -> CondTransfer {
+        unsafe { cond_suspend_shim::<S, F>(prev, a1, a2) }
+    }
+}
+
 struct ExitPayload<S: StackfulWorkerSystem + PoolSystem, F>
 where
     S::Desc: StackfulTaskDesc,
@@ -523,4 +552,18 @@ where
     wk.set_cur_task(next_running);
     f(wk);
     Transfer(wk as *const UltWorker<S> as *mut ())
+}
+
+/// Names [`exit_shim::<S, F>`] as a type; see [`SuspendShimLike`].
+struct ExitShimLike<S, F>(PhantomData<(S, F)>);
+
+impl<S, F> RestoreFnLike for ExitShimLike<S, F>
+where
+    S: StackfulWorkerSystem + PoolSystem,
+    S::Desc: StackfulTaskDesc,
+    F: FnOnce(&UltWorker<S>),
+{
+    unsafe extern "C" fn call(a1: *mut (), a2: *mut ()) -> Transfer {
+        unsafe { exit_shim::<S, F>(a1, a2) }
+    }
 }
