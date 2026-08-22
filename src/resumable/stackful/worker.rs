@@ -9,7 +9,7 @@
 use std::mem::ManuallyDrop;
 use std::ptr;
 
-use crate::traits::stackful::{CondTransfer, Context, ContextPolicy, Transfer};
+use crate::traits::stackful::{CondTransfer, Context, ContextPolicy, RestoreFnLike, Transfer};
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, WorkerOps};
 use crate::resumable::common::system::{PoolSystem, ReclaimableDesc, RunnableItem, WorkerSystem};
@@ -335,9 +335,8 @@ where
             f: ManuallyDrop::new(f),
         };
         unsafe {
-            S::Ctx::restore_context(
+            S::Ctx::restore_context::<ExitShimLike<S, F>>(
                 next_ctx,
-                exit_shim::<S, F>,
                 &mut payload as *mut _ as *mut (),
                 ptr::null_mut(),
             )
@@ -452,6 +451,19 @@ where
     }
 }
 
+struct ExitShimLike<S, F>(std::marker::PhantomData<(S, F)>);
+
+impl<S, F> RestoreFnLike for ExitShimLike<S, F>
+where
+    S: StackfulWorkerSystem + PoolSystem,
+    S::Desc: StackfulTaskDesc,
+    F: FnOnce(&UltWorker<S>),
+{
+    unsafe extern "C" fn call(to: Context, a1: *mut (), a2: *mut ()) -> ! {
+        unsafe { exit_shim::<S, F>(to, a1, a2) }
+    }
+}
+
 struct ExitPayload<S: StackfulWorkerSystem + PoolSystem, F>
 where
     S::Desc: StackfulTaskDesc,
@@ -461,7 +473,8 @@ where
     f: ManuallyDrop<F>,
 }
 
-unsafe extern "C" fn exit_shim<S, F>(a1: *mut (), _a2: *mut ()) -> Transfer
+#[inline(always)]
+unsafe fn exit_shim<S, F>(to: Context, a1: *mut (), _a2: *mut ()) -> !
 where
     S: StackfulWorkerSystem + PoolSystem,
     S::Desc: StackfulTaskDesc,
@@ -479,5 +492,9 @@ where
     let next_running = next.into_inner::<RunningTaskToken<S::Desc>>();
     wk.set_cur_task(next_running);
     f(wk);
-    Transfer(wk as *const UltWorker<S> as *mut ())
+    // Land directly on `to` ourselves instead of returning a `Transfer` for
+    // `restore_context` to act on afterward -- see `RestoreFnLike`'s doc
+    // comment: this is the tail call that ends up inlined as the raw
+    // switch-out asm at the very end of this function's compiled body.
+    unsafe { S::Ctx::land(to, wk as *const UltWorker<S> as *mut ()) }
 }

@@ -84,7 +84,7 @@
 //! — and which both policies share, because both frame layouts place
 //! `entry`/`arg` at the same first two words.
 
-use crate::traits::stackful::{CondSwitchFn, Context, ContextPolicy, EntryFn, RestoreFn, SwitchFn, Transfer};
+use crate::traits::stackful::{CondSwitchFn, Context, ContextPolicy, EntryFn, RestoreFnLike, SwitchFn, Transfer};
 
 // ---------------------------------------------------------------------------
 // Entry trampoline, shared by both policies
@@ -369,17 +369,35 @@ unsafe impl ContextPolicy for NativeContext {
         Transfer(ret)
     }
 
+    // Unverified on this (aarch64-only) machine; mirrors the aarch64
+    // Strategy-B restructuring below (`F::call` performs the switch-out
+    // itself via `land`). `jmp`, not `call`: `call` would push a return
+    // address `F::call` (ending in `land`'s indirect jump, never a `ret`)
+    // would never pop -- see the aarch64 `b`-vs-`bl` note. `to.0` is already
+    // == 8 (mod 16) by construction (see `make_context_native`), the same
+    // alignment a `call` would have produced, so `F::call` sees an
+    // identical entry state either way.
     #[inline(always)]
-    unsafe fn restore_context(to: Context, func: RestoreFn, a1: *mut (), a2: *mut ()) -> ! {
-        // The current context is abandoned: nothing needs saving, and this
-        // block never returns, so no clobber bookkeeping is needed either.
+    unsafe fn restore_context<F: RestoreFnLike>(to: Context, a1: *mut (), a2: *mut ()) -> ! {
         unsafe {
             core::arch::asm!(
-                "mov  r8, rdi",          // r8 = destination context
-                "mov  r9, rsi",          // r9 = func
-                "mov  rdi, rdx",         // arg0 = a1
-                "mov  rsi, rcx",         // arg1 = a2
+                "mov  rsp, rdi",         // F::call runs on `to`'s own stack,
+                                         // below its still-unread frame
+                "jmp  {f}",              // F::call(to, a1, a2) -- never returns
+                f = sym <F as RestoreFnLike>::call,
+                in("rdi") to.0,
+                in("rsi") a1,
+                in("rdx") a2,
+                options(noreturn),
+            );
+        }
+    }
 
+    #[inline(always)]
+    unsafe fn land(ctx: Context, ret_value: *mut ()) -> ! {
+        unsafe {
+            core::arch::asm!(
+                "mov  r8, rdi",          // r8 = ctx.0 (frame pointer)
                 "mov  rsp, r8",
                 "pop  rbx",
                 "pop  rbp",
@@ -387,11 +405,11 @@ unsafe impl ContextPolicy for NativeContext {
                 "pop  r13",
                 "pop  r14",
                 "pop  r15",
-                "jmp  r9",               // func(a1, a2); ret -> destination
-                in("rdi") to.0,
-                in("rsi") func,
-                in("rdx") a1,
-                in("rcx") a2,
+                "mov  rax, rsi",         // rax = ret_value, for the resumed side
+                "pop  r11",
+                "jmp  r11",
+                in("rdi") ctx.0,
+                in("rsi") ret_value,
                 options(noreturn),
             );
         }
@@ -577,17 +595,35 @@ unsafe impl ContextPolicy for NativeContext {
         Transfer(ret)
     }
 
+    // `F::call` itself performs the switch-out (via `land`, inlined into its
+    // own compiled body) once its Rust logic finishes, so this asm block is
+    // nothing but "move onto `to`'s stack, then jump to `F::call`" -- no code
+    // after it at all, since `F::call` never returns. Plain `b`, not `bl`:
+    // `bl` would push a return address onto the RAS that `F::call` (ending
+    // in `land`'s `br`, never a `ret`) would never pop, leaving a stale
+    // entry that can misalign the RAS for unrelated `ret`s deeper in the
+    // call stack later.
     #[inline(always)]
-    unsafe fn restore_context(to: Context, func: RestoreFn, a1: *mut (), a2: *mut ()) -> ! {
-        // The current context is abandoned: nothing needs saving, and this
-        // block never returns, so no clobber bookkeeping is needed either.
+    unsafe fn restore_context<F: RestoreFnLike>(to: Context, a1: *mut (), a2: *mut ()) -> ! {
         unsafe {
             core::arch::asm!(
-                "mov  x9,  x0",          // x9  = destination context
-                "mov  x10, x1",          // x10 = func
-                "mov  x0,  x2",          // arg0 = a1
-                "mov  x1,  x3",          // arg1 = a2
+                "mov  sp,  x0",          // F::call runs on `to`'s own stack,
+                                         // below its still-unread frame
+                "b    {f}",              // F::call(to, a1, a2) -- never returns
+                f = sym <F as RestoreFnLike>::call,
+                in("x0") to.0,
+                in("x1") a1,
+                in("x2") a2,
+                options(noreturn),
+            );
+        }
+    }
 
+    #[inline(always)]
+    unsafe fn land(ctx: Context, ret_value: *mut ()) -> ! {
+        unsafe {
+            core::arch::asm!(
+                "mov  x9,  x0",          // x9 = ctx.0 (frame pointer)
                 "ldp  x19, x20, [x9,  #0]",
                 "ldp  x21, x22, [x9, #16]",
                 "ldp  x23, x24, [x9, #32]",
@@ -595,11 +631,10 @@ unsafe impl ContextPolicy for NativeContext {
                 "ldp  x27, x28, [x9, #64]",
                 "ldp  x29, x30, [x9, #80]",
                 "add  sp,  x9, #96",
-                "br   x10",              // func(a1, a2); ret -> destination
-                in("x0") to.0,
-                in("x1") func,
-                in("x2") a1,
-                in("x3") a2,
+                "mov  x0,  x1",          // x0 = ret_value, for the resumed side
+                "br   x30",
+                in("x0") ctx.0,
+                in("x1") ret_value,
                 options(noreturn),
             );
         }
@@ -830,27 +865,39 @@ unsafe impl ContextPolicy for LeanFrameContext {
         Transfer(ret)
     }
 
+    // Unverified on this (aarch64-only) machine. `jmp`, not `call` -- see
+    // the NativeContext impl above for why.
     #[inline(always)]
-    unsafe fn restore_context(to: Context, func: RestoreFn, a1: *mut (), a2: *mut ()) -> ! {
-        // The current context is abandoned: nothing needs saving, and this
-        // block never returns, so no clobber bookkeeping is needed either.
+    unsafe fn restore_context<F: RestoreFnLike>(to: Context, a1: *mut (), a2: *mut ()) -> ! {
         unsafe {
             core::arch::asm!(
-                "mov  r8, rdi",          // r8 = destination context
-                "mov  r9, rsi",          // r9 = func
-                "mov  rdi, rdx",         // arg0 = a1
-                "mov  rsi, rcx",         // arg1 = a2
+                "mov  rsp, rdi",         // F::call runs on `to`'s own stack,
+                                         // below its still-unread frame
+                "jmp  {f}",              // F::call(to, a1, a2) -- never returns
+                f = sym <F as RestoreFnLike>::call,
+                in("rdi") to.0,
+                in("rsi") a1,
+                in("rdx") a2,
+                options(noreturn),
+            );
+        }
+    }
 
+    #[inline(always)]
+    unsafe fn land(ctx: Context, ret_value: *mut ()) -> ! {
+        unsafe {
+            core::arch::asm!(
+                "mov  r8, rdi",          // r8 = ctx.0 (frame pointer)
                 "mov  rsp, r8",
                 "pop  rbx",
                 "pop  rbp",
                 "pop  r12",
                 "pop  r13",
-                "jmp  r9",               // func(a1, a2); ret -> destination
-                in("rdi") to.0,
-                in("rsi") func,
-                in("rdx") a1,
-                in("rcx") a2,
+                "mov  rax, rsi",         // rax = ret_value, for the resumed side
+                "pop  r11",
+                "jmp  r11",
+                in("rdi") ctx.0,
+                in("rsi") ret_value,
                 options(noreturn),
             );
         }
@@ -1026,25 +1073,35 @@ unsafe impl ContextPolicy for LeanFrameContext {
         Transfer(ret)
     }
 
+    // `b`, not `bl` -- see the NativeContext impl above for why.
     #[inline(always)]
-    unsafe fn restore_context(to: Context, func: RestoreFn, a1: *mut (), a2: *mut ()) -> ! {
-        // The current context is abandoned: nothing needs saving, and this
-        // block never returns, so no clobber bookkeeping is needed either.
+    unsafe fn restore_context<F: RestoreFnLike>(to: Context, a1: *mut (), a2: *mut ()) -> ! {
         unsafe {
             core::arch::asm!(
-                "mov  x9,  x0",          // x9  = destination context
-                "mov  x10, x1",          // x10 = func
-                "mov  x0,  x2",          // arg0 = a1
-                "mov  x1,  x3",          // arg1 = a2
+                "mov  sp,  x0",          // F::call runs on `to`'s own stack,
+                                         // below its still-unread frame
+                "b    {f}",              // F::call(to, a1, a2) -- never returns
+                f = sym <F as RestoreFnLike>::call,
+                in("x0") to.0,
+                in("x1") a1,
+                in("x2") a2,
+                options(noreturn),
+            );
+        }
+    }
 
+    #[inline(always)]
+    unsafe fn land(ctx: Context, ret_value: *mut ()) -> ! {
+        unsafe {
+            core::arch::asm!(
+                "mov  x9,  x0",          // x9 = ctx.0 (frame pointer)
                 "ldp  x19, x20, [x9,  #0]",
                 "ldp  x29, x30, [x9, #16]",
                 "add  sp,  x9, #32",
-                "br   x10",              // func(a1, a2); ret -> destination
-                in("x0") to.0,
-                in("x1") func,
-                in("x2") a1,
-                in("x3") a2,
+                "mov  x0,  x1",          // x0 = ret_value, for the resumed side
+                "br   x30",
+                in("x0") ctx.0,
+                in("x1") ret_value,
                 options(noreturn),
             );
         }
