@@ -166,18 +166,43 @@ pub struct CondTransfer {
     pub flag: isize,
 }
 
-/// Callback run on the destination stack after `swap_context`/`save_context`.
-/// `prev` is the context that was just saved.
-pub type SwitchFn = unsafe extern "C" fn(prev: Context, a1: *mut (), a2: *mut ()) -> Transfer;
+/// Callback run on the destination stack after `save_context`. `prev` is the
+/// context that was just saved. May return normally — unlike
+/// [`SwapFnLike`]'s callback, `save_context` has no predetermined
+/// destination to hand `call` up front (the freshly created task may run to
+/// completion without ever switching anywhere) — in which case
+/// `save_context` resumes `prev` itself, at once.
+pub trait SwitchFnLike {
+    unsafe extern "C" fn call(prev: Context, a1: *mut (), a2: *mut ()) -> Transfer;
+}
 
-/// Callback run on the destination stack after `cond_swap_context`.
-pub type CondSwitchFn =
-    unsafe extern "C" fn(prev: Context, a1: *mut (), a2: *mut ()) -> CondTransfer;
+/// Callback run on the destination stack after `swap_context`. `prev` is the
+/// context that was just saved, `to` is the same destination `swap_context`
+/// was given. Unlike [`SwitchFnLike`], `call` never returns: `swap_context`
+/// (unlike `save_context`) always ends by switching to a destination known
+/// up front, so `call` fully owns getting there via
+/// [`ContextPolicy::land`] — same shape and rationale as
+/// [`RestoreFnLike`].
+pub trait SwapFnLike {
+    unsafe extern "C" fn call(prev: Context, to: Context, a1: *mut (), a2: *mut ()) -> !;
+}
+
+/// Callback run on the destination stack after `cond_swap_context`. `to` is
+/// the same destination `cond_swap_context` was given, for the same reason
+/// [`SwapFnLike`] carries it: on the commit path `call` lands on `to` itself
+/// (via [`ContextPolicy::land`]) instead of returning. Unlike `SwapFnLike`,
+/// `call` *may* still return, but only on cancel — a return at all (as
+/// opposed to a divergent call to `land`) is exactly what tells
+/// `cond_swap_context` the switch was cancelled, so it can restore `prev`
+/// itself; there is no separate flag to check.
+pub trait CondSwitchFnLike {
+    unsafe extern "C" fn call(prev: Context, to: Context, a1: *mut (), a2: *mut ()) -> Transfer;
+}
 
 /// Callback run on the destination stack after `restore_context`.
 /// There is no `prev`: the calling context is abandoned, not saved.
 ///
-/// Unlike [`SwitchFn`]/[`CondSwitchFn`], `call` never returns: it receives
+/// Unlike [`SwitchFnLike`]/[`CondSwitchFnLike`], `call` never returns: it receives
 /// `to` (the same destination `restore_context` was given) and, once its
 /// ordinary Rust logic finishes, switches to it itself by calling
 /// [`ContextPolicy::land`] as its own tail expression — an `#[inline(always)]`
@@ -204,32 +229,35 @@ pub type EntryFn = unsafe extern "C" fn(transfer: Transfer, arg: *mut ()) -> !;
 /// a context saved by `swap`/`save`/`cond_swap` must be resumable exactly once
 /// and must return to its caller with the resumer's `Transfer` value.
 pub unsafe trait ContextPolicy: 'static {
-    /// Save the current context, switch to `to`, run `func` there.
+    /// Save the current context, switch to `to`, run `F::call` there.
+    /// `F::call` itself performs the actual switch (via [`land`](Self::land))
+    /// once it's done — see [`SwapFnLike`]'s doc comment.
     ///
     /// # Safety
     /// `to` must be a live, never-yet-resumed context; `a1`/`a2` must satisfy
-    /// whatever `func` requires of them.
-    unsafe fn swap_context(to: Context, func: SwitchFn, a1: *mut (), a2: *mut ()) -> Transfer;
+    /// whatever `F::call` requires of them.
+    unsafe fn swap_context<F: SwapFnLike>(to: Context, a1: *mut (), a2: *mut ()) -> Transfer;
 
     /// Save the current context, switch to the fresh stack `new_sp`, run
-    /// `func` there.  If `func` returns, the saved context resumes at once.
+    /// `F::call` there.  If `F::call` returns, the saved context resumes at
+    /// once.
     ///
     /// # Safety
     /// `new_sp` must be the top of a stack that is unused and large enough
-    /// for everything `func` executes.
-    unsafe fn save_context(new_sp: *mut u8, func: SwitchFn, a1: *mut (), a2: *mut ())
+    /// for everything `F::call` executes.
+    unsafe fn save_context<F: SwitchFnLike>(new_sp: *mut u8, a1: *mut (), a2: *mut ())
     -> Transfer;
 
-    /// Like `swap_context`, but `func` may cancel the switch by returning
-    /// `flag == 0`, in which case the caller resumes immediately and the
-    /// destination context stays saved.
+    /// Like `swap_context`, but `F::call` may cancel the switch by returning
+    /// instead of committing via `land`, in which case the caller resumes
+    /// immediately and the destination context stays saved — see
+    /// [`CondSwitchFnLike`]'s doc comment.
     ///
     /// # Safety
     /// As for [`swap_context`](Self::swap_context); additionally, on the
-    /// cancel path `func` must leave the destination context untouched.
-    unsafe fn cond_swap_context(
+    /// cancel path `F::call` must leave the destination context untouched.
+    unsafe fn cond_swap_context<F: CondSwitchFnLike>(
         to: Context,
-        func: CondSwitchFn,
         a1: *mut (),
         a2: *mut (),
     ) -> Transfer;

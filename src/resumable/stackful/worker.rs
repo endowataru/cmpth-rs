@@ -9,7 +9,7 @@
 use std::mem::ManuallyDrop;
 use std::ptr;
 
-use crate::traits::stackful::{CondTransfer, Context, ContextPolicy, RestoreFnLike, Transfer};
+use crate::traits::stackful::{CondSwitchFnLike, Context, ContextPolicy, RestoreFnLike, SwapFnLike, SwitchFnLike, Transfer};
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, WorkerOps};
 use crate::resumable::common::system::{PoolSystem, ReclaimableDesc, RunnableItem, WorkerSystem};
@@ -268,9 +268,8 @@ where
             f: ManuallyDrop::new(f),
         };
         let tr = unsafe {
-            S::Ctx::swap_context(
+            S::Ctx::swap_context::<SuspendSwapShimLike<S, F>>(
                 next_ctx,
-                suspend_shim::<S, F>,
                 &mut payload as *mut _ as *mut (),
                 ptr::null_mut(),
             )
@@ -292,9 +291,8 @@ where
             f: ManuallyDrop::new(f),
         };
         let tr = unsafe {
-            S::Ctx::cond_swap_context(
+            S::Ctx::cond_swap_context::<CondSuspendShimLike<S, F>>(
                 next_ctx,
-                cond_suspend_shim::<S, F>,
                 &mut payload as *mut _ as *mut (),
                 ptr::null_mut(),
             )
@@ -313,9 +311,8 @@ where
         let next = unsafe { Transferred::<SuspendedTaskToken<S::Desc>>::from_raw(next) };
         let mut payload = SuspendPayload::<S, F> { wk: self, next, f: ManuallyDrop::new(f) };
         let tr = unsafe {
-            S::Ctx::save_context(
+            S::Ctx::save_context::<SuspendShimLike<S, F>>(
                 stack_top,
-                suspend_shim::<S, F>,
                 &mut payload as *mut _ as *mut (),
                 ptr::null_mut(),
             )
@@ -370,7 +367,8 @@ where
     f: ManuallyDrop<F>,
 }
 
-unsafe extern "C" fn suspend_shim<S, F>(prev: Context, a1: *mut (), _a2: *mut ()) -> Transfer
+#[inline(always)]
+unsafe fn suspend_shim<S, F>(prev: Context, a1: *mut (), _a2: *mut ()) -> Transfer
 where
     S: StackfulWorkerSystem + PoolSystem,
     S::Desc: StackfulTaskDesc,
@@ -398,7 +396,8 @@ where
     f: ManuallyDrop<F>,
 }
 
-unsafe extern "C" fn cond_suspend_shim<S, F>(prev: Context, a1: *mut (), _a2: *mut ()) -> CondTransfer
+#[inline(always)]
+unsafe fn cond_suspend_shim<S, F>(prev: Context, to: Context, a1: *mut (), _a2: *mut ()) -> Transfer
 where
     S: StackfulWorkerSystem + PoolSystem,
     S::Desc: StackfulTaskDesc,
@@ -432,22 +431,66 @@ where
         None => {
             // Committed: `next_running` is already `cur_task` -- just
             // finish publishing it (peek, not take; nothing else needs to
-            // claim it right now).
+            // claim it right now), then land on `to` ourselves (see
+            // `CondSwitchFnLike`'s doc comment) instead of returning a flag
+            // for `cond_swap_context` to act on.
             wk.cur_task_token_mut().clear_saved_context();
-            CondTransfer { value: wk as *const UltWorker<S> as *mut (), flag: 1 }
+            unsafe { S::Ctx::land(to, wk as *const UltWorker<S> as *mut ()) }
         }
         Some(c) => {
             // Cancelled: take the provisional commit back out, restore
             // `prev` as the running task, hand `next` back to the caller
-            // as suspended again.
+            // as suspended again. Returning normally here is what tells
+            // `cond_swap_context` this was a cancel -- committing never
+            // returns at all.
             debug_assert!(std::ptr::eq(c.desc(), prev_desc));
             let mut c_running = c.into_running();
             c_running.clear_saved_context();
             let next_running = wk.take_cur_task();
             wk.set_cur_task(c_running);
             unsafe { *next_slot = Some(next_running.into_suspended()) };
-            CondTransfer { value: wk as *const UltWorker<S> as *mut (), flag: 0 }
+            Transfer(wk as *const UltWorker<S> as *mut ())
         }
+    }
+}
+
+struct SuspendShimLike<S, F>(std::marker::PhantomData<(S, F)>);
+
+impl<S, F> SwitchFnLike for SuspendShimLike<S, F>
+where
+    S: StackfulWorkerSystem + PoolSystem,
+    S::Desc: StackfulTaskDesc,
+    F: FnOnce(&UltWorker<S>, SuspendedTaskToken<S::Desc>),
+{
+    unsafe extern "C" fn call(prev: Context, a1: *mut (), a2: *mut ()) -> Transfer {
+        unsafe { suspend_shim::<S, F>(prev, a1, a2) }
+    }
+}
+
+struct SuspendSwapShimLike<S, F>(std::marker::PhantomData<(S, F)>);
+
+impl<S, F> SwapFnLike for SuspendSwapShimLike<S, F>
+where
+    S: StackfulWorkerSystem + PoolSystem,
+    S::Desc: StackfulTaskDesc,
+    F: FnOnce(&UltWorker<S>, SuspendedTaskToken<S::Desc>),
+{
+    unsafe extern "C" fn call(prev: Context, to: Context, a1: *mut (), a2: *mut ()) -> ! {
+        let tr = unsafe { suspend_shim::<S, F>(prev, a1, a2) };
+        unsafe { S::Ctx::land(to, tr.0) }
+    }
+}
+
+struct CondSuspendShimLike<S, F>(std::marker::PhantomData<(S, F)>);
+
+impl<S, F> CondSwitchFnLike for CondSuspendShimLike<S, F>
+where
+    S: StackfulWorkerSystem + PoolSystem,
+    S::Desc: StackfulTaskDesc,
+    F: FnOnce(&UltWorker<S>, &mut Option<SuspendedTaskToken<S::Desc>>),
+{
+    unsafe extern "C" fn call(prev: Context, to: Context, a1: *mut (), a2: *mut ()) -> Transfer {
+        unsafe { cond_suspend_shim::<S, F>(prev, to, a1, a2) }
     }
 }
 
