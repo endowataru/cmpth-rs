@@ -84,7 +84,7 @@
 //! — and which both policies share, because both frame layouts place
 //! `entry`/`arg` at the same first two words.
 
-use crate::traits::stackful::{CondSwitchFn, Context, ContextPolicy, EntryFn, RestoreFnLike, SwitchFn, Transfer};
+use crate::traits::stackful::{CondSwitchFnLike, Context, ContextPolicy, EntryFn, RestoreFnLike, SwapFnLike, SwitchFnLike, Transfer};
 
 // ---------------------------------------------------------------------------
 // Entry trampoline, shared by both policies
@@ -205,8 +205,10 @@ unsafe fn make_context_native(stack_top: *mut u8, entry: EntryFn, arg: *mut ()) 
 // ABI, so it would need different handling.
 #[cfg(target_arch = "x86_64")]
 unsafe impl ContextPolicy for NativeContext {
+    // Unverified on this (aarch64-only) machine; mirrors the aarch64
+    // tail-land restructuring below.
     #[inline(always)]
-    unsafe fn swap_context(to: Context, func: SwitchFn, a1: *mut (), a2: *mut ()) -> Transfer {
+    unsafe fn swap_context<F: SwapFnLike>(to: Context, a1: *mut (), a2: *mut ()) -> Transfer {
         let ret: *mut ();
         unsafe {
             core::arch::asm!(
@@ -219,25 +221,19 @@ unsafe impl ContextPolicy for NativeContext {
                 "push rbp",
                 "push rbx",
                 // rsp = prev_ctx
-                "mov  r8, rdi",          // r8 = destination context
-                "mov  r9, rsi",          // r9 = func
-                "mov  rdi, rsp",         // arg0 = prev_ctx
-                "mov  rsi, rdx",         // arg1 = a1
-                "mov  rdx, rcx",         // arg2 = a2
-
-                "mov  rsp, r8",          // switch to the destination
-                "pop  rbx",
-                "pop  rbp",
-                "pop  r12",
-                "pop  r13",
-                "pop  r14",
-                "pop  r15",
-                "jmp  r9",               // func(prev_ctx, a1, a2); ret -> destination
-                "3:",                    // resumed: rax = the resumer's Transfer
+                "mov  r8,  rdi",         // r8 = to.0
+                "mov  rcx, rdx",         // rcx = a2 (shift up)
+                "mov  rdx, rsi",         // rdx = a1 (shift up)
+                "mov  rsi, r8",          // rsi = to.0
+                "mov  rdi, rsp",         // rdi = prev_ctx
+                "mov  rsp, r8",          // onto `to`'s own stack
+                "jmp  {f}",              // F::call(prev_ctx, to, a1, a2) --
+                                         // never returns
+                "3:",                    // reached only by an external land()
+                f = sym <F as SwapFnLike>::call,
                 inout("rdi") to.0 => _,
-                inout("rsi") func => _,
-                inout("rdx") a1 => _,
-                inout("rcx") a2 => _,
+                inout("rsi") a1 => _,
+                inout("rdx") a2 => _,
                 lateout("rax") ret,
                 clobber_abi("C"),
             );
@@ -246,9 +242,8 @@ unsafe impl ContextPolicy for NativeContext {
     }
 
     #[inline(always)]
-    unsafe fn save_context(
+    unsafe fn save_context<F: SwitchFnLike>(
         new_sp: *mut u8,
-        func: SwitchFn,
         a1: *mut (),
         a2: *mut (),
     ) -> Transfer {
@@ -264,21 +259,21 @@ unsafe impl ContextPolicy for NativeContext {
                 "push rbp",
                 "push rbx",
                 // rsp = prev_ctx
-                "mov  r8, rdi",          // r8  = new stack top
-                "mov  r9, rsi",          // r9  = func
+                "mov  r8,  rdi",         // r8  = new stack top
                 "mov  r10, rsp",         // r10 = prev_ctx
-                "mov  rdi, rsp",         // arg0 = prev_ctx
-                "mov  rsi, rdx",         // arg1 = a1
-                "mov  rdx, rcx",         // arg2 = a2
-
+                "mov  rdi, rsp",         // arg0 = prev_ctx (a1/a2 already sit
+                                         // in rsi/rdx, untouched)
                 "and  r8, -16",          // align the new stack top
                 "mov  [r8 - 8], r10",    // prev_ctx, for the return path below
                 "lea  r11, [rip + 4f]",
-                "mov  [r8 - 24], r11",   // func's return address
-                "lea  rsp, [r8 - 24]",   // == 8 (mod 16): func enters as if called
-                "jmp  r9",               // func(prev_ctx, a1, a2) on the new stack
+                "mov  [r8 - 24], r11",   // F::call's return address
+                "lea  rsp, [r8 - 24]",   // == 8 (mod 16): F::call enters as
+                                         // if called
+                "jmp  {f}",              // F::call(prev_ctx, a1, a2) on the
+                                         // new stack (returns iff no real
+                                         // switch happened)
 
-                "4:",                    // func returned: resume the saved context
+                "4:",                    // F::call returned: resume the saved context
                 "mov  r9, [rsp + 8]",    // r9 = prev_ctx
                 "mov  rsp, r9",
                 "pop  rbx",
@@ -287,19 +282,13 @@ unsafe impl ContextPolicy for NativeContext {
                 "pop  r13",
                 "pop  r14",
                 "pop  r15",
-                // `4:` means func returned without ever diverging into
-                // another switch, so the only possible destination is this
-                // same instance's own `3:` -- unlike the exits below (whose
-                // target genuinely varies at runtime), a direct jump is
-                // correct here, not just cheaper.  `add rsp, 8` accounts for
-                // the return-address slot `ret` would otherwise have popped.
                 "add  rsp, 8",
                 "jmp  3f",               // -> `3:` (this instance's own)
                 "3:",
+                f = sym <F as SwitchFnLike>::call,
                 inout("rdi") new_sp => _,
-                inout("rsi") func => _,
-                inout("rdx") a1 => _,
-                inout("rcx") a2 => _,
+                inout("rsi") a1 => _,
+                inout("rdx") a2 => _,
                 lateout("rax") ret,
                 clobber_abi("C"),
             );
@@ -307,10 +296,11 @@ unsafe impl ContextPolicy for NativeContext {
         Transfer(ret)
     }
 
+    // Only the cancel path returns to this code -- see the aarch64
+    // cond_swap_context above.
     #[inline(always)]
-    unsafe fn cond_swap_context(
+    unsafe fn cond_swap_context<F: CondSwitchFnLike>(
         to: Context,
-        func: CondSwitchFn,
         a1: *mut (),
         a2: *mut (),
     ) -> Transfer {
@@ -325,43 +315,38 @@ unsafe impl ContextPolicy for NativeContext {
                 "push r12",
                 "push rbp",
                 "push rbx",
-                // rsp = prev_ctx.  r12/r13/r14 are ours to use now: the
-                // previous values are in the frame and both exit paths
-                // restore every callee-saved register from a frame.
-                "mov  r12, rdi",         // r12 = destination context
+                // rsp = prev_ctx.  r12/r13 are ours to use now: the previous
+                // values are in the frame and cancel restores every
+                // callee-saved register from it.
+                "mov  r12, rdi",         // r12 = to.0
                 "mov  r13, rsp",         // r13 = prev_ctx
-                "mov  r14, rsi",         // r14 = func
-                "mov  rdi, rsp",         // arg0 = prev_ctx
-                "mov  rsi, rdx",         // arg1 = a1
-                "mov  rdx, rcx",         // arg2 = a2
+                "mov  rcx, rdx",         // rcx = a2 (shift up)
+                "mov  rdx, rsi",         // rdx = a1 (shift up)
+                "mov  rsi, r12",         // rsi = to.0
+                "mov  rdi, r13",         // rdi = prev_ctx
 
-                // Run func on the destination stack, below its intact frame.
-                // ctx == 8 (mod 16), so sub 8 aligns rsp for the call.
+                // Run F::call on the destination stack, below its intact
+                // frame. ctx == 8 (mod 16), so sub 8 aligns rsp for the call.
                 "mov  rsp, r12",
                 "sub  rsp, 8",
-                "call r14",              // rax = value, rdx = flag
+                "call {f}",              // rax = value; returns only on cancel
                 "add  rsp, 8",
 
-                "test rdx, rdx",
-                "jnz  4f",
                 "mov  rsp, r13",         // cancel: restore the previous context
-                "jmp  5f",
-                "4:",
-                "mov  rsp, r12",         // commit: restore the destination
-                "5:",
                 "pop  rbx",
                 "pop  rbp",
                 "pop  r12",
                 "pop  r13",
                 "pop  r14",
                 "pop  r15",
-                "ret",                   // cancel -> `3:`; commit -> the
-                                         // destination's own resume label
+                "pop  r11",
+                "jmp  r11",              // -> `3:` (this instance's own;
+                                         // cancel always resumes here)
                 "3:",
+                f = sym <F as CondSwitchFnLike>::call,
                 inout("rdi") to.0 => _,
-                inout("rsi") func => _,
-                inout("rdx") a1 => _,
-                inout("rcx") a2 => _,
+                inout("rsi") a1 => _,
+                inout("rdx") a2 => _,
                 lateout("rax") ret,
                 clobber_abi("C"),
             );
@@ -424,13 +409,14 @@ unsafe impl ContextPolicy for NativeContext {
 #[cfg(target_arch = "aarch64")]
 unsafe impl ContextPolicy for NativeContext {
     #[inline(always)]
-    unsafe fn swap_context(to: Context, func: SwitchFn, a1: *mut (), a2: *mut ()) -> Transfer {
-        // Fully inlined: the return address pushed into the saved frame is
-        // the local label `3:` at the end of *this* block, so a resume lands
-        // straight back in the caller instead of in a separate symbol.  Only
-        // numeric local labels may be used — the compiler is free to
-        // duplicate an `asm!` block, and a named label would then be a
-        // duplicate symbol.
+    // `F::call` here always ends by calling `land` itself (see
+    // `SwapFnLike`'s doc comment) -- so the `3:` label below is *never*
+    // reached by this specific call's own `b {f}` returning; it exists
+    // purely as the address some later, unrelated switch resumes into when
+    // it names this saved frame as its own destination. `clobber_abi("C")`
+    // still applies: `b` vs `bl` only changes whether a return address gets
+    // pushed, not what `F::call`'s own execution clobbers.
+    unsafe fn swap_context<F: SwapFnLike>(to: Context, a1: *mut (), a2: *mut ()) -> Transfer {
         let ret: *mut ();
         unsafe {
             core::arch::asm!(
@@ -443,25 +429,22 @@ unsafe impl ContextPolicy for NativeContext {
                 "adr  x30, 3f",          // resume address = end of this block
                 "stp  x29, x30, [sp, #80]",
 
-                "mov  x9,  x0",          // x9  = destination context
-                "mov  x10, x1",          // x10 = func
-                "mov  x0,  sp",          // arg0 = prev_ctx (our saved frame)
-                "mov  x1,  x2",          // arg1 = a1
-                "mov  x2,  x3",          // arg2 = a2
-
-                "ldp  x19, x20, [x9,  #0]",
-                "ldp  x21, x22, [x9, #16]",
-                "ldp  x23, x24, [x9, #32]",
-                "ldp  x25, x26, [x9, #48]",
-                "ldp  x27, x28, [x9, #64]",
-                "ldp  x29, x30, [x9, #80]",
-                "add  sp,  x9, #96",     // pop the destination frame
-                "br   x10",              // func(prev_ctx, a1, a2); ret -> destination
-                "3:",                    // resumed: x0 = the resumer's Transfer
+                "mov  x9,  x0",          // x9  = destination context (to.0)
+                "mov  x11, sp",          // x11 = prev_ctx (our saved frame)
+                "mov  x3,  x2",          // x3 = a2 (shift up before x0-x2 move)
+                "mov  x2,  x1",          // x2 = a1
+                "mov  x1,  x9",          // x1 = to.0
+                "mov  x0,  x11",         // x0 = prev_ctx
+                "mov  sp,  x9",          // onto `to`'s own stack, below its
+                                         // still-unread frame
+                "b    {f}",              // F::call(prev_ctx, to, a1, a2) --
+                                         // never returns
+                "3:",                    // reached only by an external land()
+                                         // resuming this saved frame later
+                f = sym <F as SwapFnLike>::call,
                 inout("x0") to.0 => ret,
-                inout("x1") func => _,
-                inout("x2") a1 => _,
-                inout("x3") a2 => _,
+                inout("x1") a1 => _,
+                inout("x2") a2 => _,
                 lateout("v8") _, lateout("v9") _, lateout("v10") _, lateout("v11") _,
                 lateout("v12") _, lateout("v13") _, lateout("v14") _, lateout("v15") _,
                 clobber_abi("C"),
@@ -470,16 +453,20 @@ unsafe impl ContextPolicy for NativeContext {
         Transfer(ret)
     }
 
+    // `save_context` has no predetermined destination (see `SwitchFnLike`'s
+    // doc comment), so `F::call` may return normally; the fallback path
+    // (`F::call` returned without ever diverging into a real switch) lands
+    // on our own just-saved frame directly -- `x19` is free to stash it
+    // across the call (LLVM-reserved, never touched by `F::call`'s own
+    // compiled body, so it survives an ordinary ABI-conforming call for
+    // free; unlike `x20`/etc. this needs no help from the callee-saved
+    // contract).
     #[inline(always)]
-    unsafe fn save_context(
+    unsafe fn save_context<F: SwitchFnLike>(
         new_sp: *mut u8,
-        func: SwitchFn,
         a1: *mut (),
         a2: *mut (),
     ) -> Transfer {
-        // Two local labels: `4:` is where `func` returns to (the switch was
-        // never committed to a destination context, so the previous one is
-        // resumed at once), `3:` is where a genuine resume lands.
         let ret: *mut ();
         unsafe {
             core::arch::asm!(
@@ -492,21 +479,18 @@ unsafe impl ContextPolicy for NativeContext {
                 "adr  x30, 3f",          // resume address = end of this block
                 "stp  x29, x30, [sp, #80]",
 
-                "mov  x9,  x0",          // x9  = new stack top
-                "mov  x10, x1",          // x10 = func
-                "mov  x0,  sp",          // arg0 = prev_ctx
-                "mov  x1,  x2",          // arg1 = a1
-                "mov  x2,  x3",          // arg2 = a2
-
+                "mov  x9,  x0",          // x9 = new stack top
+                "mov  x19, sp",          // x19 = prev_ctx (our saved frame)
                 "bic  x9, x9, #15",      // align the new stack top
-                "mov  x11, sp",          // keep prev frame for the return path
-                "mov  sp, x9",
-                "str  x11, [sp, #-16]!", // push prev frame on the new stack
-                "adr  x30, 4f",
-                "br   x10",              // func(prev_ctx, a1, a2) on the new stack
+                "mov  x0,  x19",         // arg0 for F::call = prev_ctx
+                "mov  sp,  x9",          // onto the new stack
 
-                "4:",                    // func returned: resume the saved context
-                "ldr  x9, [sp]",
+                "bl   {f}",              // F::call(prev_ctx, a1, a2) -> Transfer
+                                         // (returns iff no real switch happened)
+
+                "mov  x1,  x0",          // x1 = F::call's returned value
+                "mov  x9,  x19",         // x9 = our own frame (x19 still
+                                         // valid: preserved across the call)
                 "ldp  x19, x20, [x9,  #0]",
                 "ldp  x21, x22, [x9, #16]",
                 "ldp  x23, x24, [x9, #32]",
@@ -514,18 +498,13 @@ unsafe impl ContextPolicy for NativeContext {
                 "ldp  x27, x28, [x9, #64]",
                 "ldp  x29, x30, [x9, #80]",
                 "add  sp,  x9, #96",
-                // `4:` means func returned without ever diverging into
-                // another switch, so the only possible destination is this
-                // same instance's own `3:` -- a direct branch is correct
-                // here (unlike the dynamic exits below), and `sp` is already
-                // fully restored by the `add` above, so no adjustment like
-                // x86-64's is needed.
-                "b    3f",               // -> `3:` (this instance's own)
+                "mov  x0,  x1",
+                "br   x30",              // -> `3:` (this instance's own)
                 "3:",
+                f = sym <F as SwitchFnLike>::call,
                 inout("x0") new_sp => ret,
-                inout("x1") func => _,
-                inout("x2") a1 => _,
-                inout("x3") a2 => _,
+                inout("x1") a1 => _,
+                inout("x2") a2 => _,
                 lateout("v8") _, lateout("v9") _, lateout("v10") _, lateout("v11") _,
                 lateout("v12") _, lateout("v13") _, lateout("v14") _, lateout("v15") _,
                 clobber_abi("C"),
@@ -534,10 +513,13 @@ unsafe impl ContextPolicy for NativeContext {
         Transfer(ret)
     }
 
+    // Only the cancel path returns to this code at all now: committing is a
+    // tail call to `land` inside `F::call` itself (see `CondSwitchFnLike`'s
+    // doc comment), so there's no flag left to branch on here -- any return
+    // from `F::call` unconditionally means cancel, restoring `prev` (x20).
     #[inline(always)]
-    unsafe fn cond_swap_context(
+    unsafe fn cond_swap_context<F: CondSwitchFnLike>(
         to: Context,
-        func: CondSwitchFn,
         a1: *mut (),
         a2: *mut (),
     ) -> Transfer {
@@ -553,26 +535,22 @@ unsafe impl ContextPolicy for NativeContext {
                 "adr  x30, 3f",          // resume address = end of this block
                 "stp  x29, x30, [sp, #80]",
 
-                // x19/x20 are ours to use now: the previous values are in the
-                // frame and both exit paths restore every callee-saved
-                // register from a frame.
                 "mov  x19, x0",          // x19 = destination context
-                "mov  x20, sp",          // x20 = previous frame
-                "mov  x10, x1",          // x10 = func
-                "mov  x0,  sp",          // arg0 = prev_ctx
-                "mov  x1,  x2",          // arg1 = a1
-                "mov  x2,  x3",          // arg2 = a2
+                "mov  x20, sp",          // x20 = prev_ctx (our own frame)
+                "mov  x3,  x2",          // x3 = a2 (shift up)
+                "mov  x2,  x1",          // x2 = a1
+                "mov  x1,  x19",         // x1 = to.0
+                "mov  x0,  x20",         // x0 = prev_ctx
 
-                "mov  sp,  x19",         // run func on the destination stack,
-                                         // below the destination's frame
-                "blr  x10",              // (x0, x1) = func(prev_ctx, a1, a2)
+                "mov  sp,  x19",         // run F::call on the destination
+                                         // stack, below its intact frame
+                "bl   {f}",              // F::call(prev_ctx, to, a1, a2) --
+                                         // returns only on cancel
 
-                "cbnz x1, 4f",
-                "mov  x9, x20",          // cancel: restore the previous context
-                "b    5f",
-                "4:",
-                "mov  x9, x19",          // commit: restore the destination
-                "5:",
+                "mov  x9,  x20",         // cancel: restore the previous
+                                         // context (x20 preserved across the
+                                         // call by the ordinary callee-saved
+                                         // contract)
                 "ldp  x19, x20, [x9,  #0]",
                 "ldp  x21, x22, [x9, #16]",
                 "ldp  x23, x24, [x9, #32]",
@@ -580,13 +558,13 @@ unsafe impl ContextPolicy for NativeContext {
                 "ldp  x27, x28, [x9, #64]",
                 "ldp  x29, x30, [x9, #80]",
                 "add  sp,  x9, #96",
-                "ret",                   // cancel -> `3:`; commit -> the
-                                         // destination's own resume label
+                "br   x30",              // -> `3:` (this instance's own;
+                                         // cancel always resumes here)
                 "3:",
+                f = sym <F as CondSwitchFnLike>::call,
                 inout("x0") to.0 => ret,
-                inout("x1") func => _,
-                inout("x2") a1 => _,
-                inout("x3") a2 => _,
+                inout("x1") a1 => _,
+                inout("x2") a2 => _,
                 lateout("v8") _, lateout("v9") _, lateout("v10") _, lateout("v11") _,
                 lateout("v12") _, lateout("v13") _, lateout("v14") _, lateout("v15") _,
                 clobber_abi("C"),
@@ -709,8 +687,10 @@ unsafe fn make_context_lean(stack_top: *mut u8, entry: EntryFn, arg: *mut ()) ->
 
 #[cfg(target_arch = "x86_64")]
 unsafe impl ContextPolicy for LeanFrameContext {
+    // Unverified on this (aarch64-only) machine; mirrors the x86_64
+    // NativeContext impl above.
     #[inline(always)]
-    unsafe fn swap_context(to: Context, func: SwitchFn, a1: *mut (), a2: *mut ()) -> Transfer {
+    unsafe fn swap_context<F: SwapFnLike>(to: Context, a1: *mut (), a2: *mut ()) -> Transfer {
         let ret: *mut ();
         unsafe {
             core::arch::asm!(
@@ -721,23 +701,19 @@ unsafe impl ContextPolicy for LeanFrameContext {
                 "push rbp",
                 "push rbx",
                 // rsp = prev_ctx
-                "mov  r8, rdi",          // r8 = destination context
-                "mov  r9, rsi",          // r9 = func
-                "mov  rdi, rsp",         // arg0 = prev_ctx
-                "mov  rsi, rdx",         // arg1 = a1
-                "mov  rdx, rcx",         // arg2 = a2
-
-                "mov  rsp, r8",          // switch to the destination
-                "pop  rbx",
-                "pop  rbp",
-                "pop  r12",
-                "pop  r13",
-                "jmp  r9",               // func(prev_ctx, a1, a2); ret -> destination
-                "3:",                    // resumed: rax = the resumer's Transfer
+                "mov  r8,  rdi",         // r8 = to.0
+                "mov  rcx, rdx",         // rcx = a2 (shift up)
+                "mov  rdx, rsi",         // rdx = a1 (shift up)
+                "mov  rsi, r8",          // rsi = to.0
+                "mov  rdi, rsp",         // rdi = prev_ctx
+                "mov  rsp, r8",          // onto `to`'s own stack
+                "jmp  {f}",              // F::call(prev_ctx, to, a1, a2) --
+                                         // never returns
+                "3:",
+                f = sym <F as SwapFnLike>::call,
                 inout("rdi") to.0 => _,
-                inout("rsi") func => _,
-                inout("rdx") a1 => _,
-                inout("rcx") a2 => _,
+                inout("rsi") a1 => _,
+                inout("rdx") a2 => _,
                 lateout("rax") ret,
                 lateout("r14") _, lateout("r15") _,
                 clobber_abi("C"),
@@ -747,9 +723,8 @@ unsafe impl ContextPolicy for LeanFrameContext {
     }
 
     #[inline(always)]
-    unsafe fn save_context(
+    unsafe fn save_context<F: SwitchFnLike>(
         new_sp: *mut u8,
-        func: SwitchFn,
         a1: *mut (),
         a2: *mut (),
     ) -> Transfer {
@@ -763,40 +738,32 @@ unsafe impl ContextPolicy for LeanFrameContext {
                 "push rbp",
                 "push rbx",
                 // rsp = prev_ctx
-                "mov  r8, rdi",          // r8  = new stack top
-                "mov  r9, rsi",          // r9  = func
+                "mov  r8,  rdi",         // r8  = new stack top
                 "mov  r10, rsp",         // r10 = prev_ctx
-                "mov  rdi, rsp",         // arg0 = prev_ctx
-                "mov  rsi, rdx",         // arg1 = a1
-                "mov  rdx, rcx",         // arg2 = a2
-
+                "mov  rdi, rsp",         // arg0 = prev_ctx (a1/a2 untouched)
                 "and  r8, -16",          // align the new stack top
                 "mov  [r8 - 8], r10",    // prev_ctx, for the return path below
                 "lea  r11, [rip + 4f]",
-                "mov  [r8 - 24], r11",   // func's return address
-                "lea  rsp, [r8 - 24]",   // == 8 (mod 16): func enters as if called
-                "jmp  r9",               // func(prev_ctx, a1, a2) on the new stack
+                "mov  [r8 - 24], r11",   // F::call's return address
+                "lea  rsp, [r8 - 24]",   // == 8 (mod 16): F::call enters as
+                                         // if called
+                "jmp  {f}",              // F::call(prev_ctx, a1, a2) on the
+                                         // new stack
 
-                "4:",                    // func returned: resume the saved context
+                "4:",                    // F::call returned: resume the saved context
                 "mov  r9, [rsp + 8]",    // r9 = prev_ctx
                 "mov  rsp, r9",
                 "pop  rbx",
                 "pop  rbp",
                 "pop  r12",
                 "pop  r13",
-                // `4:` means func returned without ever diverging into
-                // another switch, so the only possible destination is this
-                // same instance's own `3:` -- a direct jump is correct here
-                // (unlike the dynamic exits below).  `add rsp, 8` accounts
-                // for the return-address slot `ret` would otherwise have
-                // popped.
                 "add  rsp, 8",
                 "jmp  3f",               // -> `3:` (this instance's own)
                 "3:",
+                f = sym <F as SwitchFnLike>::call,
                 inout("rdi") new_sp => _,
-                inout("rsi") func => _,
-                inout("rdx") a1 => _,
-                inout("rcx") a2 => _,
+                inout("rsi") a1 => _,
+                inout("rdx") a2 => _,
                 lateout("rax") ret,
                 lateout("r14") _, lateout("r15") _,
                 clobber_abi("C"),
@@ -806,9 +773,8 @@ unsafe impl ContextPolicy for LeanFrameContext {
     }
 
     #[inline(always)]
-    unsafe fn cond_swap_context(
+    unsafe fn cond_swap_context<F: CondSwitchFnLike>(
         to: Context,
-        func: CondSwitchFn,
         a1: *mut (),
         a2: *mut (),
     ) -> Transfer {
@@ -822,41 +788,34 @@ unsafe impl ContextPolicy for LeanFrameContext {
                 "push rbp",
                 "push rbx",
                 // rsp = prev_ctx.  r12/r13 are ours to use now: the previous
-                // values are in the frame and both exit paths restore every
-                // saved register from a frame.  r14 survives the call below
-                // because it is callee-saved for `func`.
-                "mov  r12, rdi",         // r12 = destination context
+                // values are in the frame and cancel restores every
+                // callee-saved register from it.
+                "mov  r12, rdi",         // r12 = to.0
                 "mov  r13, rsp",         // r13 = prev_ctx
-                "mov  r14, rsi",         // r14 = func
-                "mov  rdi, rsp",         // arg0 = prev_ctx
-                "mov  rsi, rdx",         // arg1 = a1
-                "mov  rdx, rcx",         // arg2 = a2
+                "mov  rcx, rdx",         // rcx = a2 (shift up)
+                "mov  rdx, rsi",         // rdx = a1 (shift up)
+                "mov  rsi, r12",         // rsi = to.0
+                "mov  rdi, r13",         // rdi = prev_ctx
 
-                // Run func on the destination stack, below its intact frame.
-                // ctx == 8 (mod 16), so sub 8 aligns rsp for the call.
+                // Run F::call on the destination stack, below its intact
+                // frame. ctx == 8 (mod 16), so sub 8 aligns rsp for the call.
                 "mov  rsp, r12",
                 "sub  rsp, 8",
-                "call r14",              // rax = value, rdx = flag
+                "call {f}",              // rax = value; returns only on cancel
                 "add  rsp, 8",
 
-                "test rdx, rdx",
-                "jnz  4f",
                 "mov  rsp, r13",         // cancel: restore the previous context
-                "jmp  5f",
-                "4:",
-                "mov  rsp, r12",         // commit: restore the destination
-                "5:",
                 "pop  rbx",
                 "pop  rbp",
                 "pop  r12",
                 "pop  r13",
-                "ret",                   // cancel -> `3:`; commit -> the
-                                         // destination's own resume label
+                "pop  r11",
+                "jmp  r11",              // -> `3:` (this instance's own)
                 "3:",
+                f = sym <F as CondSwitchFnLike>::call,
                 inout("rdi") to.0 => _,
-                inout("rsi") func => _,
-                inout("rdx") a1 => _,
-                inout("rcx") a2 => _,
+                inout("rsi") a1 => _,
+                inout("rdx") a2 => _,
                 lateout("rax") ret,
                 lateout("r14") _, lateout("r15") _,
                 clobber_abi("C"),
@@ -919,37 +878,32 @@ unsafe impl ContextPolicy for LeanFrameContext {
 
 #[cfg(target_arch = "aarch64")]
 unsafe impl ContextPolicy for LeanFrameContext {
+    // Same Strategy-B / tail-land shape as `NativeContext` above; only the
+    // frame layout differs (32 bytes, x21-x28 declared as clobbers).
     #[inline(always)]
-    unsafe fn swap_context(to: Context, func: SwitchFn, a1: *mut (), a2: *mut ()) -> Transfer {
-        // Fully inlined: the return address pushed into the saved frame is
-        // the local label `3:` at the end of *this* block, so a resume lands
-        // straight back in the caller instead of in a separate symbol.  Only
-        // numeric local labels may be used — the compiler is free to
-        // duplicate an `asm!` block, and a named label would then be a
-        // duplicate symbol.
+    unsafe fn swap_context<F: SwapFnLike>(to: Context, a1: *mut (), a2: *mut ()) -> Transfer {
         let ret: *mut ();
         unsafe {
             core::arch::asm!(
                 "sub  sp, sp, #32",
                 "stp  x19, x20, [sp,  #0]",
-                "adr  x30, 3f",          // resume address = end of this block
+                "adr  x30, 3f",
                 "stp  x29, x30, [sp, #16]",
 
-                "mov  x9,  x0",          // x9  = destination context
-                "mov  x10, x1",          // x10 = func
-                "mov  x0,  sp",          // arg0 = prev_ctx (our saved frame)
-                "mov  x1,  x2",          // arg1 = a1
-                "mov  x2,  x3",          // arg2 = a2
-
-                "ldp  x19, x20, [x9,  #0]",
-                "ldp  x29, x30, [x9, #16]",
-                "add  sp,  x9, #32",     // pop the destination frame
-                "br   x10",              // func(prev_ctx, a1, a2); ret -> destination
-                "3:",                    // resumed: x0 = the resumer's Transfer
+                "mov  x9,  x0",          // x9  = destination context (to.0)
+                "mov  x11, sp",          // x11 = prev_ctx
+                "mov  x3,  x2",          // x3 = a2
+                "mov  x2,  x1",          // x2 = a1
+                "mov  x1,  x9",          // x1 = to.0
+                "mov  x0,  x11",         // x0 = prev_ctx
+                "mov  sp,  x9",
+                "b    {f}",              // F::call(prev_ctx, to, a1, a2) --
+                                         // never returns
+                "3:",
+                f = sym <F as SwapFnLike>::call,
                 inout("x0") to.0 => ret,
-                inout("x1") func => _,
-                inout("x2") a1 => _,
-                inout("x3") a2 => _,
+                inout("x1") a1 => _,
+                inout("x2") a2 => _,
                 lateout("x21") _, lateout("x22") _, lateout("x23") _, lateout("x24") _,
                 lateout("x25") _, lateout("x26") _, lateout("x27") _, lateout("x28") _,
                 lateout("v8") _, lateout("v9") _, lateout("v10") _, lateout("v11") _,
@@ -961,52 +915,39 @@ unsafe impl ContextPolicy for LeanFrameContext {
     }
 
     #[inline(always)]
-    unsafe fn save_context(
+    unsafe fn save_context<F: SwitchFnLike>(
         new_sp: *mut u8,
-        func: SwitchFn,
         a1: *mut (),
         a2: *mut (),
     ) -> Transfer {
-        // Two local labels: `4:` is where `func` returns to (the switch was
-        // never committed to a destination context, so the previous one is
-        // resumed at once), `3:` is where a genuine resume lands.
         let ret: *mut ();
         unsafe {
             core::arch::asm!(
                 "sub  sp, sp, #32",
                 "stp  x19, x20, [sp,  #0]",
-                "adr  x30, 3f",          // resume address = end of this block
+                "adr  x30, 3f",
                 "stp  x29, x30, [sp, #16]",
 
-                "mov  x9,  x0",          // x9  = new stack top
-                "mov  x10, x1",          // x10 = func
-                "mov  x0,  sp",          // arg0 = prev_ctx
-                "mov  x1,  x2",          // arg1 = a1
-                "mov  x2,  x3",          // arg2 = a2
+                "mov  x9,  x0",          // x9 = new stack top
+                "mov  x19, sp",          // x19 = prev_ctx
+                "bic  x9, x9, #15",
+                "mov  x0,  x19",         // arg0 for F::call = prev_ctx
+                "mov  sp,  x9",
 
-                "bic  x9, x9, #15",      // align the new stack top
-                "mov  x11, sp",          // keep prev frame for the return path
-                "mov  sp, x9",
-                "str  x11, [sp, #-16]!", // push prev frame on the new stack
-                "adr  x30, 4f",
-                "br   x10",              // func(prev_ctx, a1, a2) on the new stack
+                "bl   {f}",              // F::call(prev_ctx, a1, a2) -> Transfer
 
-                "4:",                    // func returned: resume the saved context
-                "ldr  x9, [sp]",
+                "mov  x1,  x0",
+                "mov  x9,  x19",
                 "ldp  x19, x20, [x9,  #0]",
                 "ldp  x29, x30, [x9, #16]",
                 "add  sp,  x9, #32",
-                // `4:` means func returned without ever diverging into
-                // another switch, so the only possible destination is this
-                // same instance's own `3:` -- a direct branch is correct
-                // here (unlike the dynamic exits below), and `sp` is already
-                // fully restored by the `add` above.
-                "b    3f",               // -> `3:` (this instance's own)
+                "mov  x0,  x1",
+                "br   x30",
                 "3:",
+                f = sym <F as SwitchFnLike>::call,
                 inout("x0") new_sp => ret,
-                inout("x1") func => _,
-                inout("x2") a1 => _,
-                inout("x3") a2 => _,
+                inout("x1") a1 => _,
+                inout("x2") a2 => _,
                 lateout("x21") _, lateout("x22") _, lateout("x23") _, lateout("x24") _,
                 lateout("x25") _, lateout("x26") _, lateout("x27") _, lateout("x28") _,
                 lateout("v8") _, lateout("v9") _, lateout("v10") _, lateout("v11") _,
@@ -1018,9 +959,8 @@ unsafe impl ContextPolicy for LeanFrameContext {
     }
 
     #[inline(always)]
-    unsafe fn cond_swap_context(
+    unsafe fn cond_swap_context<F: CondSwitchFnLike>(
         to: Context,
-        func: CondSwitchFn,
         a1: *mut (),
         a2: *mut (),
     ) -> Transfer {
@@ -1029,40 +969,30 @@ unsafe impl ContextPolicy for LeanFrameContext {
             core::arch::asm!(
                 "sub  sp, sp, #32",
                 "stp  x19, x20, [sp,  #0]",
-                "adr  x30, 3f",          // resume address = end of this block
+                "adr  x30, 3f",
                 "stp  x29, x30, [sp, #16]",
 
-                // x19/x20 are ours to use now: the previous values are in the
-                // frame and both exit paths restore them from a frame.  They
-                // survive the call below because `func` is an ordinary C
-                // callee and preserves them.
                 "mov  x19, x0",          // x19 = destination context
-                "mov  x20, sp",          // x20 = previous frame
-                "mov  x10, x1",          // x10 = func
-                "mov  x0,  sp",          // arg0 = prev_ctx
-                "mov  x1,  x2",          // arg1 = a1
-                "mov  x2,  x3",          // arg2 = a2
+                "mov  x20, sp",          // x20 = prev_ctx
+                "mov  x3,  x2",          // x3 = a2
+                "mov  x2,  x1",          // x2 = a1
+                "mov  x1,  x19",         // x1 = to.0
+                "mov  x0,  x20",         // x0 = prev_ctx
 
-                "mov  sp,  x19",         // run func on the destination stack,
-                                         // below the destination's frame
-                "blr  x10",              // (x0, x1) = func(prev_ctx, a1, a2)
+                "mov  sp,  x19",
+                "bl   {f}",              // F::call(prev_ctx, to, a1, a2) --
+                                         // returns only on cancel
 
-                "cbnz x1, 4f",
-                "mov  x9, x20",          // cancel: restore the previous context
-                "b    5f",
-                "4:",
-                "mov  x9, x19",          // commit: restore the destination
-                "5:",
+                "mov  x9,  x20",         // cancel: restore the previous context
                 "ldp  x19, x20, [x9,  #0]",
                 "ldp  x29, x30, [x9, #16]",
                 "add  sp,  x9, #32",
-                "ret",                   // cancel -> `3:`; commit -> the
-                                         // destination's own resume label
+                "br   x30",
                 "3:",
+                f = sym <F as CondSwitchFnLike>::call,
                 inout("x0") to.0 => ret,
-                inout("x1") func => _,
-                inout("x2") a1 => _,
-                inout("x3") a2 => _,
+                inout("x1") a1 => _,
+                inout("x2") a2 => _,
                 lateout("x21") _, lateout("x22") _, lateout("x23") _, lateout("x24") _,
                 lateout("x25") _, lateout("x26") _, lateout("x27") _, lateout("x28") _,
                 lateout("v8") _, lateout("v9") _, lateout("v10") _, lateout("v11") _,
