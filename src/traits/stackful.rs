@@ -10,7 +10,7 @@
 
 pub use crate::traits::component::stackful::{
     CondSwitchFn, CondTransfer, Context, ContextPolicy, EntryFn, HandoffTaskDesc, Poller,
-    RestoreFn, StackfulResumable, SwitchFn, Transfer,
+    RestoreFnLike, StackfulResumable, SwitchFn, Transfer,
 };
 pub use crate::traits::component::delegation::DelegatorConsumer;
 pub use crate::traits::component::wait::Resumable;

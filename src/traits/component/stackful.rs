@@ -176,7 +176,21 @@ pub type CondSwitchFn =
 
 /// Callback run on the destination stack after `restore_context`.
 /// There is no `prev`: the calling context is abandoned, not saved.
-pub type RestoreFn = unsafe extern "C" fn(a1: *mut (), a2: *mut ()) -> Transfer;
+///
+/// Unlike [`SwitchFn`]/[`CondSwitchFn`], `call` never returns: it receives
+/// `to` (the same destination `restore_context` was given) and, once its
+/// ordinary Rust logic finishes, switches to it itself by calling
+/// [`ContextPolicy::land`] as its own tail expression — an `#[inline(always)]`
+/// call, so the switch-out asm ends up physically inlined into `call`'s own
+/// compiled body, with no separate return-then-switch step in
+/// `restore_context` afterward. This is possible here (and not for
+/// `swap`/`save`/`cond_swap`) because `restore_context` has no "saved own
+/// frame" that a *later*, unrelated switch might resume into — `to` is the
+/// only destination this call can ever produce, so `call` fully owns getting
+/// there instead of handing a `Transfer` back to `restore_context` to act on.
+pub trait RestoreFnLike {
+    unsafe extern "C" fn call(to: Context, a1: *mut (), a2: *mut ()) -> !;
+}
 
 /// Entry point of a context created with `make_context`.  `transfer` is the
 /// value returned by the first switcher's callback.
@@ -220,12 +234,27 @@ pub unsafe trait ContextPolicy: 'static {
         a2: *mut (),
     ) -> Transfer;
 
-    /// Abandon the current context, switch to `to`, run `func` there.
+    /// Abandon the current context, switch to `to`, run `F::call` there.
+    /// `F::call` itself performs the actual switch (via [`land`](Self::land))
+    /// once it's done — see [`RestoreFnLike`]'s doc comment.
     ///
     /// # Safety
     /// As for [`swap_context`](Self::swap_context); the current stack is
     /// abandoned without unwinding, so no live destructors may remain on it.
-    unsafe fn restore_context(to: Context, func: RestoreFn, a1: *mut (), a2: *mut ()) -> !;
+    unsafe fn restore_context<F: RestoreFnLike>(to: Context, a1: *mut (), a2: *mut ()) -> !;
+
+    /// Load `ctx`'s saved frame and jump to its resume label, leaving
+    /// `ret_value` in the return-value register for the resumed side to see
+    /// as "the resumer's `Transfer`". The low-level primitive every switch
+    /// ultimately bottoms out in; `#[inline(always)]` implementations are
+    /// expected so a tail call to this from inside a callback (see
+    /// [`RestoreFnLike`]) compiles to the switch-out asm directly, with no
+    /// extra call/return round trip.
+    ///
+    /// # Safety
+    /// `ctx` must be a live, previously-saved context matching this policy's
+    /// frame layout.
+    unsafe fn land(ctx: Context, ret_value: *mut ()) -> !;
 
     /// Prepare a context on a fresh stack that enters `entry` when first
     /// switched to.
