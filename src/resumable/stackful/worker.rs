@@ -462,8 +462,9 @@ where
     S::Desc: StackfulTaskDesc,
     F: FnOnce(&UltWorker<S>, SuspendedTaskToken<S::Desc>),
 {
-    unsafe extern "C" fn call(prev: Context, a1: *mut (), a2: *mut ()) -> Transfer {
-        unsafe { suspend_shim::<S, F>(prev, a1, a2) }
+    unsafe extern "C" fn call(prev: Context, a1: *mut (), a2: *mut ()) -> ! {
+        let tr = unsafe { suspend_shim::<S, F>(prev, a1, a2) };
+        unsafe { S::Ctx::land(prev, tr.0) }
     }
 }
 

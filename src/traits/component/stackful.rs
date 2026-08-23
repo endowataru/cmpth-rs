@@ -167,13 +167,15 @@ pub struct CondTransfer {
 }
 
 /// Callback run on the destination stack after `save_context`. `prev` is the
-/// context that was just saved. May return normally — unlike
-/// [`SwapFnLike`]'s callback, `save_context` has no predetermined
-/// destination to hand `call` up front (the freshly created task may run to
-/// completion without ever switching anywhere) — in which case
-/// `save_context` resumes `prev` itself, at once.
+/// context that was just saved. Unlike [`SwapFnLike`], `save_context` has no
+/// predetermined destination to hand `call` up front — but `call` still
+/// never returns: if it has nowhere else to go, it lands on `prev` itself
+/// (via [`ContextPolicy::land`]), exactly as if `prev` were an ordinary
+/// [`Context`] handed to a `swap_context` call. Same shape and rationale as
+/// [`SwapFnLike`]/[`RestoreFnLike`] — `save_context`'s asm carries no
+/// "returned without diverging" fallback path to consider.
 pub trait SwitchFnLike {
-    unsafe extern "C" fn call(prev: Context, a1: *mut (), a2: *mut ()) -> Transfer;
+    unsafe extern "C" fn call(prev: Context, a1: *mut (), a2: *mut ()) -> !;
 }
 
 /// Callback run on the destination stack after `swap_context`. `prev` is the
@@ -239,8 +241,9 @@ pub unsafe trait ContextPolicy: 'static {
     unsafe fn swap_context<F: SwapFnLike>(to: Context, a1: *mut (), a2: *mut ()) -> Transfer;
 
     /// Save the current context, switch to the fresh stack `new_sp`, run
-    /// `F::call` there.  If `F::call` returns, the saved context resumes at
-    /// once.
+    /// `F::call` there. `F::call` itself performs the actual switch (via
+    /// [`land`](Self::land)) once it's done — see [`SwitchFnLike`]'s doc
+    /// comment.
     ///
     /// # Safety
     /// `new_sp` must be the top of a stack that is unused and large enough
