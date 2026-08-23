@@ -250,8 +250,8 @@ unsafe impl ContextPolicy for NativeContext {
         let ret: *mut ();
         unsafe {
             core::arch::asm!(
-                "lea  r11, [rip + 3f]",
-                "push r11",
+                "lea  r11, [rip + 3f]",  // resume address = end of this block
+                "push r11",              // ...where `call` would have pushed it
                 "push r15",
                 "push r14",
                 "push r13",
@@ -260,31 +260,13 @@ unsafe impl ContextPolicy for NativeContext {
                 "push rbx",
                 // rsp = prev_ctx
                 "mov  r8,  rdi",         // r8  = new stack top
-                "mov  r10, rsp",         // r10 = prev_ctx
                 "mov  rdi, rsp",         // arg0 = prev_ctx (a1/a2 already sit
                                          // in rsi/rdx, untouched)
                 "and  r8, -16",          // align the new stack top
-                "mov  [r8 - 8], r10",    // prev_ctx, for the return path below
-                "lea  r11, [rip + 4f]",
-                "mov  [r8 - 24], r11",   // F::call's return address
-                "lea  rsp, [r8 - 24]",   // == 8 (mod 16): F::call enters as
-                                         // if called
-                "jmp  {f}",              // F::call(prev_ctx, a1, a2) on the
-                                         // new stack (returns iff no real
-                                         // switch happened)
-
-                "4:",                    // F::call returned: resume the saved context
-                "mov  r9, [rsp + 8]",    // r9 = prev_ctx
-                "mov  rsp, r9",
-                "pop  rbx",
-                "pop  rbp",
-                "pop  r12",
-                "pop  r13",
-                "pop  r14",
-                "pop  r15",
-                "add  rsp, 8",
-                "jmp  3f",               // -> `3:` (this instance's own)
-                "3:",
+                "mov  rsp, r8",          // onto the new stack
+                "jmp  {f}",              // F::call(prev_ctx, a1, a2) --
+                                         // never returns
+                "3:",                    // reached only by an external land()
                 f = sym <F as SwitchFnLike>::call,
                 inout("rdi") new_sp => _,
                 inout("rsi") a1 => _,
@@ -453,14 +435,12 @@ unsafe impl ContextPolicy for NativeContext {
         Transfer(ret)
     }
 
-    // `save_context` has no predetermined destination (see `SwitchFnLike`'s
-    // doc comment), so `F::call` may return normally; the fallback path
-    // (`F::call` returned without ever diverging into a real switch) lands
-    // on our own just-saved frame directly -- `x19` is free to stash it
-    // across the call (LLVM-reserved, never touched by `F::call`'s own
-    // compiled body, so it survives an ordinary ABI-conforming call for
-    // free; unlike `x20`/etc. this needs no help from the callee-saved
-    // contract).
+    // `save_context` has no predetermined destination up front (see
+    // `SwitchFnLike`'s doc comment), but `F::call` never returns either way:
+    // if it has nowhere else to go, it lands on `prev` itself, the same way
+    // `swap_context`'s callback lands on `to` -- so this asm block, like
+    // `swap_context`'s, is nothing but "move onto the new stack, then jump
+    // to `F::call`", with no epilogue after it.
     #[inline(always)]
     unsafe fn save_context<F: SwitchFnLike>(
         new_sp: *mut u8,
@@ -479,28 +459,15 @@ unsafe impl ContextPolicy for NativeContext {
                 "adr  x30, 3f",          // resume address = end of this block
                 "stp  x29, x30, [sp, #80]",
 
-                "mov  x9,  x0",          // x9 = new stack top
-                "mov  x19, sp",          // x19 = prev_ctx (our saved frame)
+                "mov  x9,  x0",          // x9  = new stack top
+                "mov  x11, sp",          // x11 = prev_ctx (our saved frame)
                 "bic  x9, x9, #15",      // align the new stack top
-                "mov  x0,  x19",         // arg0 for F::call = prev_ctx
+                "mov  x0,  x11",         // arg0 for F::call = prev_ctx
                 "mov  sp,  x9",          // onto the new stack
-
-                "bl   {f}",              // F::call(prev_ctx, a1, a2) -> Transfer
-                                         // (returns iff no real switch happened)
-
-                "mov  x1,  x0",          // x1 = F::call's returned value
-                "mov  x9,  x19",         // x9 = our own frame (x19 still
-                                         // valid: preserved across the call)
-                "ldp  x19, x20, [x9,  #0]",
-                "ldp  x21, x22, [x9, #16]",
-                "ldp  x23, x24, [x9, #32]",
-                "ldp  x25, x26, [x9, #48]",
-                "ldp  x27, x28, [x9, #64]",
-                "ldp  x29, x30, [x9, #80]",
-                "add  sp,  x9, #96",
-                "mov  x0,  x1",
-                "br   x30",              // -> `3:` (this instance's own)
-                "3:",
+                "b    {f}",              // F::call(prev_ctx, a1, a2) --
+                                         // never returns
+                "3:",                    // reached only by an external land()
+                                         // resuming this saved frame later
                 f = sym <F as SwitchFnLike>::call,
                 inout("x0") new_sp => ret,
                 inout("x1") a1 => _,
@@ -731,35 +698,20 @@ unsafe impl ContextPolicy for LeanFrameContext {
         let ret: *mut ();
         unsafe {
             core::arch::asm!(
-                "lea  r11, [rip + 3f]",
-                "push r11",
+                "lea  r11, [rip + 3f]",  // resume address = end of this block
+                "push r11",              // ...where `call` would have pushed it
                 "push r13",
                 "push r12",
                 "push rbp",
                 "push rbx",
                 // rsp = prev_ctx
                 "mov  r8,  rdi",         // r8  = new stack top
-                "mov  r10, rsp",         // r10 = prev_ctx
                 "mov  rdi, rsp",         // arg0 = prev_ctx (a1/a2 untouched)
                 "and  r8, -16",          // align the new stack top
-                "mov  [r8 - 8], r10",    // prev_ctx, for the return path below
-                "lea  r11, [rip + 4f]",
-                "mov  [r8 - 24], r11",   // F::call's return address
-                "lea  rsp, [r8 - 24]",   // == 8 (mod 16): F::call enters as
-                                         // if called
-                "jmp  {f}",              // F::call(prev_ctx, a1, a2) on the
-                                         // new stack
-
-                "4:",                    // F::call returned: resume the saved context
-                "mov  r9, [rsp + 8]",    // r9 = prev_ctx
-                "mov  rsp, r9",
-                "pop  rbx",
-                "pop  rbp",
-                "pop  r12",
-                "pop  r13",
-                "add  rsp, 8",
-                "jmp  3f",               // -> `3:` (this instance's own)
-                "3:",
+                "mov  rsp, r8",          // onto the new stack
+                "jmp  {f}",              // F::call(prev_ctx, a1, a2) --
+                                         // never returns
+                "3:",                    // reached only by an external land()
                 f = sym <F as SwitchFnLike>::call,
                 inout("rdi") new_sp => _,
                 inout("rsi") a1 => _,
@@ -914,6 +866,8 @@ unsafe impl ContextPolicy for LeanFrameContext {
         Transfer(ret)
     }
 
+    // Same tail-land shape as `swap_context` above (see the `NativeContext`
+    // `save_context` impl for why) -- only the frame layout differs.
     #[inline(always)]
     unsafe fn save_context<F: SwitchFnLike>(
         new_sp: *mut u8,
@@ -928,21 +882,13 @@ unsafe impl ContextPolicy for LeanFrameContext {
                 "adr  x30, 3f",
                 "stp  x29, x30, [sp, #16]",
 
-                "mov  x9,  x0",          // x9 = new stack top
-                "mov  x19, sp",          // x19 = prev_ctx
+                "mov  x9,  x0",          // x9  = new stack top
+                "mov  x11, sp",          // x11 = prev_ctx
                 "bic  x9, x9, #15",
-                "mov  x0,  x19",         // arg0 for F::call = prev_ctx
+                "mov  x0,  x11",         // arg0 for F::call = prev_ctx
                 "mov  sp,  x9",
-
-                "bl   {f}",              // F::call(prev_ctx, a1, a2) -> Transfer
-
-                "mov  x1,  x0",
-                "mov  x9,  x19",
-                "ldp  x19, x20, [x9,  #0]",
-                "ldp  x29, x30, [x9, #16]",
-                "add  sp,  x9, #32",
-                "mov  x0,  x1",
-                "br   x30",
+                "b    {f}",              // F::call(prev_ctx, a1, a2) --
+                                         // never returns
                 "3:",
                 f = sym <F as SwitchFnLike>::call,
                 inout("x0") new_sp => ret,
