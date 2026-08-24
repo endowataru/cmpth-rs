@@ -263,7 +263,12 @@ unsafe impl ContextPolicy for NativeContext {
                 "mov  rdi, rsp",         // arg0 = prev_ctx (a1/a2 already sit
                                          // in rsi/rdx, untouched)
                 "and  r8, -16",          // align the new stack top
-                "mov  rsp, r8",          // onto the new stack
+                "lea  rsp, [r8 - 8]",    // == 8 (mod 16): F::call enters as
+                                         // if called (new_sp is 16-aligned,
+                                         // unlike `to.0` elsewhere in this
+                                         // file, which is already 8 mod 16
+                                         // by construction -- see
+                                         // `make_context_native`)
                 "jmp  {f}",              // F::call(prev_ctx, a1, a2) --
                                          // never returns
                 "3:",                    // reached only by an external land()
@@ -708,7 +713,9 @@ unsafe impl ContextPolicy for LeanFrameContext {
                 "mov  r8,  rdi",         // r8  = new stack top
                 "mov  rdi, rsp",         // arg0 = prev_ctx (a1/a2 untouched)
                 "and  r8, -16",          // align the new stack top
-                "mov  rsp, r8",          // onto the new stack
+                "lea  rsp, [r8 - 8]",    // == 8 (mod 16): F::call enters as
+                                         // if called -- see the NativeContext
+                                         // impl above
                 "jmp  {f}",              // F::call(prev_ctx, a1, a2) --
                                          // never returns
                 "3:",                    // reached only by an external land()
