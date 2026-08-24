@@ -6,10 +6,14 @@
 //! reachable here — there is no `spawn` (stackful), no `.join()` (blocking),
 //! no `block_on`: none of that is expressible without `StackfulSchedulerSystem`.
 
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use cmpth::{DefaultStacklessOnlyTaskSystem, StacklessBuilder, StacklessInitSystem, StacklessTaskSystem};
+use cmpth::{
+    DefaultStacklessOnlyTaskSystem, ScopedStacklessTaskSystem, StacklessBuilder,
+    StacklessInitSystem, StacklessTaskSystem,
+};
 
 #[test]
 fn spawn_async_await_basic() {
@@ -236,4 +240,204 @@ fn yield_now_lets_already_queued_work_run_first() {
         vec![1, 2, 3, 4],
         "yield_now re-queued the yielding task ahead of work already waiting"
     );
+}
+
+// ---------------------------------------------------------------------------
+// parallel_call (ScopedStacklessTaskSystem) — `a` via `recurse`, `b` pushed
+// and popped back by identity, direct-polled if un-stolen
+// (`resumable::stackless::system::ScopedStacklessTaskSystem::parallel_call`,
+// `docs/scoped-ult-promotion.md`). Untested anywhere in the crate before
+// this session.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parallel_call_basic() {
+    DefaultStacklessOnlyTaskSystem::builder().workers(1).run_async(async {
+        let (a, b) = DefaultStacklessOnlyTaskSystem::parallel_call(
+            || async { 1 + 1 },
+            || async { 2 + 2 },
+        )
+        .await;
+        assert_eq!((a, b), (2, 4));
+    });
+}
+
+/// Forces `b` to be stolen: `a` busy-spins with *no* `.await` inside the
+/// loop (so it never yields control away — its single `poll()` call just
+/// runs synchronously until `b_ran` is set), while an idle second worker's
+/// own steal loop (a separate OS thread, needs nothing from this one) picks
+/// up `b`. Mirrors `tests/stackful_only.rs`'s test of the same name: this
+/// can only complete via a real steal, so it hangs (bounded, fails loudly)
+/// rather than silently passing if stealing is broken.
+#[test]
+fn parallel_call_stolen_branch_actually_runs() {
+    DefaultStacklessOnlyTaskSystem::builder().workers(2).run_async(async {
+        let b_ran = Arc::new(AtomicBool::new(false));
+        let b_ran2 = Arc::clone(&b_ran);
+        let (a, b) = DefaultStacklessOnlyTaskSystem::parallel_call(
+            move || async move {
+                let mut spins: u64 = 0;
+                while !b_ran2.load(Ordering::Acquire) {
+                    std::hint::spin_loop();
+                    spins += 1;
+                    assert!(spins < 200_000_000, "b never ran -- steal did not happen");
+                }
+                1u64
+            },
+            move || async move {
+                b_ran.store(true, Ordering::Release);
+                2u64
+            },
+        )
+        .await;
+        assert_eq!((a, b), (1, 2));
+    });
+}
+
+/// Un-stolen `b` panics: single worker, so `b` can never be stolen — forces
+/// the direct-poll fast path (`BranchPoll`), which has no `catch_unwind` of
+/// its own and must propagate the panic by unwinding normally.
+#[test]
+fn parallel_call_unstolen_branch_panic_propagates() {
+    DefaultStacklessOnlyTaskSystem::builder().workers(1).run_async(async {
+        let result = DefaultStacklessOnlyTaskSystem::parallel_call(
+            || async { 1u64 },
+            || async {
+                panic!("boom-b-inline");
+                #[allow(unreachable_code)]
+                0u64
+            },
+        )
+        .await_catch()
+        .await;
+        assert!(result.is_err(), "un-stolen branch panic should propagate through parallel_call");
+    });
+}
+
+/// Stolen `b` panics: same forced-steal shape as
+/// `parallel_call_stolen_branch_actually_runs`, but `b` panics right after
+/// signalling `a`. Must propagate through the existing `poll_spawned_task`/
+/// `JoinHandle` machinery, exactly like `spawn_async_panic_propagates_via_await`
+/// already does for a plain spawned task.
+#[test]
+fn parallel_call_stolen_branch_panic_propagates() {
+    DefaultStacklessOnlyTaskSystem::builder().workers(2).run_async(async {
+        let b_ran = Arc::new(AtomicBool::new(false));
+        let b_ran2 = Arc::clone(&b_ran);
+        let result = DefaultStacklessOnlyTaskSystem::parallel_call(
+            move || async move {
+                let mut spins: u64 = 0;
+                while !b_ran2.load(Ordering::Acquire) {
+                    std::hint::spin_loop();
+                    spins += 1;
+                    assert!(spins < 200_000_000, "b never ran -- steal did not happen");
+                }
+                1u64
+            },
+            move || async move {
+                b_ran.store(true, Ordering::Release);
+                panic!("boom-b-stolen");
+                #[allow(unreachable_code)]
+                2u64
+            },
+        )
+        .await_catch()
+        .await;
+        assert!(result.is_err(), "stolen branch panic should propagate through parallel_call");
+    });
+}
+
+/// E0733 regression check: `a` is wrapped via `recurse` specifically so a
+/// genuinely self-recursive `Fa`/`Fb` (this function calling itself through
+/// `parallel_call`) doesn't hit the infinite-size cycle a bare `mk().await`
+/// would. This is also a nested-recursion stress test: many iterations,
+/// multiple workers, so `try_pop`'s identity check runs against real
+/// concurrent steals repeatedly, not just once.
+fn parallel_fib_async(n: u64) -> impl Future<Output = u64> + Send {
+    async move {
+        if n <= 1 {
+            return n;
+        }
+        let (a, b) = DefaultStacklessOnlyTaskSystem::parallel_call(
+            move || parallel_fib_async(n - 1),
+            move || parallel_fib_async(n - 2),
+        )
+        .await;
+        a + b
+    }
+}
+
+#[test]
+fn parallel_call_nested_recursive_e0733_regression_and_stress() {
+    for _ in 0..30 {
+        DefaultStacklessOnlyTaskSystem::builder().workers(4).run_async(async {
+            assert_eq!(parallel_fib_async(20).await, 6_765);
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// parallel_call's descriptor recycling through the general `AsyncPool`: an
+// un-stolen branch returns its slot to the pool, so the very next call on
+// the same worker gets that same slot back (`node_take`'s home-worker fast
+// path, `resumable/common/pool.rs`) with whatever the previous call left in
+// its storage.
+// ---------------------------------------------------------------------------
+
+/// Single worker, so every branch below takes the un-stolen fast path and
+/// immediately recycles its slot through the pool. Alternates several
+/// genuinely different closure/future shapes back to back: each later call
+/// is therefore reusing a descriptor whose storage was last written for a
+/// *different* `Fb` than the one about to run.
+#[test]
+fn parallel_call_recycled_descriptor_correct_across_different_closure_types() {
+    DefaultStacklessOnlyTaskSystem::builder().workers(1).run_async(async {
+        for round in 0..50u64 {
+            let (a, b) = DefaultStacklessOnlyTaskSystem::parallel_call(
+                move || async move { round + 1 },
+                move || async move { round + 2 },
+            )
+            .await;
+            assert_eq!((a, b), (round + 1, round + 2));
+
+            let v = vec![round as u32, round as u32 + 1, round as u32 + 2];
+            let x = round;
+            let y = round * 2;
+            let (a2, b2) = DefaultStacklessOnlyTaskSystem::parallel_call(
+                move || async move { v.iter().sum::<u32>() },
+                move || async move { (x + y) as u32 },
+            )
+            .await;
+            assert_eq!(a2, (round as u32) + (round as u32 + 1) + (round as u32 + 2));
+            assert_eq!(b2, (round + round * 2) as u32);
+
+            let touched = Arc::new(AtomicBool::new(false));
+            let touched2 = Arc::clone(&touched);
+            let ((), rc) = DefaultStacklessOnlyTaskSystem::parallel_call(
+                move || async move { touched2.store(true, Ordering::Relaxed); },
+                move || async move { round },
+            )
+            .await;
+            assert!(touched.load(Ordering::Relaxed));
+            assert_eq!(rc, round);
+        }
+    });
+}
+
+/// A closure/future whose captured data exceeds `ASYNC_POOL_SIZE` (512
+/// bytes): still a genuinely distinct path even with the warm cache gone —
+/// `ReturnPool::alloc` (`resumable/common/pool.rs`) bypasses its fixed-size
+/// free list entirely for `size > stack_size`, raw-allocating instead, and
+/// `dealloc` has to recognize that on the way back.
+#[test]
+fn parallel_call_oversized_closure_falls_back_correctly() {
+    DefaultStacklessOnlyTaskSystem::builder().workers(2).run_async(async {
+        let big = [7u64; 80]; // 640 bytes, well over ASYNC_POOL_SIZE
+        let (a, b) = DefaultStacklessOnlyTaskSystem::parallel_call(
+            || async { 1u64 },
+            move || async move { big.iter().sum::<u64>() },
+        )
+        .await;
+        assert_eq!((a, b), (1, 7 * 80));
+    });
 }

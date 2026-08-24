@@ -281,8 +281,9 @@ pub struct UltWorker<S: WorkerSystem + PoolSystem> {
 }
 
 // `Cell` fields are only accessed by the owning base thread; `deque` is
-// internally synchronized; `shared` is read-only after init. None of this
-// (nor the inherent methods below) touches dispatch, so `WorkerSystem` is
+// internally synchronized; `shared` is
+// read-only after init. None of this (nor the inherent methods below)
+// touches dispatch, so `WorkerSystem` is
 // enough — no need for `SchedulerSystem`.
 unsafe impl<S: WorkerSystem + PoolSystem> Send for UltWorker<S> {}
 unsafe impl<S: WorkerSystem + PoolSystem> Sync for UltWorker<S> {}
