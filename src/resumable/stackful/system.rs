@@ -194,15 +194,19 @@ impl<
 // Blanket ScopedStackfulTaskSystem/StackfulTaskSystem for every SpawnableStackfulTaskSystem
 // ---------------------------------------------------------------------------
 
-/// `parallel_call`'s "nothing outlives this call" constraint is strictly
-/// stricter than `spawn`/`join`'s (a spawned task may outlive the caller),
-/// so anything with `SpawnableStackfulTaskSystem` capability trivially satisfies it too —
-/// spawn `a`, run `b` inline, join. Same shape as
-/// `bench/src/lib.rs`'s `BenchSystem::par_join` default body, which this
-/// predates and mirrors.
+/// Pool-backed, fork-parent-first: `b` is built as a real task and pushed
+/// to the run queue without ever switching into it
+/// (`crate::resumable::stackful::thread::parallel_call`, backed by
+/// `ContextPolicy::make_context`); `a` runs inline on the caller's own
+/// stack. If `b` was never stolen, popping it back by identity affords
+/// running it as a plain function call — no context switch, no join
+/// protocol. See `docs/scoped-ult-promotion.md` §9.8.4 for the design
+/// rationale and measurements.
 impl<S: SpawnableStackfulTaskSystem + StackfulSchedulerSystem> crate::traits::scoped::ScopedStackfulTaskSystem for S
 where
     S::Desc: StackfulTaskDesc,
+    S::Worker: crate::resumable::stackful::worker::ContextSwitcher<S>
+        + crate::resumable::common::worker::DescWorkerOps<S>,
 {
     fn parallel_call<Fa, Fb, Ra, Rb>(a: Fa, b: Fb) -> (Ra, Rb)
     where
@@ -211,9 +215,7 @@ where
         Ra: Send + 'static,
         Rb: Send + 'static,
     {
-        let h = <S as SpawnableStackfulTaskSystem>::spawn(a);
-        let rb = b();
-        (crate::traits::stackful::JoinHandleLike::join(h), rb)
+        crate::resumable::stackful::thread::parallel_call::<S, Ra, Fa, Rb, Fb>(a, b)
     }
 }
 
