@@ -190,6 +190,70 @@ where
     SpawnAction { handle: Some(spawn_now::<S, T, F, Mk>(mk)) }
 }
 
+/// Allocate an async task descriptor from `S::AsyncPool`, write `mk()`'s
+/// future into place, and commit it to poll_fn dispatch — everything
+/// [`spawn_now`] needs before pushing and wrapping a [`JoinHandle`], and
+/// everything `parallel_call`'s pushed branch
+/// (`resumable::stackless::system::ScopedStacklessTaskSystem::parallel_call`)
+/// needs before deciding *when* to push and what to build around it.
+/// Deliberately doesn't push or wrap anything itself — see [`spawn_now`]'s
+/// own doc comment for why this stays a plain, eagerly-called function
+/// rather than a `poll` body.
+pub(crate) fn build_async_task<S, T, F, Mk>(wk: &UltWorker<S>, mk: Mk) -> BuiltAsyncTask<S::Desc, F, T>
+where
+    S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>,
+    F: Future<Output = T> + Send + 'static,
+    Mk: FnOnce() -> F,
+    T: Send + 'static,
+{
+    // Stack layout (same scheme as spawn, but no execution stack below F):
+    //
+    //   stack_top (high)
+    //   ┌─────────────────┐
+    //   │ StackResult<T>  │  ← result_addr
+    //   ├─────────────────┤
+    //   │ Future F        │  ← f_addr
+    //   └─────────────────┘ ← base
+    //
+    let result_layout = Layout::new::<StackResult<T>>();
+    let f_layout = Layout::new::<F>();
+    // Enough capacity to place both with worst-case alignment padding.
+    let stack_size =
+        result_layout.size() + result_layout.align() + f_layout.size() + f_layout.align() + 16;
+
+    let mut token = wk.alloc_async_task(true, stack_size);
+    let stack_top = token.as_desc().stack_top() as usize;
+    let desc = token.as_desc() as *const S::Desc as *mut S::Desc;
+    token.commit_as_poll_fn();
+    token.set_external_queue(wk.external_queue() as *const _);
+
+    let result_addr = align_down(stack_top - result_layout.size(), result_layout.align());
+    let f_addr = align_down(result_addr.wrapping_sub(f_layout.size()), f_layout.align().max(1));
+
+    let result_ptr = result_addr as *mut StackResult<T>;
+    let f_ptr = f_addr as *mut F;
+
+    unsafe { f_ptr.write(mk()) };
+    token.set_poll_fn(Some(poll_spawned_task::<S, T, F>));
+
+    BuiltAsyncTask { desc, f_ptr, result_ptr }
+}
+
+/// Send-safe bundle of what [`build_async_task`] produces: raw pointers
+/// aren't `Send` by default, but these are exclusively owned (nothing else
+/// can reach `desc`/`f_ptr`/`result_ptr` until the holder explicitly acts
+/// on them) — same reasoning [`JoinHandle`]'s own `unsafe impl Send`
+/// already rests on (`common/thread.rs`), same bound shape (only the
+/// result type `T` needs to be `Send`; `F`'s `Send + 'static` bound is
+/// already required wherever this is constructed).
+pub(crate) struct BuiltAsyncTask<D, F, T> {
+    pub(crate) desc: *mut D,
+    pub(crate) f_ptr: *mut F,
+    pub(crate) result_ptr: *mut StackResult<T>,
+}
+
+unsafe impl<D, F, T: Send> Send for BuiltAsyncTask<D, F, T> {}
+
 /// Does the actual work of registering a task: finds the calling worker,
 /// allocates from `S::AsyncPool`, calls `mk()` and writes its result into
 /// place, and pushes the new task to the deque. Returns the completed
@@ -215,40 +279,15 @@ where
     T: Send + 'static,
 {
     let wk = UltWorker::<S>::current().expect("cmpth: spawn_async called outside a worker");
+    let built = build_async_task::<S, T, F, Mk>(wk, mk);
 
-    // Stack layout (same scheme as spawn, but no execution stack below F):
-    //
-    //   stack_top (high)
-    //   ┌─────────────────┐
-    //   │ StackResult<T>  │  ← result_addr
-    //   ├─────────────────┤
-    //   │ Future F        │  ← f_addr
-    //   └─────────────────┘ ← base
-    let result_layout = Layout::new::<StackResult<T>>();
-    let f_layout = Layout::new::<F>();
-    // Enough capacity to place both with worst-case alignment padding.
-    let stack_size =
-        result_layout.size() + result_layout.align() + f_layout.size() + f_layout.align() + 16;
-
-    let mut token = wk.alloc_async_task(true, stack_size);
-    let desc = token.as_desc() as *const S::Desc as *mut S::Desc;
-    token.commit_as_poll_fn();
-    token.set_external_queue(wk.external_queue() as *const _);
-
-    let stack_top = token.as_desc().stack_top() as usize;
-    let result_addr = align_down(stack_top - result_layout.size(), result_layout.align());
-    let f_addr = align_down(result_addr.wrapping_sub(f_layout.size()), f_layout.align().max(1));
-
-    let result_ptr = result_addr as *mut StackResult<T>;
-    let f_ptr = f_addr as *mut F;
-
-    unsafe { f_ptr.write(mk()) };
-    token.set_poll_fn(Some(poll_spawned_task::<S, T, F>));
-
+    // SAFETY: `desc` was freshly built above and has never been wrapped in
+    // a token before — trivially exclusive.
+    let token = unsafe { SuspendedTaskToken::from_raw(built.desc) };
     // Push to the run queue as a ready-to-poll task.
     wk.push(token.into());
 
-    JoinHandle { desc, result_ptr, result_drop: drop_stack_result::<T>, _marker: PhantomData }
+    JoinHandle { desc: built.desc, result_ptr: built.result_ptr, result_drop: drop_stack_result::<T>, _marker: PhantomData }
 }
 
 /// Returned by [`spawn_async`]; see its docs for why the one `.await` is
@@ -573,4 +612,88 @@ where
     token.set_poll_fn(Some(poll_spawned_task::<S, (), F>));
 
     token
+}
+
+// ---------------------------------------------------------------------------
+// BranchPoll — the un-stolen fast path for parallel_call's pushed branch
+// ---------------------------------------------------------------------------
+
+/// The un-stolen fast path for `parallel_call`'s pushed branch `b`
+/// (`resumable::stackless::system::ScopedStacklessTaskSystem::parallel_call`):
+/// once popped back by identity (nobody stole it), `b`'s `Fb` value is
+/// polled directly with `parallel_call`'s own ambient `Context` — no
+/// `poll_fn` indirection, no per-poll `RawWaker` construction, none of
+/// `run_async_poll`'s bookkeeping (`mark_polling`/`set_polling_async`/the
+/// `TaskPollResult` match). Modeled directly on [`RecursionFrame`], but
+/// reclaiming an `S::AsyncPool` slot (`free_async_task`) instead of a
+/// `RecursionAlloc` one, since `b` was built as a real (if never actually
+/// dispatched) task via [`build_async_task`], not a `recurse()` frame.
+///
+/// Reclaiming is sound from `Drop` (dropped while still `Pending` —
+/// cancellation, or panic-unwind) just as much as from `poll`'s `Ready`
+/// arm: this value never gives `Fb` a reference to `desc` itself (only to
+/// `f_ptr`, the flat byte storage, polled with the caller's own ambient
+/// `Context`), so `desc`'s own fields (`join_state`/`poll_fn`) are provably
+/// untouched no matter how many `Pending`s `Fb` returns first — exclusivity
+/// was established by the `try_pop`+identity check before this was ever
+/// constructed, not by "never suspended".
+pub(crate) struct BranchPoll<S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>, Fb> {
+    /// Null once handled (`poll`'s `Ready` arm, or after `Drop` has run) —
+    /// same idiom as [`JoinHandle`]'s own `Drop` (`common/thread.rs`).
+    pub(crate) desc: *mut S::Desc,
+    pub(crate) f_ptr: *mut Fb,
+}
+
+impl<S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>, Fb> Unpin for BranchPoll<S, Fb> {}
+
+// SAFETY: `desc`/`f_ptr` are raw pointers into pool-owned memory this value
+// exclusively holds for as long as it's alive (see the struct's own doc
+// comment) — same reasoning `JoinHandle`'s own `unsafe impl Send` rests on.
+// `Fb: Send` is already required wherever `BranchPoll<S, Fb>` is
+// constructed (`parallel_call`'s own `Fb: Future<Output = Rb> + Send +
+// 'static` bound), so nothing weaker slips through this impl.
+unsafe impl<S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>, Fb: Send> Send for BranchPoll<S, Fb> {}
+
+impl<S, Fb> Future for BranchPoll<S, Fb>
+where
+    S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>,
+    Fb: Future,
+{
+    type Output = Fb::Output;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Fb::Output> {
+        let this = self.get_mut();
+        // No catch_unwind here — matches the un-stolen path elsewhere in
+        // this crate (stackful's `f_ptr.read()()`): a panic just unwinds
+        // through this call normally, and Drop below still reclaims the
+        // pool slot if that happens before Ready.
+        match unsafe { Pin::new_unchecked(&mut *this.f_ptr) }.poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(val) => {
+                unsafe { std::ptr::drop_in_place(this.f_ptr) };
+                let wk = UltWorker::<S>::current().expect("cmpth: worker vanished");
+                unsafe { wk.free_async_task(this.desc) };
+                this.desc = std::ptr::null_mut();
+                Poll::Ready(val)
+            }
+        }
+    }
+}
+
+impl<S, Fb> Drop for BranchPoll<S, Fb>
+where
+    S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>,
+{
+    fn drop(&mut self) {
+        if self.desc.is_null() {
+            return; // already handled in poll's Ready branch
+        }
+        unsafe { std::ptr::drop_in_place(self.f_ptr) };
+        match UltWorker::<S>::current() {
+            Some(wk) => unsafe { wk.free_async_task(self.desc) },
+            // No worker context (e.g. dropped during scheduler teardown):
+            // same fallback JoinHandle::drop uses for the same situation.
+            None => unsafe { crate::resumable::common::pool::free_desc(self.desc) },
+        }
+    }
 }
