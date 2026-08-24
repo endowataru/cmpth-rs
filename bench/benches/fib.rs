@@ -60,6 +60,15 @@ fn bench_fib(c: &mut Criterion) {
     bench_fib_system::<StackfulOnlyBench>(&mut group, "cmpth-stackful-only");
     bench_fib_async(&mut group);
     bench_fib_parallel_invoke::<cmpth::ScopedTaskSystem>(&mut group, "cmpth-parallel-invoke");
+    // Same `parallel_call` call, but on a real ULT system: exercises the
+    // make_context-backed fork-parent-first path (`docs/scoped-ult-promotion.md`
+    // §9.8.4) against the old spawn+join blanket it replaced, at every
+    // worker count.
+    bench_fib_parallel_invoke::<cmpth::DefaultStackfulOnlyTaskSystem>(&mut group, "cmpth-stackful-ult-parallel-invoke");
+    // Same again on a dual system: `DualTaskDesc`'s existing `TaskDispatch::Ctx`
+    // path carries the make_context-backed branch unmodified (§9.8.7), so this
+    // measures the extra tag-check cost dual pays on top of stackful-only.
+    bench_fib_parallel_invoke::<cmpth::DefaultDualTaskSystem>(&mut group, "cmpth-dual-parallel-invoke");
     bench_fib_system::<RayonBench>(&mut group, "rayon");
     #[cfg(feature = "massivethreads")]
     bench_fib_system::<MythBench>(&mut group, "myth");
