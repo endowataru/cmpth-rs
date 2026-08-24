@@ -71,15 +71,23 @@ impl<S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>> Stackles
     }
 }
 
-/// `parallel_call` for a system that already has `StacklessTaskSystem`'s
-/// `spawn`: strictly cheaper capability, satisfied trivially by spawning
-/// one branch and awaiting the other inline — same relationship as
-/// `resumable::stackful::system`'s `ScopedStackfulTaskSystem` blanket. Calls
-/// the same `spawn_async` free function `StacklessTaskSystem::spawn`'s
-/// blanket does directly (rather than going through `S::spawn`) so this
-/// impl doesn't need a `StacklessTaskSystem` bound of its own — the two
-/// blankets are independent, both satisfied by the same `SchedulerSystem +
-/// AsyncTaskDesc` condition.
+/// `parallel_call`: `a` runs via [`recurse`](crate::resumable::stackless::thread::recurse)
+/// (matching the crate-wide convention — `scoped`/stackful both treat `a` as
+/// the inline side — and, unlike a bare `mk_a().await`, breaking the
+/// infinite-size cycle a genuinely self-recursive `Fa` would otherwise hit:
+/// `recurse`'s `RecursionFrame` is a fixed-size handle regardless of `Fa`'s
+/// actual size, the same reason `spawn_async` was safe for whichever side
+/// used to get it). `b` is built as a real, pushed task (`build_async_task` —
+/// genuine stealability needs at least one real task to exist, there's no
+/// way around that), then popped back by identity exactly like
+/// `JoinHandle`'s own existing reclaim fast path: if nobody stole it,
+/// `BranchPoll` polls `b`'s `Fb` value directly with this call's own
+/// ambient `Context` — no
+/// `poll_fn` indirection, no per-poll waker construction, none of
+/// `run_async_poll`'s bookkeeping, unlike the reclaim fast path (which
+/// still drives completion through the full type-erased dispatch machinery
+/// even when un-stolen). If it *was* stolen, falls back to the ordinary
+/// `JoinHandle`/`poll_spawned_task`/`finish_and_settle` protocol unchanged.
 impl<S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>> ScopedStacklessTaskSystem for S {
     async fn parallel_call<Fa, Fb, Ra, Rb, MkA, MkB>(mk_a: MkA, mk_b: MkB) -> (Ra, Rb)
     where
@@ -90,9 +98,56 @@ impl<S: StacklessSchedulerSystem + WorkerSystem<Worker = UltWorker<S>>> ScopedSt
         Ra: Send + 'static,
         Rb: Send + 'static,
     {
-        let h = crate::resumable::stackless::thread::spawn_async::<Self, Ra, Fa, MkA>(mk_a).await;
-        let rb = mk_b().await;
-        (h.await, rb)
+        use crate::resumable::common::desc::SuspendedTaskToken;
+        use crate::resumable::common::thread::{drop_stack_result, JoinHandle};
+        use crate::resumable::common::worker::LocalQueue;
+        use crate::resumable::stackless::thread::{build_async_task, recurse, BranchPoll};
+
+        let wk = UltWorker::<Self>::current().expect("cmpth: parallel_call called outside a worker");
+
+        let built = build_async_task::<Self, Rb, Fb, MkB>(wk, mk_b);
+        // SAFETY: `built.desc` was freshly built above and has never been
+        // wrapped in a token since — exclusively ours.
+        wk.push(unsafe { SuspendedTaskToken::from_raw(built.desc) }.into());
+
+        // `built` (not a bare `*mut _`) is what survives the await — see
+        // its own doc comment for why it, unlike a bare raw pointer, is
+        // `Send`.
+        let ra = recurse::<Self, _, _>(mk_a).await;
+
+        // `a` may have caused this poll chain to park and resume elsewhere
+        // — unlike stackful, there is no native call stack tying execution
+        // to one OS thread at all; a Pending/wake cycle anywhere inside
+        // `recurse(mk_a)`'s own nested chain can resume this exact poll on
+        // a *different* worker's thread (e.g. via `TaskPollResult::
+        // ReadyAndContinue`'s symmetric transfer landing on whichever
+        // worker drove the completion). Re-deriving `wk` here is the same
+        // fix `parallel_call`'s stackful counterpart needed for the
+        // analogous reason (worker migration) — using the stale `wk` below
+        // would silently operate on a *different* worker's deque from a
+        // different OS thread.
+        let wk = UltWorker::<Self>::current().expect("cmpth: worker vanished");
+
+        match wk.try_pop() {
+            Some(raw) => {
+                let popped: SuspendedTaskToken<<Self as PoolSystem>::Desc> = raw.into();
+                if std::ptr::eq(popped.desc(), built.desc) {
+                    // Not stolen: b's task never actually ran through the
+                    // scheduler — poll it directly, no poll_fn indirection.
+                    let desc = popped.into_raw();
+                    let rb = BranchPoll::<Self, Fb> { desc, f_ptr: built.f_ptr }.await;
+                    (ra, rb)
+                } else {
+                    wk.push(popped.into());
+                    let h = JoinHandle::<Self, Rb> { desc: built.desc, result_ptr: built.result_ptr, result_drop: drop_stack_result::<Rb>, _marker: PhantomData };
+                    (ra, h.await)
+                }
+            }
+            None => {
+                let h = JoinHandle::<Self, Rb> { desc: built.desc, result_ptr: built.result_ptr, result_drop: drop_stack_result::<Rb>, _marker: PhantomData };
+                (ra, h.await)
+            }
+        }
     }
 }
 
