@@ -158,14 +158,6 @@ impl Context {
 #[repr(C)]
 pub struct Transfer(pub *mut ());
 
-/// Return value of a conditional-switch callback: `flag != 0` commits the
-/// switch, `flag == 0` cancels it and resumes the caller immediately.
-#[repr(C)]
-pub struct CondTransfer {
-    pub value: *mut (),
-    pub flag: isize,
-}
-
 /// Callback run on the destination stack after `save_context`. `prev` is the
 /// context that was just saved. Unlike [`SwapFnLike`], `save_context` has no
 /// predetermined destination to hand `call` up front — but `call` still

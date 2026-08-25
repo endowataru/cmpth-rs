@@ -319,18 +319,16 @@ unsafe impl ContextPolicy for NativeContext {
                 "call {f}",              // rax = value; returns only on cancel
                 "add  rsp, 8",
 
-                "mov  rsp, r13",         // cancel: restore the previous context
-                "pop  rbx",
-                "pop  rbp",
-                "pop  r12",
-                "pop  r13",
-                "pop  r14",
-                "pop  r15",
-                "pop  r11",
-                "jmp  r11",              // -> `3:` (this instance's own;
-                                         // cancel always resumes here)
+                "mov  rsi, rax",         // cancel: land's ret_value arg =
+                                         // F::call's returned value
+                "mov  rdi, r13",         // land's ctx arg = prev_ctx
+                "jmp  {land}",           // tail-jmp to land's own body --
+                                         // dedups the reload sequence at the
+                                         // cost of one extra `jmp`, paid only
+                                         // on the rare cancel path
                 "3:",
                 f = sym <F as CondSwitchFnLike>::call,
+                land = sym <Self as ContextPolicy>::land,
                 inout("rdi") to.0 => _,
                 inout("rsi") a1 => _,
                 inout("rdx") a2 => _,
@@ -519,21 +517,22 @@ unsafe impl ContextPolicy for NativeContext {
                 "bl   {f}",              // F::call(prev_ctx, to, a1, a2) --
                                          // returns only on cancel
 
-                "mov  x9,  x20",         // cancel: restore the previous
-                                         // context (x20 preserved across the
-                                         // call by the ordinary callee-saved
-                                         // contract)
-                "ldp  x19, x20, [x9,  #0]",
-                "ldp  x21, x22, [x9, #16]",
-                "ldp  x23, x24, [x9, #32]",
-                "ldp  x25, x26, [x9, #48]",
-                "ldp  x27, x28, [x9, #64]",
-                "ldp  x29, x30, [x9, #80]",
-                "add  sp,  x9, #96",
-                "br   x30",              // -> `3:` (this instance's own;
-                                         // cancel always resumes here)
+                "mov  x9,  x0",          // cancel: x9 = F::call's returned
+                                         // value (land's ret_value arg)
+                "mov  x0,  x20",         // land's ctx arg = prev_ctx (x20
+                                         // preserved across the call by the
+                                         // ordinary callee-saved contract)
+                "mov  x1,  x9",
+                "b    {land}",           // tail-branch to land's own body
+                                         // (a real symbol, not inlined here
+                                         // -- `sym` is not a Rust call site
+                                         // -- so this dedups the reload
+                                         // sequence at the cost of one extra
+                                         // `b`, paid only on the rare cancel
+                                         // path)
                 "3:",
                 f = sym <F as CondSwitchFnLike>::call,
+                land = sym <Self as ContextPolicy>::land,
                 inout("x0") to.0 => ret,
                 inout("x1") a1 => _,
                 inout("x2") a2 => _,
@@ -763,15 +762,14 @@ unsafe impl ContextPolicy for LeanFrameContext {
                 "call {f}",              // rax = value; returns only on cancel
                 "add  rsp, 8",
 
-                "mov  rsp, r13",         // cancel: restore the previous context
-                "pop  rbx",
-                "pop  rbp",
-                "pop  r12",
-                "pop  r13",
-                "pop  r11",
-                "jmp  r11",              // -> `3:` (this instance's own)
+                "mov  rsi, rax",         // cancel: land's ret_value arg =
+                                         // F::call's returned value
+                "mov  rdi, r13",         // land's ctx arg = prev_ctx
+                "jmp  {land}",           // tail-jmp to land's own body --
+                                         // see the NativeContext impl above
                 "3:",
                 f = sym <F as CondSwitchFnLike>::call,
+                land = sym <Self as ContextPolicy>::land,
                 inout("rdi") to.0 => _,
                 inout("rsi") a1 => _,
                 inout("rdx") a2 => _,
@@ -936,13 +934,15 @@ unsafe impl ContextPolicy for LeanFrameContext {
                 "bl   {f}",              // F::call(prev_ctx, to, a1, a2) --
                                          // returns only on cancel
 
-                "mov  x9,  x20",         // cancel: restore the previous context
-                "ldp  x19, x20, [x9,  #0]",
-                "ldp  x29, x30, [x9, #16]",
-                "add  sp,  x9, #32",
-                "br   x30",
+                "mov  x9,  x0",          // cancel: x9 = F::call's returned
+                                         // value (land's ret_value arg)
+                "mov  x0,  x20",         // land's ctx arg = prev_ctx
+                "mov  x1,  x9",
+                "b    {land}",           // tail-branch to land's own body --
+                                         // see the NativeContext impl above
                 "3:",
                 f = sym <F as CondSwitchFnLike>::call,
+                land = sym <Self as ContextPolicy>::land,
                 inout("x0") to.0 => ret,
                 inout("x1") a1 => _,
                 inout("x2") a2 => _,

@@ -30,7 +30,7 @@ pub use system::sync::{BarrierWaitResult, DualBarrier, DualMutex};
 pub use system::scoped::{ScopedStackfulTaskSystem, ScopedStacklessTaskSystem};
 pub use component::delegation::DelegatorConsumer;
 pub use component::stackful::{
-    CondTransfer, Context, ContextPolicy, HandoffTaskDesc, Poller, StackfulResumable, Transfer,
+    Context, ContextPolicy, HandoffTaskDesc, Poller, StackfulResumable, Transfer,
 };
 pub use system::block_on::BlockOnSystem;
 pub use system::bundle::StackfulTaskSystem;
