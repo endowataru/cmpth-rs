@@ -101,22 +101,41 @@ trait PoolNode: Sized {
     fn alloc_wk(&self) -> &Cell<usize>;
 }
 
+/// Pool bookkeeping for one [`Node`], cache-line-isolated from `payload`
+/// (see [`Node`]'s own doc comment for why) via `align(64)`: `repr(C)`
+/// lays out a struct in declared-field order, and this header's own
+/// alignment (64, i.e. at least as large as this machine's actual cache
+/// line on every target this crate supports) forces `Node<D>::payload` to
+/// start on the next cache line rather than packing into whatever bytes
+/// happen to be left over after `next`/`alloc_wk`/`oversized`.
+#[repr(C, align(64))]
+struct NodeHeader<D> {
+    next: Cell<*mut Node<D>>,
+    alloc_wk: Cell<usize>,
+    oversized: Cell<bool>,
+}
+
 /// Free-list node wrapping a compile-time-known payload `D`. The pool-only
 /// counterpart to `TaskDesc`'s old `pool_next`/`alloc_wk`/`oversized`
 /// fields: descriptors no longer carry pool bookkeeping themselves, pools
 /// prepend it via this wrapper instead — the same idea as `BlockHeader`,
 /// just with a real field instead of a runtime-offset payload, since `D` is
 /// known here.
+///
+/// `header` and `payload` are deliberately on separate cache lines
+/// (`NodeHeader`'s `align(64)`): `header` is written by whichever worker's
+/// pool machinery currently owns this node (`alloc`/`dealloc`, possibly on
+/// a different core than whoever last touched `payload`), while `payload`
+/// is written by whatever's actually executing the task it backs.
+#[repr(C)]
 pub(crate) struct Node<D> {
-    next: Cell<*mut Node<D>>,
-    alloc_wk: Cell<usize>,
-    oversized: Cell<bool>,
+    header: NodeHeader<D>,
     payload: D,
 }
 
 impl<D> PoolNode for Node<D> {
-    fn next(&self) -> &Cell<*mut Self> { &self.next }
-    fn alloc_wk(&self) -> &Cell<usize> { &self.alloc_wk }
+    fn next(&self) -> &Cell<*mut Self> { &self.header.next }
+    fn alloc_wk(&self) -> &Cell<usize> { &self.header.alloc_wk }
 }
 
 impl<D> Node<D> {
@@ -143,9 +162,11 @@ impl<D> Node<D> {
     /// comment for why it needs `oversized = true` from birth.
     pub(crate) fn wrap_fresh(alloc_wk: usize, oversized: bool, payload: D) -> *mut D {
         let node = Box::into_raw(Box::new(Node {
-            next: Cell::new(null_mut()),
-            alloc_wk: Cell::new(alloc_wk),
-            oversized: Cell::new(oversized),
+            header: NodeHeader {
+                next: Cell::new(null_mut()),
+                alloc_wk: Cell::new(alloc_wk),
+                oversized: Cell::new(oversized),
+            },
             payload,
         }));
         Self::payload_of(node)
@@ -376,7 +397,7 @@ impl<D: TaskDescAlloc, A: StackAlloc, const CAP: usize> DescPool<D> for SimplePo
 
     unsafe fn dealloc(&self, wk_num: usize, desc: *mut D) {
         let node = Node::node_of(desc);
-        if unsafe { (*node).oversized.get() } {
+        if unsafe { (*node).header.oversized.get() } {
             unsafe { free_desc(desc) };
             return;
         }
@@ -528,7 +549,7 @@ impl<D: TaskDescAlloc, A: StackAlloc, const THRESHOLD: usize> DescPool<D> for Re
 
     unsafe fn dealloc(&self, cur_wk: usize, desc: *mut D) {
         let node = Node::node_of(desc);
-        if unsafe { (*node).oversized.get() } {
+        if unsafe { (*node).header.oversized.get() } {
             unsafe { free_desc(desc) };
             return;
         }
