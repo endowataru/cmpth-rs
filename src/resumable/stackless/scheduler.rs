@@ -4,7 +4,6 @@
 //! worker idle loop this drives.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use crate::traits::common::TlsSlot;
 use crate::traits::stackful::{JoinHandleLike, SpawnableStackfulTaskSystem};
@@ -77,7 +76,7 @@ where
     let root_cont = fork_async_parent_first::<S, _>(
         async move {
             root.await;
-            shared2.pool.finished.store(true, Ordering::Release);
+            shared2.pool.finish();
         },
         external_queue_ptr,
     );
