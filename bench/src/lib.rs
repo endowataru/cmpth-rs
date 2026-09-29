@@ -172,6 +172,7 @@ impl cmpth::UltAsyncIdentity for AsyncOnlyMarker {
     type Desc = cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>;
     type RunQueue = cmpth::HybridRunQueue<cmpth::SuspendedTaskToken<cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>>>;
     type Lookup = cmpth::InlineTlsCurrent;
+    type Idle = cmpth::SpinIdle;
 
     fn worker_tls_anchor() -> &'static <cmpth::OsSystem as cmpth::NestableSystem>::ThreadSpecific<cmpth::UltWorker<cmpth::UltAsyncSystem<Self>>> {
         static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();

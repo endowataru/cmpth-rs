@@ -11,6 +11,8 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::resumable::common::deque::{RunQueueStealer, Steal, WorkerRunQueue};
+use crate::resumable::common::external_queue::WakeHook;
+use crate::resumable::common::idle::IdlePolicy;
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::system::{RunnableItem, WorkerSystem};
 use crate::resumable::common::worker::{LocalQueue, WorkerOps};
@@ -27,6 +29,7 @@ pub struct PoolCore<S: WorkerSystem> {
     /// turns that justification from a convention into something structural.
     pub(crate) stealers: Box<[<S::RunQueue as WorkerRunQueue<S::SuspendedToken>>::Stealer]>,
     pub(crate) finished: AtomicBool,
+    pub(crate) idle: S::Idle,
 }
 
 impl<S: WorkerSystem> PoolCore<S> {
@@ -34,7 +37,28 @@ impl<S: WorkerSystem> PoolCore<S> {
     /// [`WorkerCore::bind`] on each once the returned value has its final
     /// address.
     pub(crate) fn new<'a>(cores: impl Iterator<Item = &'a WorkerCore<S>>) -> Self {
-        PoolCore { stealers: cores.map(|c| c.deque.stealer()).collect(), finished: AtomicBool::new(false) }
+        PoolCore {
+            stealers: cores.map(|c| c.deque.stealer()).collect(),
+            finished: AtomicBool::new(false),
+            idle: S::Idle::default(),
+        }
+    }
+
+    /// Hook for an external queue to notify this pool's idle policy.
+    pub(crate) fn wake_hook(&self) -> WakeHook {
+        fn fire<S: WorkerSystem>(p: *const ()) {
+            // SAFETY: see `WakeHook::new`'s contract; `p` is a `PoolCore<S>`.
+            unsafe { &*(p as *const PoolCore<S>) }.idle.new_work();
+        }
+        // SAFETY: the pool is `Sync` and outlives the queue it is installed in.
+        unsafe { WakeHook::new(self as *const Self as *const (), fire::<S>) }
+    }
+
+    /// Stop the pool: every worker leaves its idle loop, waking any that are
+    /// parked.
+    pub(crate) fn finish(&self) {
+        self.finished.store(true, Ordering::Release);
+        self.idle.shutdown();
     }
 }
 
@@ -80,11 +104,13 @@ impl<S: WorkerSystem> LocalQueue<S> for WorkerCore<S> {
     #[inline]
     fn push(&self, c: S::SuspendedToken) {
         self.deque.push(c);
+        self.pool().idle.new_work();
     }
 
     #[inline]
     fn defer(&self, c: S::SuspendedToken) {
         self.deque.defer(c);
+        self.pool().idle.new_work();
     }
 
     #[inline]
@@ -159,43 +185,39 @@ where
 
 /// The idle/dispatch loop every worker runs until `finished`: local pop,
 /// then steal, then `extra` (a source outside the run queues — the external
-/// queue for descriptor-backed pools, `|| None` otherwise), else back off.
+/// queue for descriptor-backed pools, `|| None` otherwise), else hand control
+/// to the pool's [`IdlePolicy`].
 ///
 /// `try_steal` distinguishes "every victim was genuinely empty"
 /// ([`Steal::Empty`]) from "some victim had work but it couldn't be taken
-/// right now" ([`Steal::Retry`], e.g. lost a CAS race). A `Retry` round must
-/// not count toward `idle_rounds`: there is known work nearby, so backing off
-/// to `yield_now` on its account would be a real regression, not just noise.
+/// right now" ([`Steal::Retry`], e.g. lost a CAS race). The policy is told
+/// which, because a `Retry` round must not count toward backing off: there is
+/// known work nearby, so backing off (let alone parking) on its account would
+/// be a real regression, not just noise.
 #[inline]
-pub(crate) fn idle_loop<S, X>(wk: &S::Worker, finished: &AtomicBool, mut extra: X)
+pub(crate) fn idle_loop<S, X>(wk: &S::Worker, pool: &PoolCore<S>, mut extra: X)
 where
     S: WorkerSystem<SuspendedToken: RunnableItem<S>>,
     X: FnMut() -> Option<S::SuspendedToken>,
 {
-    let mut idle_rounds = 0u32;
-    while !finished.load(Ordering::Acquire) {
+    let mut ep = <S::Idle as IdlePolicy>::Episode::default();
+    while !pool.finished.load(Ordering::Acquire) {
         if let Some(c) = wk.try_pop() {
+            pool.idle.work_found(&mut ep);
             c.run_on(wk);
-            idle_rounds = 0;
             continue;
         }
         let steal = wk.try_steal();
         if let Steal::Success(c) = steal {
+            pool.idle.work_found(&mut ep);
             c.run_on(wk);
-            idle_rounds = 0;
             continue;
         }
         if let Some(c) = extra() {
+            pool.idle.work_found(&mut ep);
             c.run_on(wk);
-            idle_rounds = 0;
             continue;
         }
-        std::hint::spin_loop();
-        if matches!(steal, Steal::Empty) {
-            idle_rounds += 1;
-            if idle_rounds & 0x3F == 0 {
-                S::Base::yield_now();
-            }
-        }
+        pool.idle.no_work_found(&mut ep, matches!(steal, Steal::Retry), &pool.finished, S::Base::yield_now);
     }
 }

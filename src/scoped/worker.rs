@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use crate::os::OsSystem;
 use crate::resumable::common::deque::HybridRunQueue;
+use crate::resumable::common::idle::SpinIdle;
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::system::{RunnableItem, WorkerSystem};
 use crate::resumable::common::worker_core::{idle_loop, try_run_one, PoolCore, WorkerCore};
@@ -99,7 +100,7 @@ impl ScopedRegistry {
                 OsSystem::spawn(move || {
                     let wk = &registry.workers[idx];
                     set_current(wk as *const ScopedWorker);
-                    idle_loop::<ScopedTaskSystem, _>(wk, &registry.pool.finished, || None);
+                    idle_loop::<ScopedTaskSystem, _>(wk, &registry.pool, || None);
                     // Nested calls always leave the deque as they found it,
                     // so this only catches a straggler pushed just before
                     // shutdown was observed.
@@ -111,7 +112,7 @@ impl ScopedRegistry {
     }
 
     pub(super) fn shutdown(&self, handles: Vec<<OsSystem as SpawnableStackfulTaskSystem>::JoinHandle<()>>) {
-        self.pool.finished.store(true, std::sync::atomic::Ordering::Release);
+        self.pool.finish();
         for h in handles {
             JoinHandleLike::join(h);
         }
@@ -127,6 +128,7 @@ impl WorkerSystem for ScopedTaskSystem {
     type SuspendedToken = TaskRef;
     type RunQueue = HybridRunQueue<TaskRef>;
     type Lookup = ScopedLookup;
+    type Idle = SpinIdle;
     type Worker = ScopedWorker;
 
     fn worker_tls() -> &'static <OsSystem as NestableSystem>::ThreadSpecific<ScopedWorker> {
