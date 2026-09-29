@@ -41,6 +41,7 @@ pub use resumable::dual::desc::DualTaskDesc;
 pub use resumable::stackful::desc::{StackfulOnlyTaskDesc, StackfulTaskDesc};
 pub use resumable::stackless::desc::{AsyncTaskDesc, StacklessOnlyTaskDesc};
 pub use resumable::common::external_queue::{ExternalQueue, PollerUltQueue, StealPathQueue};
+pub use resumable::common::idle::{IdlePolicy, ParkIdle, SpinIdle};
 pub use resumable::common::lookup::{CurrentLookup, TlsCurrent};
 pub use resumable::stackless::lookup::InlineTlsCurrent;
 pub use resumable::common::pool::{DescPool, ReturnPool, SimplePool};
@@ -96,6 +97,7 @@ impl resumable::common::system::WorkerSystem for DefaultDualTaskSystem {
     type Worker = UltWorker<Self>;
     type RunQueue = HybridRunQueue<SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>>;
     type Lookup          = resumable::common::lookup::TlsCurrent;
+    type Idle = resumable::common::idle::SpinIdle;
 
     fn worker_tls() -> &'static <OsSystem as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         static A: TlsAnchor = TlsAnchor::new();
@@ -179,6 +181,7 @@ impl resumable::common::system::WorkerSystem for DefaultNestedDualTaskSystem {
     type Worker = UltWorker<Self>;
     type RunQueue = HybridRunQueue<SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>>;
     type Lookup          = resumable::common::lookup::TlsCurrent;
+    type Idle = resumable::common::idle::SpinIdle;
 
     fn worker_tls() -> &'static <DefaultDualTaskSystem as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         static A: TlsAnchor = TlsAnchor::new();
@@ -264,6 +267,7 @@ impl UltIdentity for DefaultStackfulOnlyTaskSystem {
     type RunQueue = HybridRunQueue<SuspendedTaskToken<resumable::stackful::desc::StackfulOnlyTaskDesc<Self>>>;
     type Alloc = HeapStack;
     type Lookup = TlsCurrent;
+    type Idle = resumable::common::idle::SpinIdle;
 
     fn worker_tls_anchor() -> &'static <OsSystem as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         static A: TlsAnchor = TlsAnchor::new();
@@ -283,6 +287,7 @@ impl resumable::stackless::system::UltAsyncIdentity for DefaultStacklessOnlyMark
     type Desc = resumable::stackless::desc::StacklessOnlyTaskDesc<UltAsyncSystem<Self>>;
     type RunQueue = HybridRunQueue<SuspendedTaskToken<resumable::stackless::desc::StacklessOnlyTaskDesc<UltAsyncSystem<Self>>>>;
     type Lookup = InlineTlsCurrent;
+    type Idle = resumable::common::idle::SpinIdle;
 
     fn worker_tls_anchor()
     -> &'static <OsSystem as NestableSystem>::ThreadSpecific<UltWorker<UltAsyncSystem<Self>>>

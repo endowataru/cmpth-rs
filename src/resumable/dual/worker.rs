@@ -96,7 +96,7 @@ where
             // Async tasks have no saved context; they can only be executed
             // by the scheduler loop via execute().  Push the async task back
             // so the scheduler loop handles it.
-            wk.core.deque.push(c.into());
+            crate::resumable::common::worker::LocalQueue::push(&wk.core, c.into());
         } else {
             return c;
         }

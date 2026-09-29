@@ -1,8 +1,8 @@
 //! External-queue trait and implementations for waking ULTs from outside the
 //! scheduler (e.g. RDMA completion threads calling `Waker::wake()`).
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use crate::traits::stackful::SpawnableStackfulTaskSystem;
 use crate::resumable::common::desc::{SuspendedTaskToken, TaskDescCore};
@@ -23,6 +23,40 @@ use crate::resumable::common::worker::{LocalQueue, WorkerOps};
 pub trait ExternalWakeQueue<D: TaskDescCore>: Send + Sync + 'static {
     /// Push a continuation from an external (non-worker) OS thread.
     fn push(&self, cont: SuspendedTaskToken<D>);
+
+    /// Install the hook a push must fire so idle (possibly parked) workers
+    /// notice the new item. Called once, at scheduler construction, before
+    /// any worker runs. A queue that is drained by an always-running service
+    /// (like [`PollerUltQueue`]) has no use for it.
+    fn set_wake_hook(&self, hook: WakeHook);
+}
+
+/// Type-erased "new work arrived" callback from an external queue back to the
+/// pool's idle policy. The queue is generic over the descriptor only, not the
+/// whole system, so it cannot name the pool's type; this is the seam.
+#[derive(Clone, Copy)]
+pub struct WakeHook {
+    data: *const (),
+    fire: fn(*const ()),
+}
+
+// SAFETY: `data` points at the pool's `PoolCore`, which is `Sync` and outlives
+// every queue that holds a hook to it (the queue lives in the same `Scheduler`).
+unsafe impl Send for WakeHook {}
+unsafe impl Sync for WakeHook {}
+
+impl WakeHook {
+    /// # Safety
+    /// `fire(data)` must be sound to call from any thread for as long as the
+    /// queue this hook is installed in is alive.
+    pub(crate) unsafe fn new(data: *const (), fire: fn(*const ())) -> Self {
+        WakeHook { data, fire }
+    }
+
+    #[inline]
+    fn fire(&self) {
+        (self.fire)(self.data)
+    }
 }
 
 /// How continuations pushed by external OS threads reach the ULT scheduler.
@@ -77,6 +111,7 @@ pub trait ExternalQueue<S: PoolSystem>: ExternalWakeQueue<S::Desc> + Default + S
 pub struct StealPathQueue<D: crate::resumable::common::desc::TaskDescCore> {
     non_empty: AtomicBool,
     inner: Mutex<Vec<SuspendedTaskToken<D>>>,
+    wake: OnceLock<WakeHook>,
 }
 
 impl<D: crate::resumable::common::desc::TaskDescCore> Default for StealPathQueue<D> {
@@ -84,6 +119,7 @@ impl<D: crate::resumable::common::desc::TaskDescCore> Default for StealPathQueue
         StealPathQueue {
             non_empty: AtomicBool::new(false),
             inner: Mutex::new(Vec::new()),
+            wake: OnceLock::new(),
         }
     }
 }
@@ -92,6 +128,13 @@ impl<D: crate::resumable::common::desc::TaskDescCore> ExternalWakeQueue<D> for S
     fn push(&self, cont: SuspendedTaskToken<D>) {
         self.inner.lock().unwrap().push(cont);
         self.non_empty.store(true, Ordering::Release);
+        if let Some(h) = self.wake.get() {
+            h.fire();
+        }
+    }
+
+    fn set_wake_hook(&self, hook: WakeHook) {
+        let _ = self.wake.set(hook);
     }
 }
 
@@ -139,6 +182,10 @@ impl<D: crate::resumable::common::desc::TaskDescCore> ExternalWakeQueue<D> for P
     fn push(&self, cont: SuspendedTaskToken<D>) {
         self.inner.lock().unwrap().push(cont);
     }
+
+    // The poller ULT is always running on some worker and forwards through
+    // `LocalQueue::defer`, which notifies by itself.
+    fn set_wake_hook(&self, _hook: WakeHook) {}
 }
 
 impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem> ExternalQueue<S> for PollerUltQueue<S::Desc>

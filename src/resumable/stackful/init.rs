@@ -68,7 +68,6 @@
 use std::cell::Cell;
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use crate::traits::common::TlsSlot;
 use crate::traits::stackful::{JoinHandleLike, SpawnableStackfulTaskSystem};
@@ -351,7 +350,7 @@ where
             JoinHandleLike::join(h);
         }
 
-        self.shared.pool.finished.store(true, Ordering::Release);
+        self.shared.pool.finish();
 
         // This worker may not be worker 0 — the ULT `init` returned as may
         // have migrated any number of times since.

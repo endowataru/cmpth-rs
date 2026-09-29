@@ -201,6 +201,7 @@ impl cmpth::UltIdentity for MySystem {
     type RunQueue = cmpth::HybridRunQueue<cmpth::SuspendedTaskToken<cmpth::StackfulOnlyTaskDesc<Self>>>; // work-stealing run queue
     type Alloc = cmpth::HeapStack;                         // stack allocator
     type Lookup = cmpth::TlsCurrent;                       // current-worker lookup
+    type Idle = cmpth::SpinIdle;                           // what idle workers do (spin / park)
 
     fn worker_tls_anchor() -> &'static <cmpth::OsSystem as cmpth::NestableSystem>::ThreadSpecific<cmpth::UltWorker<Self>> {
         static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();

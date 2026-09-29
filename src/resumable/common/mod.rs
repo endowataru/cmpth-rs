@@ -4,6 +4,7 @@
 pub mod deque;
 pub mod desc;
 pub mod external_queue;
+pub mod idle;
 pub mod lookup;
 pub mod pool;
 pub mod scheduler;

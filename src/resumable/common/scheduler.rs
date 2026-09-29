@@ -112,7 +112,7 @@ pub(crate) fn worker_idle_loop<S>(wk: &UltWorker<S>, shared: &Scheduler<S>)
 where
     S: SchedulerSystem + WorkerSystem<Worker = UltWorker<S>>,
 {
-    idle_loop::<S, _>(wk, &shared.pool.finished, || {
+    idle_loop::<S, _>(wk, &shared.pool, || {
         shared.external_queue.try_pop().map(S::SuspendedToken::from)
     });
 }

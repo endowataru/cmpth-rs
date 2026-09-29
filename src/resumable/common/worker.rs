@@ -382,7 +382,9 @@ impl<S: WorkerSystem + PoolSystem> UltWorker<S> {
         self.shared.set(sched);
         // SAFETY: `sched` points at the live, fully constructed `Scheduler`
         // this worker belongs to (same contract as `shared` above).
-        self.core.bind(unsafe { &(*sched).pool });
+        let sched = unsafe { &*sched };
+        self.core.bind(&sched.pool);
+        crate::resumable::common::external_queue::ExternalWakeQueue::<S::Desc>::set_wake_hook(&sched.external_queue, sched.pool.wake_hook());
     }
 
     /// The one component a task-creation path needs out of the scheduler:
