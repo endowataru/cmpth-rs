@@ -291,6 +291,7 @@ impl<
 ///     type RunQueue = cmpth::HybridRunQueue<cmpth::SuspendedTaskToken<cmpth::StackfulOnlyTaskDesc<Self>>>;
 ///     type Alloc = cmpth::HeapStack;
 ///     type Lookup = cmpth::TlsCurrent;
+///     type Idle = cmpth::SpinIdle;
 ///
 ///     fn worker_tls_anchor() -> &'static <cmpth::OsSystem as NestableSystem>::ThreadSpecific<cmpth::UltWorker<Self>> {
 ///         static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
@@ -338,6 +339,10 @@ pub trait UltIdentity: Sized + Send + Sync + 'static {
     /// Work-stealing run queue implementation.
     type RunQueue: WorkerRunQueue<SuspendedTaskToken<Self::Desc>> + Default;
 
+    /// Idle/wakeup policy. `where Self: WorkerSystem`, same reasoning as
+    /// [`Lookup`](Self::Lookup).
+    type Idle: crate::resumable::common::idle::IdlePolicy;
+
     /// Stack allocation policy.
     type Alloc: StackAlloc;
 
@@ -384,6 +389,7 @@ impl<M: UltIdentity> WorkerSystem for M {
     type Worker = UltWorker<Self>;
     type RunQueue = M::RunQueue;
     type Lookup = <M as UltIdentity>::Lookup;
+    type Idle = <M as UltIdentity>::Idle;
 
     fn worker_tls() -> &'static <M::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         <M as UltIdentity>::worker_tls_anchor()

@@ -278,6 +278,7 @@ where
 ///     type Desc = cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>;
 ///     type RunQueue = cmpth::HybridRunQueue<cmpth::SuspendedTaskToken<cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>>>;
 ///     type Lookup = cmpth::InlineTlsCurrent;
+///     type Idle = cmpth::SpinIdle;
 ///
 ///     fn worker_tls_anchor() -> &'static <cmpth::OsSystem as NestableSystem>::ThreadSpecific<cmpth::UltWorker<cmpth::UltAsyncSystem<Self>>> {
 ///         static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
@@ -327,6 +328,9 @@ pub trait UltAsyncIdentity: Sized + Send + Sync + 'static {
 
     /// Work-stealing run queue implementation.
     type RunQueue: WorkerRunQueue<crate::resumable::common::desc::SuspendedTaskToken<Self::Desc>> + Default;
+
+    /// Idle/wakeup policy; see [`WorkerSystem::Idle`].
+    type Idle: crate::resumable::common::idle::IdlePolicy;
 
     /// Fixed slot size for the `spawn_async` descriptor pool.
     const ASYNC_POOL_SIZE: usize = 512;
@@ -378,6 +382,7 @@ impl<M: UltAsyncIdentity> WorkerSystem for UltAsyncSystem<M> {
     type Worker = UltWorker<Self>;
     type RunQueue = M::RunQueue;
     type Lookup = <M as UltAsyncIdentity>::Lookup;
+    type Idle = <M as UltAsyncIdentity>::Idle;
 
     fn worker_tls() -> &'static <M::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         <M as UltAsyncIdentity>::worker_tls_anchor()

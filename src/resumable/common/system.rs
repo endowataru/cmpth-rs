@@ -10,6 +10,7 @@ use crate::traits::common::TaskSystem;
 use crate::traits::stackful::{NestableSystem, SpawnableStackfulTaskSystem};
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::external_queue::ExternalQueue;
+use crate::resumable::common::idle::IdlePolicy;
 use crate::resumable::common::desc::{SuspendedTaskToken, TaskDescAlloc};
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::pool::{DescPool, DynamicPool};
@@ -114,6 +115,11 @@ pub trait WorkerSystem: Sized + Send + Sync + 'static {
 
     /// Current-worker lookup policy.
     type Lookup: CurrentLookup<Self>;
+
+    /// What an idle worker does and how a producer wakes it. Use
+    /// [`SpinIdle`](crate::resumable::common::idle::SpinIdle) unless idle
+    /// workers must not burn CPU.
+    type Idle: IdlePolicy;
 
     /// The concrete worker type driving this scheduler. Every system today
     /// sets this to [`UltWorker<Self>`](crate::resumable::common::worker::UltWorker) — kept as its own associated type
