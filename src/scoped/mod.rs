@@ -10,9 +10,11 @@
 //! spawned here outlives this call" property `std::thread::scope` names
 //! itself after, just restricted to exactly two branches.
 //!
-//! Shares [`crate::resumable::common::system::WorkerSystem`]'s worker-pool
-//! machinery (`WorkerRunQueue`/`CurrentLookup`/`WorkerOps`/`LocalQueue` —
-//! see `worker.rs`) with the `resumable` engine, but deliberately *not*
+//! Shares the whole worker-pool substrate with the `resumable` engine:
+//! [`crate::resumable::common::system::WorkerSystem`]'s components plus
+//! `WorkerCore`/`PoolCore` (run queue, steal loop, stealer table, idle loop —
+//! see `resumable::common::worker_core` and `worker.rs`); scoped's worker
+//! *is* a bare `WorkerCore`. It deliberately does *not* use
 //! [`PoolSystem`](crate::resumable::common::system::PoolSystem)/`UltWorker`:
 //! a `parallel_call` branch is represented as a plain value on the caller's
 //! own native stack frame (`task::TaskRef`), with a single-purpose

@@ -90,13 +90,13 @@ where
     SuspendedTaskToken<S::Desc>: From<S::SuspendedToken>,
     S::SuspendedToken: From<SuspendedTaskToken<S::Desc>>,
 {
-    if let Some(c) = wk.deque.try_pop() {
+    if let Some(c) = wk.core.deque.try_pop() {
         let c: SuspendedTaskToken<S::Desc> = c.into();
         if c.is_poll_fn_dispatch() {
             // Async tasks have no saved context; they can only be executed
             // by the scheduler loop via execute().  Push the async task back
             // so the scheduler loop handles it.
-            wk.deque.push(c.into());
+            wk.core.deque.push(c.into());
         } else {
             return c;
         }

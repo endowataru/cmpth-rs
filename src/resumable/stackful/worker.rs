@@ -154,7 +154,7 @@ where
 /// `pop_or_root` body for stackful-only systems: every popped item is a
 /// real, switchable continuation, so no requeue check is needed.
 ///
-/// Lowest rung: plain [`WorkerSystem`] — `wk.deque.try_pop()` returns
+/// Lowest rung: plain [`WorkerSystem`] — `wk.core.deque.try_pop()` returns
 /// `S::SuspendedToken`, converted to this function's
 /// `SuspendedTaskToken<S::Desc>` return type via the `Into` bound on
 /// [`WorkerSystem::SuspendedToken`] rather than an equality pin;
@@ -166,7 +166,7 @@ where
     S: WorkerSystem + PoolSystem,
     SuspendedTaskToken<S::Desc>: From<S::SuspendedToken>,
 {
-    if let Some(c) = wk.deque.try_pop() {
+    if let Some(c) = wk.core.deque.try_pop() {
         return c.into();
     }
     wk.take_root_cont()

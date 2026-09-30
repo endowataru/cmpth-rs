@@ -16,7 +16,8 @@ use std::alloc::Layout;
 use std::cell::Cell;
 use std::ptr;
 
-use crate::resumable::common::deque::{RunQueueStealer, Steal, WorkerRunQueue};
+use crate::resumable::common::deque::Steal;
+use crate::resumable::common::worker_core::WorkerCore;
 use crate::resumable::common::pool::{DescPool, DynamicPool};
 use crate::resumable::common::scheduler::Scheduler;
 use crate::resumable::common::system::{PoolSystem, WorkerSystem};
@@ -230,8 +231,7 @@ pub trait DescWorkerOps<S: WorkerSystem + PoolSystem>: WorkerOps<S> + TaskPool<S
 // ---------------------------------------------------------------------------
 
 pub struct UltWorker<S: WorkerSystem + PoolSystem> {
-    num: usize,
-    pub(crate) deque: S::RunQueue,
+    pub(crate) core: WorkerCore<S>,
     /// The task currently running on this worker, if any. `None` means
     /// nothing is running (mirrors the old `Cell<*mut S::Desc>`'s null
     /// convention). Deliberately `Option<RunningTaskToken<S::Desc>>`, not a bare
@@ -247,7 +247,6 @@ pub struct UltWorker<S: WorkerSystem + PoolSystem> {
     cur_task_cell: Cell<Option<RunningTaskToken<S::Desc>>>,
     root_desc: S::Desc,
     pub(crate) root_cont: Cell<Option<SuspendedTaskToken<S::Desc>>>,
-    steal_seed: Cell<usize>,
     shared: Cell<*const Scheduler<S>>,
     /// The descriptor currently being driven by `run_async_poll` on this
     /// worker, or null. Distinct from `cur_task` (which tracks real
@@ -291,12 +290,10 @@ unsafe impl<S: WorkerSystem + PoolSystem> Sync for UltWorker<S> {}
 impl<S: WorkerSystem + PoolSystem> UltWorker<S> {
     pub(crate) fn new(num: usize) -> Self {
         UltWorker {
-            num,
-            deque: S::RunQueue::default(),
+            core: WorkerCore::new(num),
             cur_task_cell: Cell::new(None),
             root_desc: S::Desc::new_root(),
             root_cont: Cell::new(None),
-            steal_seed: Cell::new(num.wrapping_mul(0x9E37_79B9).wrapping_add(1)),
             shared: Cell::new(ptr::null()),
             polling_async: Cell::new(ptr::null_mut()),
             yield_requested: Cell::new(false),
@@ -383,6 +380,9 @@ impl<S: WorkerSystem + PoolSystem> UltWorker<S> {
     /// stays private to this module.
     pub(crate) fn bind_scheduler(&self, sched: *const Scheduler<S>) {
         self.shared.set(sched);
+        // SAFETY: `sched` points at the live, fully constructed `Scheduler`
+        // this worker belongs to (same contract as `shared` above).
+        self.core.bind(unsafe { &(*sched).pool });
     }
 
     /// The one component a task-creation path needs out of the scheduler:
@@ -396,7 +396,7 @@ impl<S: WorkerSystem + PoolSystem> UltWorker<S> {
     /// `pop_or_root_stackful`/`pop_or_root_dual`.
     pub(crate) fn take_root_cont(&self) -> SuspendedTaskToken<S::Desc> {
         self.root_cont.take()
-            .unwrap_or_else(|| panic!("no runnable continuation on worker {}", self.num))
+            .unwrap_or_else(|| panic!("no runnable continuation on worker {}", self.core.num()))
     }
 
     /// Mutable peek at the currently-running task's token, for callers with
@@ -440,7 +440,7 @@ impl<S: WorkerSystem + PoolSystem> UltWorker<S> {
 impl<S: WorkerSystem + PoolSystem> TaskPool<S> for UltWorker<S> {
     fn alloc_task(&self, has_handle: bool) -> SuspendedTaskToken<S::Desc> {
         let shared = self.shared();
-        let ptr = shared.task_pool.alloc(self.num, has_handle, shared.stack_size);
+        let ptr = shared.task_pool.alloc(self.core.num(), has_handle, shared.stack_size);
         // SAFETY: `ptr` was just freshly allocated by `DescPool::alloc`
         // (fresh memory, or a pool slot reinitialized with no live token
         // pointing at it) — trivially exclusive. This is the one place
@@ -451,7 +451,7 @@ impl<S: WorkerSystem + PoolSystem> TaskPool<S> for UltWorker<S> {
     }
 
     unsafe fn free_task(&self, desc: *mut S::Desc) {
-        unsafe { self.shared().task_pool.dealloc(self.num, desc) };
+        unsafe { self.shared().task_pool.dealloc(self.core.num(), desc) };
     }
 }
 
@@ -459,13 +459,13 @@ impl<S: WorkerSystem + PoolSystem> TaskPool<S> for UltWorker<S> {
 
 impl<S: WorkerSystem + PoolSystem> AsyncTaskPool<S> for UltWorker<S> {
     fn alloc_async_task(&self, has_handle: bool, size: usize) -> SuspendedTaskToken<S::Desc> {
-        let ptr = self.shared().async_task_pool.alloc(self.num, has_handle, size);
+        let ptr = self.shared().async_task_pool.alloc(self.core.num(), has_handle, size);
         // SAFETY: same reasoning as `TaskPool::alloc_task` above.
         unsafe { SuspendedTaskToken::from_raw(ptr) }
     }
 
     unsafe fn free_async_task(&self, desc: *mut S::Desc) {
-        unsafe { self.shared().async_task_pool.dealloc(self.num, desc) };
+        unsafe { self.shared().async_task_pool.dealloc(self.core.num(), desc) };
     }
 }
 
@@ -473,70 +473,49 @@ impl<S: WorkerSystem + PoolSystem> AsyncTaskPool<S> for UltWorker<S> {
 
 impl<S: WorkerSystem + PoolSystem> RecursionAlloc for UltWorker<S> {
     fn alloc_recursion_frame(&self, layout: Layout) -> *mut u8 {
-        self.shared().recursion_pool.alloc(self.num, layout)
+        self.shared().recursion_pool.alloc(self.core.num(), layout)
     }
 
     unsafe fn free_recursion_frame(&self, ptr: *mut u8, layout: Layout) {
-        unsafe { self.shared().recursion_pool.dealloc(self.num, ptr, layout) };
+        unsafe { self.shared().recursion_pool.dealloc(self.core.num(), ptr, layout) };
     }
 }
 
 // --- LocalQueue ---
 
 // Bounded by bare `WorkerSystem`, not `SchedulerSystem`: `LocalQueue` speaks
-// `S::SuspendedToken` rather than `SuspendedTaskToken<S::Desc>`,
-// nothing here needs the two to be equal, nor dispatch capability. `self.deque`
-// is already `S::RunQueue: WorkerRunQueue<S::Item>` and `shared.stealers`
-// already yields `Steal<S::Item>`, so every body below type-checks against the
-// opaque item alone. The equality is still needed one layer up, wherever a
-// caller hands a concrete token to these methods — but that is the task
-// layer, which legitimately knows the descriptor type.
+// `S::SuspendedToken` rather than `SuspendedTaskToken<S::Desc>`, so nothing
+// here needs the two to be equal, nor dispatch capability. All of it is
+// `WorkerCore`'s (shared with every other worker kind).
 impl<S: WorkerSystem + PoolSystem> LocalQueue<S> for UltWorker<S> {
+    #[inline]
     fn push(&self, c: S::SuspendedToken) {
-        self.deque.push(c);
+        self.core.push(c);
     }
 
+    #[inline]
     fn defer(&self, c: S::SuspendedToken) {
-        self.deque.defer(c);
+        self.core.defer(c);
     }
 
+    #[inline]
     fn try_pop(&self) -> Option<S::SuspendedToken> {
-        self.deque.try_pop()
+        self.core.try_pop()
     }
 
+    #[inline]
     fn try_steal(&self) -> Steal<S::SuspendedToken> {
-        let shared = self.shared();
-        let n = shared.workers.len();
-        if n <= 1 {
-            return Steal::Empty;
-        }
-        let seed = self.steal_seed.get();
-        self.steal_seed.set(seed.wrapping_add(1));
-        let mut saw_retry = false;
-        for i in 0..n {
-            let victim = (seed + i) % n;
-            if victim == self.num {
-                continue;
-            }
-            // Reached exclusively through `shared.stealers[victim]` -- a
-            // plain, already-built stealer handle -- never through
-            // `shared.workers[victim]` itself. See `Scheduler::stealers`'s
-            // doc comment for why that's more than a style preference.
-            match shared.stealers[victim].try_steal() {
-                Steal::Success(c) => return Steal::Success(c),
-                Steal::Retry => saw_retry = true,
-                Steal::Empty => {}
-            }
-        }
-        if saw_retry { Steal::Retry } else { Steal::Empty }
+        self.core.try_steal()
     }
 
+    #[inline]
     fn num(&self) -> usize {
-        self.num
+        self.core.num()
     }
 
+    #[inline]
     fn num_workers(&self) -> usize {
-        self.shared().workers.len()
+        self.core.num_workers()
     }
 }
 
