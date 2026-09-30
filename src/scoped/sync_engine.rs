@@ -22,68 +22,28 @@
 //!
 //! # Worker-pool machinery
 //!
-//! Bring-up/teardown/idle-loop reuse [`ScopedWorker`]/[`ScopedRegistry`]
-//! (`super::worker`) — the same `WorkerRunQueue`/`WorkerOps`/`LocalQueue`
-//! machinery `resumable`'s `Scheduler<S>`/`worker_idle_loop` use, not a
-//! bespoke deque/thread-local pair. Only `parallel_call` itself (the hot
-//! path this module exists for) stays engine-specific — dispatch elsewhere
-//! is structurally identical to `resumable::common::scheduler::worker_idle_loop`,
-//! just without a task-pool/external-queue axis to check (`scoped` has
-//! none).
+//! Bring-up/teardown/idle-loop are `resumable/common`'s shared substrate —
+//! [`WorkerCore`](crate::resumable::common::worker_core::WorkerCore)/
+//! [`PoolCore`](crate::resumable::common::worker_core::PoolCore)/
+//! [`idle_loop`](crate::resumable::common::worker_core::idle_loop), via
+//! [`ScopedRegistry`] (`super::worker`) — the very loop the descriptor-backed
+//! flavors run. Only `parallel_call` itself (the hot path this module exists
+//! for) stays engine-specific.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crate::resumable::common::deque::Steal;
-use crate::resumable::common::system::WorkerSystem;
 use crate::resumable::common::worker::{LocalQueue, WorkerOps};
-use crate::traits::stackful::SpawnableStackfulTaskSystem;
+use crate::resumable::common::worker_core::try_run_one;
 
 use super::system::ScopedTaskSystem;
 use super::task::StackTask;
 use super::worker::{ScopedRegistry, ScopedWorker};
 
-// ---------------------------------------------------------------------------
-// Worker lookup / idle dispatch
-// ---------------------------------------------------------------------------
-
-/// Try to make progress once: pop our own local task, else steal from
-/// another worker. Returns `false` if nothing was found anywhere right now.
-/// Shared by the idle worker loop and `parallel_call`'s help-while-waiting
-/// loop — the same "what do I do when I have nothing of my own to run"
-/// logic either way. Mirrors
-/// [`worker_idle_loop`](crate::resumable::common::scheduler::worker_idle_loop)'s
-/// body, minus the task-pool/external-queue checks `scoped` has none of.
+/// Progress once (pop, else steal); shared by `parallel_call`'s
+/// help-while-waiting loop and shutdown drains.
+#[inline]
 fn try_execute_one(wk: &ScopedWorker) -> bool {
-    if let Some(task) = wk.try_pop() {
-        unsafe { task.execute() };
-        return true;
-    }
-    if let Steal::Success(task) = wk.try_steal() {
-        unsafe { task.execute() };
-        return true;
-    }
-    false
-}
-
-/// The idle/dispatch loop every worker OS thread (other than the one
-/// driving `run`'s root task inline) runs until shutdown.
-fn worker_idle_loop(wk: &ScopedWorker, registry: &ScopedRegistry) {
-    let mut idle_rounds = 0u32;
-    while !registry.finished.load(Ordering::Acquire) {
-        if try_execute_one(wk) {
-            idle_rounds = 0;
-            continue;
-        }
-        std::hint::spin_loop();
-        idle_rounds += 1;
-        if idle_rounds & 0x3F == 0 {
-            <ScopedTaskSystem as WorkerSystem>::Base::yield_now();
-        }
-    }
-    // Drain anything left so a straggler steal doesn't miss work pushed
-    // just before shutdown was observed.
-    while try_execute_one(wk) {}
+    try_run_one::<ScopedTaskSystem>(wk)
 }
 
 // ---------------------------------------------------------------------------
@@ -171,39 +131,17 @@ where
 /// [`resumable::stackful::init::StackfulInit`](crate::resumable::stackful::init::StackfulInit).
 pub struct SyncInit {
     registry: Arc<ScopedRegistry>,
-    handles: Vec<std::thread::JoinHandle<()>>,
+    handles: Vec<<crate::os::OsSystem as crate::traits::stackful::SpawnableStackfulTaskSystem>::JoinHandle<()>>,
 }
 
 pub(crate) fn init(num_workers: usize) -> SyncInit {
-    assert!(num_workers >= 1, "need at least one worker");
     assert!(
         ScopedWorker::current().is_none(),
         "cmpth: nested scoped::init() of the same engine on one thread"
     );
 
-    let workers: Vec<ScopedWorker> = (0..num_workers).map(ScopedWorker::new).collect();
-    let stealers = workers.iter().map(ScopedWorker::deque_stealer).collect();
-    let registry = Arc::new(ScopedRegistry {
-        workers: workers.into_boxed_slice(),
-        stealers,
-        finished: std::sync::atomic::AtomicBool::new(false),
-    });
-    for w in registry.workers.iter() {
-        w.bind_registry(Arc::as_ptr(&registry));
-    }
-
-    let handles: Vec<_> = (1..num_workers)
-        .map(|idx| {
-            let registry = Arc::clone(&registry);
-            std::thread::spawn(move || {
-                let wk = &registry.workers[idx];
-                super::worker::set_current(wk as *const ScopedWorker);
-                worker_idle_loop(wk, &registry);
-                super::worker::set_current(std::ptr::null());
-            })
-        })
-        .collect();
-
+    let registry = ScopedRegistry::new(num_workers);
+    let handles = registry.start_workers();
     super::worker::set_current(&registry.workers[0] as *const ScopedWorker);
 
     SyncInit { registry, handles }
@@ -219,10 +157,7 @@ impl Drop for SyncInit {
         // `Drop` while unwinding is perfectly sound here.
         let wk0 = &self.registry.workers[0];
         while try_execute_one(wk0) {}
-        self.registry.finished.store(true, Ordering::Release);
-        for h in self.handles.drain(..) {
-            h.join().expect("cmpth: parallel_call worker thread panicked");
-        }
+        self.registry.shutdown(std::mem::take(&mut self.handles));
         super::worker::set_current(std::ptr::null());
     }
 }
@@ -235,29 +170,8 @@ where
     F: FnOnce() -> R + Send,
     R: Send,
 {
-    assert!(num_workers >= 1, "need at least one worker");
-    let workers: Vec<ScopedWorker> = (0..num_workers).map(ScopedWorker::new).collect();
-    let stealers = workers.iter().map(ScopedWorker::deque_stealer).collect();
-    let registry = Arc::new(ScopedRegistry {
-        workers: workers.into_boxed_slice(),
-        stealers,
-        finished: std::sync::atomic::AtomicBool::new(false),
-    });
-    for w in registry.workers.iter() {
-        w.bind_registry(Arc::as_ptr(&registry));
-    }
-
-    let handles: Vec<_> = (1..num_workers)
-        .map(|idx| {
-            let registry = Arc::clone(&registry);
-            std::thread::spawn(move || {
-                let wk = &registry.workers[idx];
-                super::worker::set_current(wk as *const ScopedWorker);
-                worker_idle_loop(wk, &registry);
-                super::worker::set_current(std::ptr::null());
-            })
-        })
-        .collect();
+    let registry = ScopedRegistry::new(num_workers);
+    let handles = registry.start_workers();
 
     let root = StackTask::new(f);
     let root_ref = root.as_task_ref();
@@ -267,10 +181,7 @@ where
     // one, nobody else has had a chance to touch it yet.
     unsafe { root_ref.execute() };
 
-    registry.finished.store(true, Ordering::Release);
-    for h in handles {
-        h.join().expect("cmpth: parallel_call worker thread panicked");
-    }
+    registry.shutdown(handles);
     super::worker::set_current(std::ptr::null());
 
     root.take_result()

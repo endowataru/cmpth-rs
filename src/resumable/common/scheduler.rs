@@ -4,14 +4,12 @@
 //! [`stackless::scheduler::run_async`](crate::resumable::stackless::scheduler::run_async).
 
 use std::alloc::Layout;
-use std::sync::atomic::Ordering;
 
 use crate::traits::common::TlsSlot;
-use crate::traits::stackful::SpawnableStackfulTaskSystem;
-use crate::resumable::common::deque::{Steal, WorkerRunQueue};
 use crate::resumable::common::external_queue::ExternalQueue;
-use crate::resumable::common::system::{PoolSystem, RunnableItem, SchedulerSystem, WorkerSystem};
-use crate::resumable::common::worker::{LocalQueue, UltWorker};
+use crate::resumable::common::system::{PoolSystem, SchedulerSystem, WorkerSystem};
+use crate::resumable::common::worker::UltWorker;
+use crate::resumable::common::worker_core::{idle_loop, PoolCore};
 
 /// State shared by all workers of one scheduler instance. Worker-layer
 /// (`S: WorkerSystem`): only the pools/run-queue/external-queue axis, no
@@ -37,8 +35,10 @@ pub struct Scheduler<S: WorkerSystem + PoolSystem> {
     /// structural. Populated once, at construction, by mapping over
     /// `workers` (see the two `init`/`run_async` call sites) — never
     /// mutated afterward.
-    pub(crate) stealers: Box<[<S::RunQueue as WorkerRunQueue<S::SuspendedToken>>::Stealer]>,
-    pub(crate) finished: std::sync::atomic::AtomicBool,
+    /// Stealer table + shutdown flag, the part of this struct every
+    /// worker-pool flavor shares (see [`PoolCore`]). Populated once at
+    /// construction; the stealer table is never mutated afterward.
+    pub(crate) pool: PoolCore<S>,
     pub(crate) external_queue: S::ExternalQueue,
     /// Per-task ULT stack size for the stackful `spawn`/`fork_parent_first`
     /// paths and the scheduler loop's own stack, in bytes — set from
@@ -112,37 +112,7 @@ pub(crate) fn worker_idle_loop<S>(wk: &UltWorker<S>, shared: &Scheduler<S>)
 where
     S: SchedulerSystem + WorkerSystem<Worker = UltWorker<S>>,
 {
-    let mut idle_rounds = 0u32;
-    while !shared.finished.load(Ordering::Acquire) {
-        if let Some(c) = wk.try_pop() {
-            c.run_on(wk);
-            idle_rounds = 0;
-            continue;
-        }
-        // `try_steal` distinguishes "every victim was genuinely empty"
-        // (`Steal::Empty`) from "some victim had work but it couldn't be
-        // taken right now" (`Steal::Retry`, e.g. lost a CAS race) — see
-        // `Steal`'s own doc comment. A `Retry` round must not count toward
-        // `idle_rounds` below: there is known work nearby, so backing off
-        // to `S::Base::yield_now()` on its account would be a real
-        // regression, not just noise.
-        let steal = wk.try_steal();
-        if let Steal::Success(c) = steal {
-            c.run_on(wk);
-            idle_rounds = 0;
-            continue;
-        }
-        if let Some(c) = shared.external_queue.try_pop() {
-            S::SuspendedToken::from(c).run_on(wk);
-            idle_rounds = 0;
-            continue;
-        }
-        std::hint::spin_loop();
-        if matches!(steal, Steal::Empty) {
-            idle_rounds += 1;
-            if idle_rounds & 0x3F == 0 {
-                S::Base::yield_now();
-            }
-        }
-    }
+    idle_loop::<S, _>(wk, &shared.pool.finished, || {
+        shared.external_queue.try_pop().map(S::SuspendedToken::from)
+    });
 }

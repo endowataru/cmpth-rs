@@ -73,11 +73,11 @@ use std::sync::atomic::Ordering;
 use crate::traits::common::TlsSlot;
 use crate::traits::stackful::{JoinHandleLike, SpawnableStackfulTaskSystem};
 use crate::traits::system::stackful::{StackfulBuilder, StackfulInitSystem};
-use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::desc::{HasExternalQueue, RunningTaskToken, SuspendedTaskToken, TaskDescAlloc};
 use crate::resumable::common::external_queue::ExternalQueue;
 use crate::resumable::common::pool::{DescPool, DynamicPool};
 use crate::resumable::common::scheduler::{recursion_pool_threshold, worker_idle_loop, worker_loop, Scheduler};
+use crate::resumable::common::worker_core::PoolCore;
 use crate::resumable::common::system::WorkerSystem;
 use crate::resumable::common::stack::{StackAlloc as _, StackMem, UltStackMemory as _};
 use crate::resumable::common::thread::{align_down, JoinHandle};
@@ -166,11 +166,10 @@ where
     S::worker_tls().warm_up();
 
     let workers: Box<[UltWorker<S>]> = (0..num_workers).map(UltWorker::new).collect();
-    let stealers = workers.iter().map(|w| w.deque.stealer()).collect();
+    let pool = PoolCore::new(workers.iter().map(|w| &w.core));
     let shared = Arc::new(Scheduler {
         workers,
-        stealers,
-        finished: std::sync::atomic::AtomicBool::new(false),
+        pool,
         external_queue: S::ExternalQueue::default(),
         stack_size,
         task_pool: S::Pool::new_pool(num_workers, stack_size),
@@ -352,7 +351,7 @@ where
             JoinHandleLike::join(h);
         }
 
-        self.shared.finished.store(true, Ordering::Release);
+        self.shared.pool.finished.store(true, Ordering::Release);
 
         // This worker may not be worker 0 — the ULT `init` returned as may
         // have migrated any number of times since.

@@ -37,10 +37,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 
-use crate::resumable::common::deque::Steal;
-use crate::resumable::common::system::WorkerSystem;
 use crate::resumable::common::worker::{LocalQueue, WorkerOps};
-use crate::traits::stackful::SpawnableStackfulTaskSystem;
+use crate::resumable::common::worker_core::try_run_one;
 
 use super::system::ScopedTaskSystem;
 use super::task::TaskRef;
@@ -214,38 +212,9 @@ fn drive<Fut: Future + ?Sized>(mut fut: Pin<&mut Fut>) -> Fut::Output {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Worker idle dispatch — same shape as sync_engine's, kept separate (own
-// registry/worker set per `run_async` call) since the two engines never
-// share workers, only the `ScopedWorker`/`WorkerRunQueue` machinery itself.
-// ---------------------------------------------------------------------------
-
+#[inline]
 fn try_execute_one(wk: &ScopedWorker) -> bool {
-    if let Some(task) = wk.try_pop() {
-        unsafe { task.execute() };
-        return true;
-    }
-    if let Steal::Success(task) = wk.try_steal() {
-        unsafe { task.execute() };
-        return true;
-    }
-    false
-}
-
-fn worker_idle_loop(wk: &ScopedWorker, registry: &ScopedRegistry) {
-    let mut idle_rounds = 0u32;
-    while !registry.finished.load(Ordering::Acquire) {
-        if try_execute_one(wk) {
-            idle_rounds = 0;
-            continue;
-        }
-        std::hint::spin_loop();
-        idle_rounds += 1;
-        if idle_rounds & 0x3F == 0 {
-            <ScopedTaskSystem as WorkerSystem>::Base::yield_now();
-        }
-    }
-    while try_execute_one(wk) {}
+    try_run_one::<ScopedTaskSystem>(wk)
 }
 
 // ---------------------------------------------------------------------------
@@ -368,39 +337,15 @@ pub(crate) fn run_async<F>(num_workers: usize, root: F)
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    assert!(num_workers >= 1, "need at least one worker");
-    let workers: Vec<ScopedWorker> = (0..num_workers).map(ScopedWorker::new).collect();
-    let stealers = workers.iter().map(ScopedWorker::deque_stealer).collect();
-    let registry = Arc::new(ScopedRegistry {
-        workers: workers.into_boxed_slice(),
-        stealers,
-        finished: AtomicBool::new(false),
-    });
-    for w in registry.workers.iter() {
-        w.bind_registry(Arc::as_ptr(&registry));
-    }
-
-    let handles: Vec<_> = (1..num_workers)
-        .map(|idx| {
-            let registry = Arc::clone(&registry);
-            std::thread::spawn(move || {
-                let wk = &registry.workers[idx];
-                super::worker::set_current(wk as *const ScopedWorker);
-                worker_idle_loop(wk, &registry);
-                super::worker::set_current(std::ptr::null());
-            })
-        })
-        .collect();
+    let registry = ScopedRegistry::new(num_workers);
+    let handles = registry.start_workers();
 
     let wk0 = &registry.workers[0];
     super::worker::set_current(wk0 as *const ScopedWorker);
     let mut root = Box::pin(root);
     drive(root.as_mut());
 
-    registry.finished.store(true, Ordering::Release);
-    for h in handles {
-        h.join().expect("cmpth: parallel_call worker thread panicked");
-    }
+    registry.shutdown(handles);
     super::worker::set_current(std::ptr::null());
 }
 

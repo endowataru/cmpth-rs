@@ -1,31 +1,30 @@
 //! [`ScopedWorker`]/[`ScopedRegistry`] — [`ScopedTaskSystem`](super::ScopedTaskSystem)'s
-//! [`WorkerSystem`] implementation, reusing `resumable/common`'s
-//! [`WorkerRunQueue`]/[`CurrentLookup`] machinery instead of a bespoke
-//! deque/thread-local pair.
-//!
-//! Deliberately *not* [`UltWorker`](crate::resumable::common::worker::UltWorker):
-//! that struct is the `resumable`-engine's own concrete worker, tied to
-//! [`PoolSystem`](crate::resumable::common::system::PoolSystem) (pooled
-//! descriptors, root continuations, context-switch state) that `scoped` has
-//! none of. `ScopedWorker` is the second, genuinely independent
-//! implementation of [`WorkerOps`]/[`LocalQueue`] this crate has — proof
-//! that the `Worker`/`SuspendedToken` axes are actually swappable, not just
-//! declared as such (`docs/traits-redesign.md`§11 item 9).
+//! [`WorkerSystem`] implementation. Everything here is `resumable/common`'s
+//! shared substrate: the worker is a bare [`WorkerCore`] (run queue + steal
+//! loop, no descriptor/context state), the pool state is a [`PoolCore`], and
+//! worker threads run the same [`idle_loop`] the descriptor-backed flavors
+//! run. What `scoped` does *not* take from the descriptor-backed flavors is
+//! the task representation: no `PoolSystem`/`UltWorker`, since a branch is a
+//! stack-resident [`TaskRef`], not a pooled descriptor.
 
 use std::cell::Cell;
-use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use crate::os::OsSystem;
-use crate::resumable::common::deque::{HybridRunQueue, RunQueueStealer, Steal, WorkerRunQueue};
+use crate::resumable::common::deque::HybridRunQueue;
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::system::{RunnableItem, WorkerSystem};
-use crate::resumable::common::worker::{LocalQueue, WorkerOps};
-use crate::traits::component::tls::TlsAnchor;
+use crate::resumable::common::worker_core::{idle_loop, try_run_one, PoolCore, WorkerCore};
 use crate::traits::common::TlsSlot;
-use crate::traits::stackful::NestableSystem;
+use crate::traits::component::tls::TlsAnchor;
+use crate::traits::stackful::{NestableSystem, SpawnableStackfulTaskSystem};
+use crate::traits::stackful::JoinHandleLike;
 
 use super::system::ScopedTaskSystem;
 use super::task::TaskRef;
+
+/// `scoped`'s whole worker: just the shared queue layer.
+pub type ScopedWorker = WorkerCore<ScopedTaskSystem>;
 
 // ---------------------------------------------------------------------------
 // ScopedLookup — a fast current-worker lookup, deliberately not TlsCurrent
@@ -67,116 +66,55 @@ pub(super) fn set_current(wk: *const ScopedWorker) {
 }
 
 // ---------------------------------------------------------------------------
-// ScopedRegistry — shared worker-pool state (the scoped-flavor Scheduler<S>)
+// ScopedRegistry — one pool's workers plus their shared core
 // ---------------------------------------------------------------------------
 
 /// Worker-pool state shared by one `run`/`run_async`/`init` call's workers.
-/// The `scoped`-flavor counterpart of
-/// [`Scheduler<S>`](crate::resumable::common::scheduler::Scheduler) — leaner,
-/// since there is no task-pool axis at all here (`ScopedTaskSystem`
-/// implements `WorkerSystem` alone, never `PoolSystem`).
+/// The `scoped` counterpart of
+/// [`Scheduler<S>`](crate::resumable::common::scheduler::Scheduler): the same
+/// [`PoolCore`], minus the descriptor pools and external queue.
 pub(super) struct ScopedRegistry {
     pub(super) workers: Box<[ScopedWorker]>,
-    /// Cloneable stealer handles, one per worker, indexed the same as
-    /// `workers` — same "thieves never reach `workers[victim]` directly"
-    /// structure as `Scheduler::stealers`, for the same reason.
-    pub(super) stealers: Box<[<HybridRunQueue<TaskRef> as WorkerRunQueue<TaskRef>>::Stealer]>,
-    pub(super) finished: AtomicBool,
+    pub(super) pool: PoolCore<ScopedTaskSystem>,
 }
 
-// ---------------------------------------------------------------------------
-// ScopedWorker
-// ---------------------------------------------------------------------------
-
-pub struct ScopedWorker {
-    num: usize,
-    deque: HybridRunQueue<TaskRef>,
-    steal_seed: Cell<usize>,
-    shared: Cell<*const ScopedRegistry>,
-}
-
-// SAFETY: same justification as `UltWorker`'s `unsafe impl Send/Sync` —
-// `Cell` fields are only ever touched by the owning OS thread (this engine
-// pins one worker per OS thread for its whole lifetime, never migrates a
-// worker struct itself), `deque` is internally synchronized.
-unsafe impl Send for ScopedWorker {}
-unsafe impl Sync for ScopedWorker {}
-
-impl ScopedWorker {
-    pub(super) fn new(num: usize) -> Self {
-        ScopedWorker {
-            num,
-            deque: HybridRunQueue::default(),
-            steal_seed: Cell::new(num.wrapping_mul(0x9E37_79B9).wrapping_add(1)),
-            shared: Cell::new(std::ptr::null()),
+impl ScopedRegistry {
+    pub(super) fn new(num_workers: usize) -> Arc<Self> {
+        assert!(num_workers >= 1, "need at least one worker");
+        let workers: Box<[ScopedWorker]> = (0..num_workers).map(ScopedWorker::new).collect();
+        let pool = PoolCore::new(workers.iter());
+        let registry = Arc::new(ScopedRegistry { workers, pool });
+        for w in registry.workers.iter() {
+            w.bind(&registry.pool);
         }
+        registry
     }
 
-    pub(super) fn deque_stealer(&self) -> <HybridRunQueue<TaskRef> as WorkerRunQueue<TaskRef>>::Stealer {
-        self.deque.stealer()
+    /// Start worker threads `1..n` running the idle loop; worker 0 is the
+    /// calling thread's to drive.
+    pub(super) fn start_workers(self: &Arc<Self>) -> Vec<<OsSystem as SpawnableStackfulTaskSystem>::JoinHandle<()>> {
+        (1..self.workers.len())
+            .map(|idx| {
+                let registry = Arc::clone(self);
+                OsSystem::spawn(move || {
+                    let wk = &registry.workers[idx];
+                    set_current(wk as *const ScopedWorker);
+                    idle_loop::<ScopedTaskSystem, _>(wk, &registry.pool.finished, || None);
+                    // Nested calls always leave the deque as they found it,
+                    // so this only catches a straggler pushed just before
+                    // shutdown was observed.
+                    while try_run_one::<ScopedTaskSystem>(wk) {}
+                    set_current(std::ptr::null());
+                })
+            })
+            .collect()
     }
 
-    pub(super) fn bind_registry(&self, registry: *const ScopedRegistry) {
-        self.shared.set(registry);
-    }
-
-    fn shared(&self) -> &ScopedRegistry {
-        // SAFETY: set once via `bind_registry`, before this worker is ever
-        // driven, by the same construction sequence `UltWorker::bind_scheduler`
-        // uses; outlives every call through it (the registry owns the OS
-        // threads that could still be running).
-        unsafe { &*self.shared.get() }
-    }
-}
-
-impl LocalQueue<ScopedTaskSystem> for ScopedWorker {
-    fn push(&self, c: TaskRef) {
-        self.deque.push(c);
-    }
-
-    fn defer(&self, c: TaskRef) {
-        self.deque.defer(c);
-    }
-
-    fn try_pop(&self) -> Option<TaskRef> {
-        self.deque.try_pop()
-    }
-
-    fn try_steal(&self) -> Steal<TaskRef> {
-        let shared = self.shared();
-        let n = shared.workers.len();
-        if n <= 1 {
-            return Steal::Empty;
+    pub(super) fn shutdown(&self, handles: Vec<<OsSystem as SpawnableStackfulTaskSystem>::JoinHandle<()>>) {
+        self.pool.finished.store(true, std::sync::atomic::Ordering::Release);
+        for h in handles {
+            JoinHandleLike::join(h);
         }
-        let seed = self.steal_seed.get();
-        self.steal_seed.set(seed.wrapping_add(1));
-        let mut saw_retry = false;
-        for i in 0..n {
-            let victim = (seed + i) % n;
-            if victim == self.num {
-                continue;
-            }
-            match shared.stealers[victim].try_steal() {
-                Steal::Success(c) => return Steal::Success(c),
-                Steal::Retry => saw_retry = true,
-                Steal::Empty => {}
-            }
-        }
-        if saw_retry { Steal::Retry } else { Steal::Empty }
-    }
-
-    fn num(&self) -> usize {
-        self.num
-    }
-
-    fn num_workers(&self) -> usize {
-        self.shared().workers.len()
-    }
-}
-
-impl WorkerOps<ScopedTaskSystem> for ScopedWorker {
-    fn current() -> Option<&'static Self> {
-        <ScopedLookup as CurrentLookup<ScopedTaskSystem>>::current()
     }
 }
 

@@ -8,8 +8,8 @@ use std::sync::atomic::Ordering;
 
 use crate::traits::common::TlsSlot;
 use crate::traits::stackful::{JoinHandleLike, SpawnableStackfulTaskSystem};
-use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::scheduler::{recursion_pool_threshold, worker_loop, Scheduler};
+use crate::resumable::common::worker_core::PoolCore;
 use crate::resumable::common::pool::{DescPool, DynamicPool};
 use crate::resumable::stackless::system::StacklessSchedulerSystem;
 use crate::resumable::stackless::thread::fork_async_parent_first;
@@ -51,11 +51,10 @@ where
     S::worker_tls().warm_up();
 
     let workers: Box<[UltWorker<S>]> = (0..num_workers).map(UltWorker::new).collect();
-    let stealers = workers.iter().map(|w| w.deque.stealer()).collect();
+    let pool = PoolCore::new(workers.iter().map(|w| &w.core));
     let shared = Arc::new(Scheduler {
         workers,
-        stealers,
-        finished: std::sync::atomic::AtomicBool::new(false),
+        pool,
         external_queue: S::ExternalQueue::default(),
         // Meaningless-but-harmless here, same as the `task_pool` line right
         // below: a pure stackless-only system has no real stacks (no
@@ -78,7 +77,7 @@ where
     let root_cont = fork_async_parent_first::<S, _>(
         async move {
             root.await;
-            shared2.finished.store(true, Ordering::Release);
+            shared2.pool.finished.store(true, Ordering::Release);
         },
         external_queue_ptr,
     );
