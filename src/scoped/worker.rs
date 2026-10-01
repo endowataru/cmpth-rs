@@ -1,4 +1,4 @@
-//! [`ScopedWorker`]/[`ScopedRegistry`] — [`ScopedTaskSystem`](super::ScopedTaskSystem)'s
+//! [`ScopedWorker`]/[`ScopedRegistry`] — [`ScopedSystem`](super::ScopedSystem)'s
 //! [`WorkerSystem`] implementation. Everything here is `resumable/common`'s
 //! shared substrate: the worker is a bare [`WorkerCore`] (run queue + steal
 //! loop, no descriptor/context state), the pool state is a [`PoolCore`], and
@@ -8,11 +8,11 @@
 //! stack-resident [`TaskRef`], not a pooled descriptor.
 
 use std::cell::Cell;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
 use crate::os::OsSystem;
 use crate::resumable::common::deque::HybridRunQueue;
-use crate::resumable::common::idle::SpinIdle;
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::system::{RunnableItem, WorkerSystem};
 use crate::resumable::common::worker_core::{idle_loop, try_run_one, PoolCore, WorkerCore};
@@ -21,11 +21,11 @@ use crate::traits::component::tls::TlsAnchor;
 use crate::traits::stackful::{NestableSystem, SpawnableStackfulTaskSystem};
 use crate::traits::stackful::JoinHandleLike;
 
-use super::system::ScopedTaskSystem;
+use super::system::{ScopedIdentity, ScopedSystem};
 use super::task::TaskRef;
 
 /// `scoped`'s whole worker: just the shared queue layer.
-pub type ScopedWorker = WorkerCore<ScopedTaskSystem>;
+pub type ScopedWorker<M> = WorkerCore<ScopedSystem<M>>;
 
 // ---------------------------------------------------------------------------
 // ScopedLookup — a fast current-worker lookup, deliberately not TlsCurrent
@@ -43,15 +43,26 @@ pub type ScopedWorker = WorkerCore<ScopedTaskSystem>;
 // `Lookup` is its own pluggable axis on `WorkerSystem` precisely so a
 // system that doesn't need `OsTls`'s safety property doesn't have to pay
 // for it; this is that axis actually being exercised, not a workaround.
+//
+// One slot, shared by every `M`: a `static` inside a generic fn/impl can't
+// depend on the generic parameter (`E0401`), so this stores a type-erased
+// `*const ()` rather than one genuine thread-local per `M`. Sound because a
+// worker OS thread is always dedicated to exactly one concrete
+// `ScopedSystem<M>` pool for its whole lifetime (spawned in
+// `start_workers`, joined in `shutdown`, never reused for another pool) —
+// nesting a *different* `M` inside a `parallel_call` running on the same
+// thread is as unsupported as nesting the *same* `M` already was (see the
+// assert in `sync_engine::init`); both clobber this shared slot the same
+// way.
 thread_local! {
-    static CURRENT: Cell<*const ScopedWorker> = const { Cell::new(std::ptr::null()) };
+    static CURRENT: Cell<*const ()> = const { Cell::new(std::ptr::null()) };
 }
 
-pub struct ScopedLookup;
+pub struct ScopedLookup<M>(PhantomData<M>);
 
-impl CurrentLookup<ScopedTaskSystem> for ScopedLookup {
-    fn current() -> Option<&'static ScopedWorker> {
-        let p = CURRENT.with(|c| c.get());
+impl<M: ScopedIdentity> CurrentLookup<ScopedSystem<M>> for ScopedLookup<M> {
+    fn current() -> Option<&'static ScopedWorker<M>> {
+        let p = CURRENT.with(Cell::get) as *const ScopedWorker<M>;
         if p.is_null() { None } else { Some(unsafe { &*p }) }
     }
 }
@@ -62,8 +73,8 @@ impl CurrentLookup<ScopedTaskSystem> for ScopedLookup {
 /// reads from this same thread-local rather than `worker_tls()`'s `OsTls`
 /// slot — `worker_tls()` still exists to satisfy the trait, but nothing
 /// here actually routes through it.
-pub(super) fn set_current(wk: *const ScopedWorker) {
-    CURRENT.with(|c| c.set(wk));
+pub(super) fn set_current<M: ScopedIdentity>(wk: *const ScopedWorker<M>) {
+    CURRENT.with(|c| c.set(wk as *const ()));
 }
 
 // ---------------------------------------------------------------------------
@@ -74,15 +85,15 @@ pub(super) fn set_current(wk: *const ScopedWorker) {
 /// The `scoped` counterpart of
 /// [`Scheduler<S>`](crate::resumable::common::scheduler::Scheduler): the same
 /// [`PoolCore`], minus the descriptor pools and external queue.
-pub(super) struct ScopedRegistry {
-    pub(super) workers: Box<[ScopedWorker]>,
-    pub(super) pool: PoolCore<ScopedTaskSystem>,
+pub(super) struct ScopedRegistry<M: ScopedIdentity> {
+    pub(super) workers: Box<[ScopedWorker<M>]>,
+    pub(super) pool: PoolCore<ScopedSystem<M>>,
 }
 
-impl ScopedRegistry {
+impl<M: ScopedIdentity> ScopedRegistry<M> {
     pub(super) fn new(num_workers: usize) -> Arc<Self> {
         assert!(num_workers >= 1, "need at least one worker");
-        let workers: Box<[ScopedWorker]> = (0..num_workers).map(ScopedWorker::new).collect();
+        let workers: Box<[ScopedWorker<M>]> = (0..num_workers).map(ScopedWorker::<M>::new).collect();
         let pool = PoolCore::new(workers.iter());
         let registry = Arc::new(ScopedRegistry { workers, pool });
         for w in registry.workers.iter() {
@@ -99,13 +110,13 @@ impl ScopedRegistry {
                 let registry = Arc::clone(self);
                 OsSystem::spawn(move || {
                     let wk = &registry.workers[idx];
-                    set_current(wk as *const ScopedWorker);
-                    idle_loop::<ScopedTaskSystem, _>(wk, &registry.pool, || None);
+                    set_current(wk as *const ScopedWorker<M>);
+                    idle_loop::<ScopedSystem<M>, _>(wk, &registry.pool, || None);
                     // Nested calls always leave the deque as they found it,
                     // so this only catches a straggler pushed just before
                     // shutdown was observed.
-                    while try_run_one::<ScopedTaskSystem>(wk) {}
-                    set_current(std::ptr::null());
+                    while try_run_one::<ScopedSystem<M>>(wk) {}
+                    set_current::<M>(std::ptr::null());
                 })
             })
             .collect()
@@ -120,18 +131,31 @@ impl ScopedRegistry {
 }
 
 // ---------------------------------------------------------------------------
-// WorkerSystem for ScopedTaskSystem
+// WorkerSystem for ScopedSystem
 // ---------------------------------------------------------------------------
 
-impl WorkerSystem for ScopedTaskSystem {
+impl<M: ScopedIdentity> WorkerSystem for ScopedSystem<M> {
     type Base = OsSystem;
     type SuspendedToken = TaskRef;
     type RunQueue = HybridRunQueue<TaskRef>;
-    type Lookup = ScopedLookup;
-    type Idle = SpinIdle;
-    type Worker = ScopedWorker;
+    type Lookup = ScopedLookup<M>;
+    type Idle = M::Idle;
+    type Worker = ScopedWorker<M>;
 
-    fn worker_tls() -> &'static <OsSystem as NestableSystem>::ThreadSpecific<ScopedWorker> {
+    // Dead code for every `M`: nothing in `scoped` ever calls
+    // `Self::worker_tls()` (`ScopedLookup`/`CURRENT` above is what
+    // `ScopedSystem`'s own `Lookup` actually reads), and the only generic
+    // callers in `resumable::common`/`stackful::init` require `Worker =
+    // UltWorker<S>`, which `ScopedWorker<M>` never is — so this never gets
+    // monomorphized into a real call. That matters here because `static
+    // ANCHOR: TlsAnchor` is declared once in this single generic `impl<M>`
+    // block: a `static`'s *type* can't mention an outer generic parameter
+    // (`E0401`), so unlike `worker_tls_anchor`'s per-concrete-type contract
+    // elsewhere (each `UltIdentity` leaf writes its own `static`), one
+    // `ANCHOR`/index here would be shared by every `M` if this were ever
+    // actually exercised. Only satisfies `WorkerSystem`'s required
+    // associated fn.
+    fn worker_tls() -> &'static <OsSystem as NestableSystem>::ThreadSpecific<ScopedWorker<M>> {
         static ANCHOR: TlsAnchor = TlsAnchor::new();
         TlsSlot::from_anchor(&ANCHOR)
     }
@@ -141,8 +165,8 @@ impl WorkerSystem for ScopedTaskSystem {
 // RunnableItem for TaskRef — dispatch is just the existing trampoline
 // ---------------------------------------------------------------------------
 
-impl RunnableItem<ScopedTaskSystem> for TaskRef {
-    fn run_on(self, _wk: &ScopedWorker) {
+impl<M: ScopedIdentity> RunnableItem<ScopedSystem<M>> for TaskRef {
+    fn run_on(self, _wk: &ScopedWorker<M>) {
         // SAFETY: every `TaskRef` in circulation was built by
         // `StackTask::as_task_ref`/`AsyncTask::as_task_ref`, whose
         // `execute_fn` is a valid trampoline for `data` by construction.

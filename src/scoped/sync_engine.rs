@@ -35,15 +35,15 @@ use std::sync::Arc;
 use crate::resumable::common::worker::{LocalQueue, WorkerOps};
 use crate::resumable::common::worker_core::try_run_one;
 
-use super::system::ScopedTaskSystem;
+use super::system::{ScopedIdentity, ScopedSystem};
 use super::task::StackTask;
 use super::worker::{ScopedRegistry, ScopedWorker};
 
 /// Progress once (pop, else steal); shared by `parallel_call`'s
 /// help-while-waiting loop and shutdown drains.
 #[inline]
-fn try_execute_one(wk: &ScopedWorker) -> bool {
-    try_run_one::<ScopedTaskSystem>(wk)
+fn try_execute_one<M: ScopedIdentity>(wk: &ScopedWorker<M>) -> bool {
+    try_run_one::<ScopedSystem<M>>(wk)
 }
 
 // ---------------------------------------------------------------------------
@@ -57,14 +57,15 @@ fn try_execute_one(wk: &ScopedWorker) -> bool {
 ///
 /// Must be called from within [`run`] (on one of its worker threads,
 /// possibly nested inside another call's `a`/`b`).
-pub(crate) fn parallel_call<Fa, Fb, Ra, Rb>(a: Fa, b: Fb) -> (Ra, Rb)
+pub(crate) fn parallel_call<M, Fa, Fb, Ra, Rb>(a: Fa, b: Fb) -> (Ra, Rb)
 where
+    M: ScopedIdentity,
     Fa: FnOnce() -> Ra + Send,
     Fb: FnOnce() -> Rb + Send,
     Ra: Send,
     Rb: Send,
 {
-    let wk = ScopedWorker::current().expect("cmpth: scoped::parallel_call called outside scoped::run");
+    let wk = ScopedWorker::<M>::current().expect("cmpth: scoped::parallel_call called outside scoped::run");
     let task_b = StackTask::new(b);
     let task_ref = task_b.as_task_ref();
     wk.push(task_ref);
@@ -103,7 +104,7 @@ where
 
 // ---------------------------------------------------------------------------
 // init — standalone counterpart to `run`, backing
-// `StackfulInitSystem`/`StackfulBuilder` for `ScopedTaskSystem`.
+// `StackfulInitSystem`/`StackfulBuilder` for `ScopedSystem`.
 //
 // This engine has no ULT/context-switch concept at all (see this module's
 // own doc comment: a `parallel_call` branch is a stack-resident closure, run
@@ -123,31 +124,31 @@ where
 /// worker 0's own deque, signals shutdown, and joins the other worker OS
 /// threads.
 ///
-/// `pub`, not `pub(crate)`: this is [`ScopedTaskSystem`](super::ScopedTaskSystem)'s
+/// `pub`, not `pub(crate)`: this is [`ScopedSystem`](super::ScopedSystem)'s
 /// [`StackfulInitSystem::Init`](crate::traits::stackful::StackfulInitSystem::Init)
 /// — a public associated type needs an at-least-as-public backing type,
 /// even though every field here (and the `init` function itself) stays
 /// crate-private; same opaque-struct shape as
 /// [`resumable::stackful::init::StackfulInit`](crate::resumable::stackful::init::StackfulInit).
-pub struct SyncInit {
-    registry: Arc<ScopedRegistry>,
+pub struct SyncInit<M: ScopedIdentity> {
+    registry: Arc<ScopedRegistry<M>>,
     handles: Vec<<crate::os::OsSystem as crate::traits::stackful::SpawnableStackfulTaskSystem>::JoinHandle<()>>,
 }
 
-pub(crate) fn init(num_workers: usize) -> SyncInit {
+pub(crate) fn init<M: ScopedIdentity>(num_workers: usize) -> SyncInit<M> {
     assert!(
-        ScopedWorker::current().is_none(),
+        ScopedWorker::<M>::current().is_none(),
         "cmpth: nested scoped::init() of the same engine on one thread"
     );
 
-    let registry = ScopedRegistry::new(num_workers);
+    let registry = ScopedRegistry::<M>::new(num_workers);
     let handles = registry.start_workers();
-    super::worker::set_current(&registry.workers[0] as *const ScopedWorker);
+    super::worker::set_current(&registry.workers[0] as *const ScopedWorker<M>);
 
     SyncInit { registry, handles }
 }
 
-impl Drop for SyncInit {
+impl<M: ScopedIdentity> Drop for SyncInit<M> {
     fn drop(&mut self) {
         // No context switch happens anywhere in this engine (every
         // `parallel_call` branch either runs as an ordinary nested call or
@@ -156,33 +157,34 @@ impl Drop for SyncInit {
         // initializer this has no panic-across-switch hazard: an ordinary
         // `Drop` while unwinding is perfectly sound here.
         let wk0 = &self.registry.workers[0];
-        while try_execute_one(wk0) {}
+        while try_execute_one::<M>(wk0) {}
         self.registry.shutdown(std::mem::take(&mut self.handles));
-        super::worker::set_current(std::ptr::null());
+        super::worker::set_current::<M>(std::ptr::null());
     }
 }
 
 /// Start `num_workers` OS threads (the calling thread becomes worker 0),
 /// run `f` as the root task, and block until it (and everything it
 /// transitively `parallel_call`s) completes.
-pub(crate) fn run<F, R>(num_workers: usize, f: F) -> R
+pub(crate) fn run<M, F, R>(num_workers: usize, f: F) -> R
 where
+    M: ScopedIdentity,
     F: FnOnce() -> R + Send,
     R: Send,
 {
-    let registry = ScopedRegistry::new(num_workers);
+    let registry = ScopedRegistry::<M>::new(num_workers);
     let handles = registry.start_workers();
 
     let root = StackTask::new(f);
     let root_ref = root.as_task_ref();
     let wk0 = &registry.workers[0];
-    super::worker::set_current(wk0 as *const ScopedWorker);
+    super::worker::set_current(wk0 as *const ScopedWorker<M>);
     // Run the root task directly — no steal-check needed for the very first
     // one, nobody else has had a chance to touch it yet.
     unsafe { root_ref.execute() };
 
     registry.shutdown(handles);
-    super::worker::set_current(std::ptr::null());
+    super::worker::set_current::<M>(std::ptr::null());
 
     root.take_result()
 }
@@ -190,43 +192,69 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resumable::common::idle::{ParkIdle, SpinIdle};
 
-    fn fib(n: u64) -> u64 {
+    struct SpinMarker;
+    impl ScopedIdentity for SpinMarker {
+        type Idle = SpinIdle;
+    }
+    struct ParkMarker;
+    impl ScopedIdentity for ParkMarker {
+        type Idle = ParkIdle;
+    }
+
+    fn fib<M: ScopedIdentity>(n: u64) -> u64 {
         if n <= 1 {
             return n;
         }
-        let (a, b) = parallel_call(|| fib(n - 1), || fib(n - 2));
+        let (a, b) = parallel_call::<M, _, _, _, _>(|| fib::<M>(n - 1), || fib::<M>(n - 2));
         a + b
     }
 
+    /// Runs every test in this module against both `SpinIdle` and
+    /// `ParkIdle` — the whole point of `ScopedSystem<M>` taking its
+    /// `Idle` from `M: ScopedIdentity` is that this engine works unchanged
+    /// under either.
     #[test]
     fn fib_matches_sequential() {
-        for workers in [1, 2, 4] {
-            let r = run(workers, || fib(20));
-            assert_eq!(r, 6765, "workers={workers}");
+        fn go<M: ScopedIdentity>() {
+            for workers in [1, 2, 4] {
+                let r = run::<M, _, _>(workers, || fib::<M>(20));
+                assert_eq!(r, 6765, "workers={workers}");
+            }
         }
+        go::<SpinMarker>();
+        go::<ParkMarker>();
     }
 
     #[test]
     fn nested_join_many_levels() {
-        let r = run(2, || fib(24));
-        assert_eq!(r, 46368);
+        fn go<M: ScopedIdentity>() {
+            let r = run::<M, _, _>(2, || fib::<M>(24));
+            assert_eq!(r, 46368);
+        }
+        go::<SpinMarker>();
+        go::<ParkMarker>();
     }
 
     #[test]
     fn borrows_non_static_data() {
-        let data = vec![1u64, 2, 3, 4, 5, 6, 7, 8];
-        let sum = run(4, || {
-            fn rec(s: &[u64]) -> u64 {
-                if s.len() <= 1 {
-                    return s.first().copied().unwrap_or(0);
+        fn go<M: ScopedIdentity>() {
+            let data = vec![1u64, 2, 3, 4, 5, 6, 7, 8];
+            let sum = run::<M, _, _>(4, || {
+                fn rec<M: ScopedIdentity>(s: &[u64]) -> u64 {
+                    if s.len() <= 1 {
+                        return s.first().copied().unwrap_or(0);
+                    }
+                    let mid = s.len() / 2;
+                    let (a, b) = parallel_call::<M, _, _, _, _>(|| rec::<M>(&s[..mid]), || rec::<M>(&s[mid..]));
+                    a + b
                 }
-                let mid = s.len() / 2;
-                let (a, b) = parallel_call(|| rec(&s[..mid]), || rec(&s[mid..]));
-                a + b
-            }
-            rec(&data)
-        });
-        assert_eq!(sum, 36);
+                rec::<M>(&data)
+            });
+            assert_eq!(sum, 36);
+        }
+        go::<SpinMarker>();
+        go::<ParkMarker>();
     }
 }
