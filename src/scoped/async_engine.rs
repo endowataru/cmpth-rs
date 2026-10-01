@@ -32,6 +32,7 @@
 //! task it grabbed isn't ready, same as the sync engine.
 
 use std::future::Future;
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -40,7 +41,7 @@ use std::task::{Context, Poll, Wake, Waker};
 use crate::resumable::common::worker::{LocalQueue, WorkerOps};
 use crate::resumable::common::worker_core::try_run_one;
 
-use super::system::ScopedTaskSystem;
+use super::system::{ScopedIdentity, ScopedSystem};
 use super::task::TaskRef;
 use super::worker::{ScopedRegistry, ScopedWorker};
 
@@ -115,14 +116,16 @@ enum Body<Fut> {
     Taken,
 }
 
-struct AsyncTask<Fut: Future> {
+struct AsyncTask<M: ScopedIdentity, Fut: Future> {
     body: Mutex<Body<Fut>>,
     result: Mutex<Option<Fut::Output>>,
     latch: AsyncLatch,
+    _idle: PhantomData<M>,
 }
 
-impl<Fut> AsyncTask<Fut>
+impl<M, Fut> AsyncTask<M, Fut>
 where
+    M: ScopedIdentity,
     Fut: Future + Send + 'static,
     Fut::Output: Send + 'static,
 {
@@ -131,6 +134,7 @@ where
             body: Mutex::new(Body::Pending(Box::pin(fut))),
             result: Mutex::new(None),
             latch: AsyncLatch::new(),
+            _idle: PhantomData,
         }
     }
 
@@ -148,7 +152,7 @@ where
     /// it gets `b` back unstolen.
     fn drive_to_completion(&self) {
         let mut fut = self.take_body();
-        let out = drive(fut.as_mut());
+        let out = drive::<M, _>(fut.as_mut());
         *self.result.lock().unwrap() = Some(out);
         self.latch.set();
     }
@@ -195,8 +199,8 @@ impl Wake for WakeFlag {
     }
 }
 
-fn drive<Fut: Future + ?Sized>(mut fut: Pin<&mut Fut>) -> Fut::Output {
-    let wk = ScopedWorker::current().expect("cmpth: scoped::parallel_call (async) called outside run_async");
+fn drive<M: ScopedIdentity, Fut: Future + ?Sized>(mut fut: Pin<&mut Fut>) -> Fut::Output {
+    let wk = ScopedWorker::<M>::current().expect("cmpth: scoped::parallel_call (async) called outside run_async");
     let woken = Arc::new(WakeFlag(AtomicBool::new(true)));
     let waker = Waker::from(Arc::clone(&woken));
     let mut cx = Context::from_waker(&waker);
@@ -206,15 +210,15 @@ fn drive<Fut: Future + ?Sized>(mut fut: Pin<&mut Fut>) -> Fut::Output {
                 return v;
             }
         }
-        if !try_execute_one(wk) {
+        if !try_execute_one::<M>(wk) {
             std::hint::spin_loop();
         }
     }
 }
 
 #[inline]
-fn try_execute_one(wk: &ScopedWorker) -> bool {
-    try_run_one::<ScopedTaskSystem>(wk)
+fn try_execute_one<M: ScopedIdentity>(wk: &ScopedWorker<M>) -> bool {
+    try_run_one::<ScopedSystem<M>>(wk)
 }
 
 // ---------------------------------------------------------------------------
@@ -229,9 +233,9 @@ enum State<Fa: Future> {
 
 /// Returned by [`parallel_call`]. See the module docs for the state
 /// machine this drives.
-pub(crate) struct ParallelInvoke<Fa: Future, Fb: Future> {
+pub(crate) struct ParallelInvoke<M: ScopedIdentity, Fa: Future, Fb: Future> {
     state: State<Fa>,
-    task: Arc<AsyncTask<Fb>>,
+    task: Arc<AsyncTask<M, Fb>>,
     /// `task`'s `TaskRef::data`, as a plain integer once pushed — lets
     /// `poll` tell "got our own task back unstolen" apart from "someone
     /// else's task came back" the same way `sync_engine::parallel_call`
@@ -240,8 +244,9 @@ pub(crate) struct ParallelInvoke<Fa: Future, Fb: Future> {
     pushed: Option<usize>,
 }
 
-impl<Fa, Fb> Future for ParallelInvoke<Fa, Fb>
+impl<M, Fa, Fb> Future for ParallelInvoke<M, Fa, Fb>
 where
+    M: ScopedIdentity,
     Fa: Future + Send + 'static,
     Fb: Future + Send + 'static,
     Fa::Output: Send + 'static,
@@ -257,7 +262,7 @@ where
         let this = unsafe { self.get_unchecked_mut() };
 
         if this.pushed.is_none() {
-            let wk = ScopedWorker::current().expect("cmpth: scoped::parallel_call (async) called outside run_async");
+            let wk = ScopedWorker::<M>::current().expect("cmpth: scoped::parallel_call (async) called outside run_async");
             let task_ref = AsyncTask::as_task_ref(&this.task);
             this.pushed = Some(task_ref.data as usize);
             wk.push(task_ref);
@@ -274,13 +279,13 @@ where
             panic!("cmpth: ParallelInvoke polled after completion");
         }
 
-        let wk = ScopedWorker::current().expect("cmpth: scoped::parallel_call (async) called outside run_async");
+        let wk = ScopedWorker::<M>::current().expect("cmpth: scoped::parallel_call (async) called outside run_async");
         let pushed = this.pushed.expect("cmpth: task_b not pushed before WaitingB");
         match wk.try_pop() {
             Some(popped) if popped.data as usize == pushed => {
                 // Not stolen: reclaim the leaked ref (we still hold our own
                 // `this.task` handle) and drive it inline.
-                drop(unsafe { Arc::from_raw(popped.data as *const AsyncTask<Fb>) });
+                drop(unsafe { Arc::from_raw(popped.data as *const AsyncTask<M, Fb>) });
                 this.task.drive_to_completion();
             }
             popped => {
@@ -307,14 +312,15 @@ where
 /// for why this takes thunks rather than already-built futures. Both are
 /// called eagerly, right here — plain, ordinary evaluation, no `.await`
 /// involved on this side.
-pub(crate) fn parallel_call<Fa, Fb, MkA, MkB>(mk_a: MkA, mk_b: MkB) -> ParallelInvoke<Fa, Fb>
+pub(crate) fn parallel_call<M, Fa, Fb, Ra, Rb, MkA, MkB>(mk_a: MkA, mk_b: MkB) -> ParallelInvoke<M, Fa, Fb>
 where
+    M: ScopedIdentity,
     MkA: FnOnce() -> Fa,
     MkB: FnOnce() -> Fb,
-    Fa: Future + Send + 'static,
-    Fb: Future + Send + 'static,
-    Fa::Output: Send + 'static,
-    Fb::Output: Send + 'static,
+    Fa: Future<Output = Ra> + Send + 'static,
+    Fb: Future<Output = Rb> + Send + 'static,
+    Ra: Send + 'static,
+    Rb: Send + 'static,
 {
     let task = Arc::new(AsyncTask::new(mk_b()));
     ParallelInvoke { state: State::RunningA(Box::pin(mk_a())), task, pushed: None }
@@ -324,61 +330,80 @@ where
 // run_async — bring up the worker pool, drive the root future, tear down
 // ---------------------------------------------------------------------------
 
-// No longer reachable from any public API path: `ScopedTaskSystem` only
+// No longer reachable from any public API path: `ScopedSystem` only
 // implements `StackfulInitSystem` (via `sync_engine`'s own `init`/`run`),
 // not `StacklessInitSystem` — this engine's `run_async` never got a
 // standalone-init counterpart added alongside it (unlike `sync_engine`,
 // which did), so it currently exists purely for this module's own tests
 // below. Kept `pub(crate)` (not deleted) since it's real, working
-// infrastructure a future `StacklessInitSystem` impl for `ScopedTaskSystem`
+// infrastructure a future `StacklessInitSystem` impl for `ScopedSystem`
 // could reuse directly.
 #[allow(dead_code)]
-pub(crate) fn run_async<F>(num_workers: usize, root: F)
+pub(crate) fn run_async<M, F>(num_workers: usize, root: F)
 where
+    M: ScopedIdentity,
     F: Future<Output = ()> + Send + 'static,
 {
-    let registry = ScopedRegistry::new(num_workers);
+    let registry = ScopedRegistry::<M>::new(num_workers);
     let handles = registry.start_workers();
 
     let wk0 = &registry.workers[0];
-    super::worker::set_current(wk0 as *const ScopedWorker);
+    super::worker::set_current(wk0 as *const ScopedWorker<M>);
     let mut root = Box::pin(root);
-    drive(root.as_mut());
+    drive::<M, _>(root.as_mut());
 
     registry.shutdown(handles);
-    super::worker::set_current(std::ptr::null());
+    super::worker::set_current::<M>(std::ptr::null());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resumable::common::idle::{ParkIdle, SpinIdle};
     use std::sync::atomic::AtomicU64;
+
+    struct SpinMarker;
+    impl ScopedIdentity for SpinMarker {
+        type Idle = SpinIdle;
+    }
+    struct ParkMarker;
+    impl ScopedIdentity for ParkMarker {
+        type Idle = ParkIdle;
+    }
 
     // Recursive `async fn`s can't pass their own opaque return type as a
     // bare generic argument to anything (E0733) — this is the actual proof
     // that taking thunks (`parallel_call(mk_a, mk_b)`, not
     // `parallel_call(a, b)`) really does dodge it, not just a claim in a
     // doc comment.
-    fn fib(n: u64) -> impl Future<Output = u64> + Send {
+    fn fib<M: ScopedIdentity>(n: u64) -> impl Future<Output = u64> + Send {
         async move {
             if n <= 1 {
                 return n;
             }
-            let (a, b) = parallel_call(move || fib(n - 1), move || fib(n - 2)).await;
+            let (a, b) = parallel_call::<M, _, _, _, _, _, _>(move || fib::<M>(n - 1), move || fib::<M>(n - 2)).await;
             a + b
         }
     }
 
+    /// Runs every test in this module against both `SpinIdle` and
+    /// `ParkIdle` — the whole point of `ScopedSystem<M>` taking its `Idle`
+    /// from `M: ScopedIdentity` is that this engine works unchanged under
+    /// either.
     #[test]
     fn fib_matches_sequential() {
-        for workers in [1, 2, 4] {
-            let result = Arc::new(AtomicU64::new(0));
-            let result2 = Arc::clone(&result);
-            run_async(workers, async move {
-                result2.store(fib(20).await, Ordering::Release);
-            });
-            assert_eq!(result.load(Ordering::Acquire), 6765, "workers={workers}");
+        fn go<M: ScopedIdentity>() {
+            for workers in [1, 2, 4] {
+                let result = Arc::new(AtomicU64::new(0));
+                let result2 = Arc::clone(&result);
+                run_async::<M, _>(workers, async move {
+                    result2.store(fib::<M>(20).await, Ordering::Release);
+                });
+                assert_eq!(result.load(Ordering::Acquire), 6765, "workers={workers}");
+            }
         }
+        go::<SpinMarker>();
+        go::<ParkMarker>();
     }
 
     #[test]
@@ -386,12 +411,16 @@ mod tests {
         // Deep enough, with few enough workers, that real steals happen —
         // exercises `AsyncLatch::register`/`set`'s wake path, not just the
         // unstolen inline fast path.
-        let result = Arc::new(AtomicU64::new(0));
-        let result2 = Arc::clone(&result);
-        run_async(2, async move {
-            result2.store(fib(24).await, Ordering::Release);
-        });
-        assert_eq!(result.load(Ordering::Acquire), 46368);
+        fn go<M: ScopedIdentity>() {
+            let result = Arc::new(AtomicU64::new(0));
+            let result2 = Arc::clone(&result);
+            run_async::<M, _>(2, async move {
+                result2.store(fib::<M>(24).await, Ordering::Release);
+            });
+            assert_eq!(result.load(Ordering::Acquire), 46368);
+        }
+        go::<SpinMarker>();
+        go::<ParkMarker>();
     }
 
     #[test]
@@ -400,26 +429,30 @@ mod tests {
         // once, none of them the root future itself — checks that workers
         // correctly multiplex unrelated work via stealing, not just a
         // single tree.
-        let counter = Arc::new(AtomicU64::new(0));
-        run_async(4, {
-            let counter = Arc::clone(&counter);
-            async move {
-                let mut sum = 0u64;
-                for i in 0..50u64 {
-                    let counter = Arc::clone(&counter);
-                    let (a, b) = parallel_call(
-                        move || async move {
-                            counter.fetch_add(1, Ordering::Relaxed);
-                            fib(15).await
-                        },
-                        move || fib(16),
-                    )
-                    .await;
-                    sum += a + b + i;
+        fn go<M: ScopedIdentity>() {
+            let counter = Arc::new(AtomicU64::new(0));
+            run_async::<M, _>(4, {
+                let counter = Arc::clone(&counter);
+                async move {
+                    let mut sum = 0u64;
+                    for i in 0..50u64 {
+                        let counter = Arc::clone(&counter);
+                        let (a, b) = parallel_call::<M, _, _, _, _, _, _>(
+                            move || async move {
+                                counter.fetch_add(1, Ordering::Relaxed);
+                                fib::<M>(15).await
+                            },
+                            move || fib::<M>(16),
+                        )
+                        .await;
+                        sum += a + b + i;
+                    }
+                    assert_eq!(sum, 50 * (610 + 987) + (0..50u64).sum::<u64>());
                 }
-                assert_eq!(sum, 50 * (610 + 987) + (0..50u64).sum::<u64>());
-            }
-        });
-        assert_eq!(counter.load(Ordering::Acquire), 50);
+            });
+            assert_eq!(counter.load(Ordering::Acquire), 50);
+        }
+        go::<SpinMarker>();
+        go::<ParkMarker>();
     }
 }

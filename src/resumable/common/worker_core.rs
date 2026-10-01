@@ -4,8 +4,8 @@
 //! the idle/dispatch loop that drives them (`idle_loop`/`try_run_one`).
 //!
 //! `UltWorker`/`Scheduler` (the descriptor-backed `resumable` flavors) embed
-//! these; `scoped` uses `WorkerCore<ScopedTaskSystem>` directly as its whole
-//! worker, since a stack-resident task needs nothing beyond the queue.
+//! these; `scoped` uses `WorkerCore<ScopedSystem<M>>` directly as its
+//! whole worker, since a stack-resident task needs nothing beyond the queue.
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
