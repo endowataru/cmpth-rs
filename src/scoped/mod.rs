@@ -14,7 +14,14 @@
 //! [`crate::resumable::common::system::WorkerSystem`]'s components plus
 //! `WorkerCore`/`PoolCore` (run queue, steal loop, stealer table, idle loop —
 //! see `resumable::common::worker_core` and `worker.rs`); scoped's worker
-//! *is* a bare `WorkerCore`. It deliberately does *not* use
+//! *is* a bare `WorkerCore`. That includes `WorkerSystem::Idle`: a marker
+//! implementing [`ScopedIdentity`] picks it the same way a marker
+//! implementing [`UltIdentity`](crate::UltIdentity)/[`UltAsyncIdentity`](crate::UltAsyncIdentity)
+//! does for every `resumable` flavor — one associated type on a config
+//! trait, not a bare generic parameter — so [`SpinIdle`](crate::SpinIdle)/
+//! [`ParkIdle`](crate::ParkIdle) (or a third-party policy) are a
+//! "pick a system" choice here too, not a `resumable`-only one. It
+//! deliberately does *not* use
 //! [`PoolSystem`](crate::resumable::common::system::PoolSystem)/`UltWorker`:
 //! a `parallel_call` branch is represented as a plain value on the caller's
 //! own native stack frame (`task::TaskRef`), with a single-purpose
@@ -45,8 +52,8 @@ mod system;
 mod task;
 mod worker;
 
-pub use system::ScopedTaskSystem;
-// `SyncInit` is `ScopedTaskSystem`'s `StackfulInitSystem::Init` — a public
+pub use system::{DefaultScopedMarker, ScopedIdentity, ScopedSystem, ScopedTaskSystem};
+// `SyncInit` is `ScopedSystem`'s `StackfulInitSystem::Init` — a public
 // associated type needs an at-least-as-public backing type, so it needs a
 // fully public path even though the `sync_engine` module itself (and
 // everything else in it) stays crate-private.
