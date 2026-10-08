@@ -394,24 +394,42 @@ unsafe impl Send for OsSuspendedThread {}
 struct OsDelegatorInner<C: DelegatorConsumer<OsSystem>> {
     consumer:  C,
     locked:    bool,
-    queue:     std::collections::VecDeque<(C::Work, OsSuspendedThread)>,
+    /// Delegated work, owned by the parked caller (on its stack) until the
+    /// consumer has run it and woken the caller.
+    queue:     std::collections::VecDeque<OsQueued<C::Work>>,
     finished:  bool,
 }
 
-pub struct OsDelegator<C: DelegatorConsumer<OsSystem>> {
+/// A queued delegation: the caller's work and the slot it parks on (the one
+/// `del` returned).  Both live in the caller's frame, which stays put until
+/// the slot is notified.
+struct OsQueued<W> {
+    work: *mut W,
+    sth:  *const OsSuspendedThread,
+}
+
+// SAFETY: see `OsQueued`; only the consumer touches them, while the caller
+// is parked.
+unsafe impl<W> Send for OsQueued<W> {}
+
+/// State shared with the consumer thread.  Behind an `Arc` so that the
+/// delegator itself can move after `start` returns it.
+struct OsDelegatorShared<C: DelegatorConsumer<OsSystem>> {
     inner: std::sync::Mutex<OsDelegatorInner<C>>,
     cv:    std::sync::Condvar,
-    th:    std::cell::UnsafeCell<Option<std::thread::JoinHandle<()>>>,
+}
+
+pub struct OsDelegator<C: DelegatorConsumer<OsSystem>> {
+    shared: std::sync::Arc<OsDelegatorShared<C>>,
+    th:     std::sync::Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 unsafe impl<C: DelegatorConsumer<OsSystem>> Send for OsDelegator<C> {}
 unsafe impl<C: DelegatorConsumer<OsSystem>> Sync for OsDelegator<C> {}
 
 impl<C: DelegatorConsumer<OsSystem>> OsDelegator<C> {
-    fn consumer_loop(
-        inner: &std::sync::Mutex<OsDelegatorInner<C>>,
-        cv:    &std::sync::Condvar,
-    ) {
+    fn consumer_loop(shared: &OsDelegatorShared<C>) {
+        let (inner, cv) = (&shared.inner, &shared.cv);
         loop {
             let mut guard = inner.lock().unwrap();
             // Wait until there is work or we are done.
@@ -421,11 +439,16 @@ impl<C: DelegatorConsumer<OsSystem>> OsDelegator<C> {
             if guard.finished && guard.queue.is_empty() {
                 break;
             }
-            if let Some((mut work, sth)) = guard.queue.pop_front() {
+            if let Some(q) = guard.queue.pop_front() {
                 let con = &mut guard.consumer;
-                let (done, wake_sth) = con.execute(&mut work);
+                // SAFETY: the caller is parked on `q.sth` until notified.
+                let (done, wake_sth) = con.execute(unsafe { &mut *q.work });
                 drop(guard);
-                if done { sth.notify(); }
+                // The caller's slot first: `wake_sth` may be the caller's own
+                // parker moved out of its work (then this is a no-op), and
+                // once that is notified the caller may return and free the
+                // slot.
+                if done { unsafe { (*q.sth).notify() }; }
                 if let Some(w) = wake_sth { w.notify(); }
             } else if guard.consumer.is_active() {
                 let wake_sth = guard.consumer.progress();
@@ -442,7 +465,7 @@ impl<C: DelegatorConsumer<OsSystem>> OsDelegator<C> {
 
 impl<C: DelegatorConsumer<OsSystem>> Delegator<OsSystem, C> for OsDelegator<C> {
     fn start(consumer: C) -> Self {
-        let del = OsDelegator {
+        let shared = std::sync::Arc::new(OsDelegatorShared {
             inner: std::sync::Mutex::new(OsDelegatorInner {
                 consumer,
                 locked:   true,
@@ -450,27 +473,19 @@ impl<C: DelegatorConsumer<OsSystem>> Delegator<OsSystem, C> for OsDelegator<C> {
                 finished: false,
             }),
             cv: std::sync::Condvar::new(),
-            th: std::cell::UnsafeCell::new(None),
-        };
-        // Spawn consumer thread.
-        let inner_ptr = &del.inner as *const _ as usize;
-        let cv_ptr    = &del.cv    as *const _ as usize;
-        let th = std::thread::spawn(move || {
-            let inner = unsafe { &*(inner_ptr as *const std::sync::Mutex<OsDelegatorInner<C>>) };
-            let cv    = unsafe { &*(cv_ptr    as *const std::sync::Condvar) };
-            Self::consumer_loop(inner, cv);
         });
-        unsafe { *del.th.get() = Some(th) };
-        del
+        let s2 = std::sync::Arc::clone(&shared);
+        let th = std::thread::spawn(move || Self::consumer_loop(&s2));
+        OsDelegator { shared, th: std::sync::Mutex::new(Some(th)) }
     }
 
     fn stop(self) {
         {
-            let mut g = self.inner.lock().unwrap();
+            let mut g = self.shared.inner.lock().unwrap();
             g.finished = true;
         }
-        self.cv.notify_all();
-        if let Some(th) = unsafe { &mut *self.th.get() }.take() {
+        self.shared.cv.notify_all();
+        if let Some(th) = self.th.lock().unwrap().take() {
             th.join().ok();
         }
     }
@@ -480,24 +495,27 @@ impl<C: DelegatorConsumer<OsSystem>> Delegator<OsSystem, C> for OsDelegator<C> {
         Imm: FnOnce(&mut C) -> (bool, Option<OsSuspendedThread>),
         Del: FnOnce(&mut C::Work) -> &OsSuspendedThread,
     {
-        let mut guard = self.inner.lock().unwrap();
+        let (inner, cv) = (&self.shared.inner, &self.shared.cv);
+        let mut guard = inner.lock().unwrap();
         if !guard.locked {
             // Acquire lock inline.
             guard.locked = true;
             let (done, wake_sth) = imm(&mut guard.consumer);
             if let Some(w) = wake_sth { w.notify(); }
             if !done { guard.locked = false; }
-            self.cv.notify_all();
+            cv.notify_all();
         } else {
-            // Delegate: push work onto queue and block.
+            // Delegate: queue the work and park on the slot `del` names.
             let mut work = C::Work::default();
-            let sth = OsSuspendedThread::default();
-            del(&mut work);
-            sth.wait_with(|| {
-                guard.queue.push_back((work, OsSuspendedThread::default()));
-                self.cv.notify_all();
+            let wp: *mut C::Work = &mut work;
+            // SAFETY: `work` stays in this frame until we are woken.
+            let sth: *const OsSuspendedThread = del(unsafe { &mut *wp });
+            unsafe { &*sth }.wait_with(|| {
+                guard.queue.push_back(OsQueued { work: wp, sth });
+                cv.notify_all();
                 drop(guard);
             });
+            drop(work);
         }
     }
 }
