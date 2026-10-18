@@ -246,3 +246,48 @@ fn combining_delegator_on_os_threads() {
     }
     assert_eq!(total.load(Ordering::SeqCst), OS as u64 * N);
 }
+
+/// A ULT woken by an OS thread runs even when its worker's other ULTs
+/// only yield to each other (the external queue was drained only when a
+/// worker idled).
+#[test]
+fn os_wake_reaches_a_worker_that_never_idles() {
+    run(1, || {
+        let m: Arc<<S as StackfulSyncSystem>::Mutex<u64>> = Arc::new(StackfulMutex::new(0));
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let os = {
+            let m = Arc::clone(&m);
+            std::thread::spawn(move || {
+                let g = m.lock();
+                tx.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                drop(g); // wakes the ULT below from an OS thread
+            })
+        };
+        rx.recv().unwrap();
+        let waiter = {
+            let (m, done) = (Arc::clone(&m), Arc::clone(&done));
+            spawn(move || {
+                *m.lock() += 1;
+                done.store(true, Ordering::Release);
+            })
+        };
+        let spinner = {
+            let done = Arc::clone(&done);
+            spawn(move || {
+                while !done.load(Ordering::Acquire) {
+                    <S as cmpth::SpawnableStackfulTaskSystem>::yield_now();
+                }
+            })
+        };
+        // The root also only yields.
+        while !done.load(Ordering::Acquire) {
+            <S as cmpth::SpawnableStackfulTaskSystem>::yield_now();
+        }
+        waiter.join().unwrap();
+        spinner.join().unwrap();
+        os.join().unwrap();
+        assert_eq!(*m.lock(), 1);
+    });
+}

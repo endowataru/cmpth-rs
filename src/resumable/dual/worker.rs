@@ -90,6 +90,13 @@ where
     SuspendedTaskToken<S::Desc>: From<S::SuspendedToken>,
     S::SuspendedToken: From<SuspendedTaskToken<S::Desc>>,
 {
+    // As in `pop_or_root_stackful`: a task woken from outside the pool first.
+    if let Some(c) = crate::resumable::common::external_queue::ExternalQueue::try_pop(wk.external_queue()) {
+        if !c.is_poll_fn_dispatch() {
+            return c;
+        }
+        crate::resumable::common::worker::LocalQueue::push(&wk.core, c.into());
+    }
     if let Some(c) = wk.core.deque.try_pop() {
         let c: SuspendedTaskToken<S::Desc> = c.into();
         if c.is_poll_fn_dispatch() {

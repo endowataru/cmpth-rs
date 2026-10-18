@@ -166,6 +166,13 @@ where
     S: WorkerSystem + PoolSystem,
     SuspendedTaskToken<S::Desc>: From<S::SuspendedToken>,
 {
+    // A task woken from outside the pool (by an OS thread) waits in the
+    // external queue, which the idle path drains; a worker whose tasks only
+    // yield to each other never idles, so take it here first (an atomic load
+    // when the queue is empty).
+    if let Some(c) = crate::resumable::common::external_queue::ExternalQueue::try_pop(wk.external_queue()) {
+        return c;
+    }
     if let Some(c) = wk.core.deque.try_pop() {
         return c.into();
     }
