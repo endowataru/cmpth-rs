@@ -16,9 +16,47 @@ use crate::resumable::common::worker::{DescWorkerOps, LocalQueue, WorkerOps};
 use crate::resumable::stackful::worker::ContextSwitcher;
 
 const ASYNC_TAG: usize = 1;
+/// An OS thread (no current worker) parked on an [`OsParker`] in its frame.
+const OS_TAG: usize = 2;
+
+/// What an OS-thread waiter parks on: lives in its frame until `done`.
+#[repr(align(8))]
+struct OsParker {
+    thread: std::thread::Thread,
+    done: std::sync::atomic::AtomicBool,
+}
+
+/// Non-owning pointer to a waiter's [`OsParker`], for the tagged slot.
+struct OsParkerRef(*mut OsParker);
+
+impl crate::interchange::PointerInterchangeable for OsParkerRef {
+    type Pointee = OsParker;
+    fn into_ptr(self) -> *mut OsParker { self.0 }
+    unsafe fn from_ptr(ptr: *mut OsParker) -> Self { OsParkerRef(ptr) }
+}
+
+impl OsParker {
+    fn new() -> Self {
+        OsParker { thread: std::thread::current(), done: std::sync::atomic::AtomicBool::new(false) }
+    }
+
+    fn wait(&self) {
+        while !self.done.load(Ordering::Acquire) {
+            std::thread::park();
+        }
+    }
+
+    /// Wake the waiter; it may free `*p` as soon as `done` is set.
+    unsafe fn wake(p: *const OsParker) {
+        let t = unsafe { (*p).thread.clone() };
+        unsafe { (*p).done.store(true, Ordering::Release) };
+        t.unpark();
+    }
+}
 
 /// Dual wait slot: holds zero or one waiter, which may be a real ULT
-/// continuation *or* a registered async [`Waker`] — chosen
+/// continuation, a registered async [`Waker`], or an OS thread that is not
+/// a worker (it parks itself) — chosen
 /// per wait attempt by whichever entry point (sync or async) the caller
 /// used. Internally a single tagged word (bit 0 = async), matching
 /// `cmpth-rs`'s own existing "task" vocabulary (`WorkerOps::cur_task`
@@ -30,7 +68,7 @@ const ASYNC_TAG: usize = 1;
 /// this: they only ever *write* a fresh registration into what must already
 /// be an empty slot, so there's no ambiguity about prior content.
 pub struct DualResumable<S: StackfulSchedulerSystem> where S::Desc: StackfulTaskDesc + AsyncTaskDesc {
-    state: AtomicTaggedSlot<1>,
+    state: AtomicTaggedSlot<2>,
     _marker: PhantomData<S>,
 }
 
@@ -69,22 +107,45 @@ impl<S: StackfulSchedulerSystem> DualResumable<S> where S::Desc: StackfulTaskDes
     /// [`Waker`]. `None` is a no-op. Shared by `notify()` and by
     /// `enter`/`swap`'s fallback when the slot didn't hold a real
     /// continuation to switch into.
-    fn wake_raw(v: Option<(usize, TaggedPtr<1>)>) {
+    fn wake_raw(v: Option<(usize, TaggedPtr<2>)>) {
         let Some((tag, raw)) = v else { return };
         if tag == ASYNC_TAG {
             // SAFETY: `tag == ASYNC_TAG` means this slot's `publish` was
             // called from `register` with a `Box<Waker>`.
             let w: Box<Waker> = unsafe { raw.into_typed() };
             w.wake();
+        } else if tag == OS_TAG {
+            // SAFETY: `tag == OS_TAG` means an OS-thread `wait_with`
+            // published its parker, which lives until woken.
+            let p: OsParkerRef = unsafe { raw.into_typed() };
+            unsafe { OsParker::wake(p.0) };
         } else {
-            let wk = S::Worker::current()
-                .expect("cmpth: DualResumable wake called outside a worker");
             // SAFETY: `tag == 0` means this slot's `publish` was called
             // from `wait_with`/`wait_with_cond`/`swap` with a real
             // `SuspendedTaskToken`.
             let c: SuspendedTaskToken<S::Desc> = unsafe { raw.into_typed() };
-            wk.push(c.into());
+            // From an OS thread: through the task's pool's external queue.
+            crate::resumable::common::waker::push_continuation::<S>(c);
         }
+    }
+
+    /// An OS thread's `wait_with`: publish a parker, run `f`, park.
+    fn os_wait_with<F: FnOnce()>(&self, f: F) {
+        let p = OsParker::new();
+        self.state.publish(OsParkerRef(&p as *const OsParker as *mut OsParker), OS_TAG, Ordering::Release);
+        f();
+        p.wait();
+    }
+
+    /// An OS thread's `wait_with_cond`: `f` false cancels, unless a
+    /// notifier took the parker meanwhile (then wait for its wake).
+    fn os_wait_with_cond<F: FnOnce() -> bool>(&self, f: F) {
+        let p = OsParker::new();
+        self.state.publish(OsParkerRef(&p as *const OsParker as *mut OsParker), OS_TAG, Ordering::Release);
+        if !f() && self.state.take(Ordering::AcqRel).is_some() {
+            return;
+        }
+        p.wait();
     }
 }
 
@@ -105,10 +166,9 @@ where
     S::Worker: StackfulWorker<S> + DescWorkerOps<S>,
 {
     fn wait_with<F: FnOnce()>(&self, f: F) {
-        let wk = S::Worker::current()
-            .expect("cmpth: DualResumable::wait_with called outside a worker");
+        let Some(wk) = S::Worker::current() else { return self.os_wait_with(f) };
         assert_on_real_ult::<S>(wk);
-        let slot = &self.state as *const AtomicTaggedSlot<1>;
+        let slot = &self.state as *const AtomicTaggedSlot<2>;
         wk.suspend_to_sched(move |_wk, prev| {
             // Release: publishes the context saved just before this
             // callback. SAFETY: `slot` outlives this callback (it's
@@ -120,10 +180,9 @@ where
     }
 
     fn wait_with_cond<F: FnOnce() -> bool>(&self, f: F) {
-        let wk = S::Worker::current()
-            .expect("cmpth: DualResumable::wait_with_cond called outside a worker");
+        let Some(wk) = S::Worker::current() else { return self.os_wait_with_cond(f) };
         assert_on_real_ult::<S>(wk);
-        let slot = &self.state as *const AtomicTaggedSlot<1>;
+        let slot = &self.state as *const AtomicTaggedSlot<2>;
         wk.cond_suspend_to_sched(move |_wk, prev| {
             // SAFETY: `slot` outlives this callback.
             unsafe { (*slot).publish(prev.take().unwrap(), 0, Ordering::Release) };
@@ -141,11 +200,10 @@ where
     }
 
     fn enter(&self) {
-        let wk = S::Worker::current()
-            .expect("cmpth: DualResumable::enter called outside a worker");
+        let Some(wk) = S::Worker::current() else { return Self::wake_raw(self.state.take(Ordering::AcqRel)) };
         assert_on_real_ult::<S>(wk);
         match self.state.take(Ordering::AcqRel) {
-            Some((tag, raw)) if tag != ASYNC_TAG => {
+            Some((tag, raw)) if tag == 0 => {
                 // SAFETY: `tag != ASYNC_TAG` means a `SuspendedTaskToken`
                 // was published by `wait_with`/`wait_with_cond`.
                 let c: SuspendedTaskToken<S::Desc> = unsafe { raw.into_typed() };
@@ -159,14 +217,17 @@ where
 
     fn swap(&self, next: &Self) {
         debug_assert!(!self.is_set(), "DualResumable::swap: self must be empty");
-        let wk = S::Worker::current()
-            .expect("cmpth: DualResumable::swap called outside a worker");
+        let Some(wk) = S::Worker::current() else {
+            // An OS thread cannot jump into a continuation: park on `self`,
+            // then wake `next`.
+            return self.os_wait_with(|| Self::wake_raw(next.state.take(Ordering::AcqRel)));
+        };
         assert_on_real_ult::<S>(wk);
         match next.state.take(Ordering::AcqRel) {
-            Some((tag, raw)) if tag != ASYNC_TAG => {
+            Some((tag, raw)) if tag == 0 => {
                 // SAFETY: same provenance as `enter` above.
                 let c: SuspendedTaskToken<S::Desc> = unsafe { raw.into_typed() };
-                let slot = &self.state as *const AtomicTaggedSlot<1>;
+                let slot = &self.state as *const AtomicTaggedSlot<2>;
                 wk.suspend_to_cont(c, move |_wk, prev| {
                     // SAFETY: `slot` outlives this callback (it's `self`'s
                     // own field, and `self` outlives the suspend/resume it
@@ -174,9 +235,10 @@ where
                     unsafe { (*slot).publish(prev, 0, Ordering::Release) };
                 });
             }
-            // Not a real continuation — fall back to a plain wake; `self`
-            // never becomes parked since no switch happens.
-            v => Self::wake_raw(v),
+            // An async or OS-thread waiter: no jump is possible, so park on
+            // `self` and wake it (swap's contract: `self` ends up parked).
+            Some(v) => StackfulResumable::<S>::wait_with(self, move || Self::wake_raw(Some(v))),
+            None => {}
         }
     }
 }
