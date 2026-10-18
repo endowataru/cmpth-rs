@@ -152,7 +152,9 @@ impl StackfulSyncSystem for DefaultDualTaskSystem {
 }
 
 impl SuspendableSystem for DefaultDualTaskSystem {
-    type SuspendedThread = resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>;
+    /// Dual, so that OS threads that are not workers can park on it too
+    /// (a delegator or lock shared with them).
+    type SuspendedThread = DualResumable<Self>;
 }
 
 impl DelegationSystem for DefaultDualTaskSystem {
@@ -233,7 +235,9 @@ impl StackfulSyncSystem for DefaultNestedDualTaskSystem {
 }
 
 impl SuspendableSystem for DefaultNestedDualTaskSystem {
-    type SuspendedThread = resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>;
+    /// Dual, so that OS threads that are not workers can park on it too
+    /// (a delegator or lock shared with them).
+    type SuspendedThread = DualResumable<Self>;
 }
 
 impl DelegationSystem for DefaultNestedDualTaskSystem {
