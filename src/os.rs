@@ -387,6 +387,38 @@ impl Resumable<OsSystem> for OsSuspendedThread {
 
 unsafe impl Send for OsSuspendedThread {}
 
+/// OS threads cannot jump into each other: `enter` wakes, `swap` parks on
+/// `self` after waking `next`.
+impl crate::traits::StackfulResumable<OsSystem> for OsSuspendedThread {
+    fn wait_with<F: FnOnce()>(&self, f: F) {
+        OsSuspendedThread::wait_with(self, f)
+    }
+
+    fn wait_with_cond<F: FnOnce() -> bool>(&self, f: F) {
+        let p = Self::parker();
+        *self.inner.lock().unwrap() = Some(p.clone());
+        if !f() {
+            let mut g = self.inner.lock().unwrap();
+            if g.as_ref().is_some_and(|q| std::sync::Arc::ptr_eq(q, &p)) {
+                *g = None;
+                return;
+            }
+        }
+        let mut ready = p.ready.lock().unwrap();
+        while !*ready {
+            ready = p.cv.wait(ready).unwrap();
+        }
+    }
+
+    fn enter(&self) {
+        self.notify();
+    }
+
+    fn swap(&self, next: &Self) {
+        OsSuspendedThread::wait_with(self, || next.notify());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // OsDelegator — delegator backed by OS mutex + condvar
 // ---------------------------------------------------------------------------

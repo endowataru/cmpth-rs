@@ -134,3 +134,115 @@ fn delegator_shared_by_ults_and_os_threads() {
         std::mem::forget(del);
     });
 }
+
+fn add_c(del: &cmpth::CombiningDelegator<S, Counter>) {
+    del.execute_or_delegate(
+        |c| {
+            c.total.fetch_add(1, Ordering::SeqCst);
+            (true, None)
+        },
+        |w: &mut AddWork| {
+            w.amount = 1;
+            &w.sth
+        },
+    );
+}
+
+#[test]
+fn combining_delegator_shared_by_ults_and_os_threads() {
+    const ULTS: usize = 8;
+    const OS: usize = 3;
+    const N: u64 = 5000;
+    // Before any worker pool exists: the holder runs inline.
+    let total = Arc::new(AtomicU64::new(0));
+    let del: Arc<cmpth::CombiningDelegator<S, Counter>> =
+        Arc::new(DelegatorTrait::start(Counter { total: Arc::clone(&total) }));
+    add_c(&del);
+    let d2 = Arc::clone(&del);
+    run(2, move || {
+        let ults: Vec<_> = (0..ULTS)
+            .map(|_| {
+                let del = Arc::clone(&d2);
+                spawn(move || {
+                    for _ in 0..N {
+                        add_c(&del);
+                    }
+                })
+            })
+            .collect();
+        let os: Vec<_> = (0..OS)
+            .map(|_| {
+                let del = Arc::clone(&d2);
+                std::thread::spawn(move || {
+                    for _ in 0..N {
+                        add_c(&del);
+                    }
+                })
+            })
+            .collect();
+        for h in ults {
+            h.join().unwrap();
+        }
+        for h in os {
+            h.join().unwrap();
+        }
+    });
+    add_c(&del);
+    assert_eq!(total.load(Ordering::SeqCst), 2 + (ULTS + OS) as u64 * N);
+}
+
+#[derive(Default)]
+struct OsAddWork {
+    amount: u64,
+    sth: <cmpth::OsSystem as cmpth::SuspendableSystem>::SuspendedThread,
+}
+
+struct OsCounter {
+    total: Arc<AtomicU64>,
+}
+
+impl DelegatorConsumer<cmpth::OsSystem> for OsCounter {
+    type Work = OsAddWork;
+    fn execute(&mut self, work: &mut OsAddWork) -> (bool, Option<<cmpth::OsSystem as cmpth::SuspendableSystem>::SuspendedThread>) {
+        self.total.fetch_add(work.amount, Ordering::SeqCst);
+        (true, Some(std::mem::take(&mut work.sth)))
+    }
+    fn progress(&mut self) -> Option<<cmpth::OsSystem as cmpth::SuspendableSystem>::SuspendedThread> {
+        None
+    }
+    fn is_active(&self) -> bool {
+        false
+    }
+}
+
+#[test]
+fn combining_delegator_on_os_threads() {
+    const OS: usize = 6;
+    const N: u64 = 5000;
+    let total = Arc::new(AtomicU64::new(0));
+    let del: Arc<cmpth::CombiningDelegator<cmpth::OsSystem, OsCounter>> =
+        Arc::new(DelegatorTrait::start(OsCounter { total: Arc::clone(&total) }));
+    let os: Vec<_> = (0..OS)
+        .map(|_| {
+            let del = Arc::clone(&del);
+            std::thread::spawn(move || {
+                for _ in 0..N {
+                    del.execute_or_delegate(
+                        |c| {
+                            c.total.fetch_add(1, Ordering::SeqCst);
+                            (true, None)
+                        },
+                        |w: &mut OsAddWork| {
+                            w.amount = 1;
+                            &w.sth
+                        },
+                    );
+                }
+            })
+        })
+        .collect();
+    for h in os {
+        h.join().unwrap();
+    }
+    assert_eq!(total.load(Ordering::SeqCst), OS as u64 * N);
+}
