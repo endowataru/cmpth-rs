@@ -464,8 +464,12 @@ impl<C: DelegatorConsumer<OsSystem>> OsDelegator<C> {
         let (inner, cv) = (&shared.inner, &shared.cv);
         loop {
             let mut guard = inner.lock().unwrap();
-            // Wait until there is work or we are done.
-            while guard.locked && guard.queue.is_empty() && !guard.finished {
+            // Wait until there is work or we are done, without holding the
+            // delegator: a caller that finds it free runs inline.  (Waiting
+            // while `locked`, as before, kept it locked for good, so every
+            // call was handed to this thread.)
+            guard.locked = false;
+            while guard.queue.is_empty() && !guard.finished && !guard.consumer.is_active() {
                 guard = cv.wait(guard).unwrap();
             }
             if guard.finished && guard.queue.is_empty() {
@@ -500,7 +504,7 @@ impl<C: DelegatorConsumer<OsSystem>> Delegator<OsSystem, C> for OsDelegator<C> {
         let shared = std::sync::Arc::new(OsDelegatorShared {
             inner: std::sync::Mutex::new(OsDelegatorInner {
                 consumer,
-                locked:   true,
+                locked:   false,
                 queue:    std::collections::VecDeque::new(),
                 finished: false,
             }),
@@ -534,7 +538,10 @@ impl<C: DelegatorConsumer<OsSystem>> Delegator<OsSystem, C> for OsDelegator<C> {
             guard.locked = true;
             let (done, wake_sth) = imm(&mut guard.consumer);
             if let Some(w) = wake_sth { w.notify(); }
-            if !done { guard.locked = false; }
+            // Released whether or not `imm` finished: unfinished work is
+            // the consumer's (`is_active`/`progress`) to drive.
+            let _ = done;
+            guard.locked = false;
             cv.notify_all();
         } else {
             // Delegate: queue the work and park on the slot `del` names.

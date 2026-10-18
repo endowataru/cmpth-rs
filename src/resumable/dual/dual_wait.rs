@@ -203,7 +203,7 @@ where
         let Some(wk) = S::Worker::current() else { return Self::wake_raw(self.state.take(Ordering::AcqRel)) };
         assert_on_real_ult::<S>(wk);
         match self.state.take(Ordering::AcqRel) {
-            Some((tag, raw)) if tag == 0 => {
+            Some((0, raw)) => {
                 // SAFETY: `tag != ASYNC_TAG` means a `SuspendedTaskToken`
                 // was published by `wait_with`/`wait_with_cond`.
                 let c: SuspendedTaskToken<S::Desc> = unsafe { raw.into_typed() };
@@ -224,7 +224,7 @@ where
         };
         assert_on_real_ult::<S>(wk);
         match next.state.take(Ordering::AcqRel) {
-            Some((tag, raw)) if tag == 0 => {
+            Some((0, raw)) => {
                 // SAFETY: same provenance as `enter` above.
                 let c: SuspendedTaskToken<S::Desc> = unsafe { raw.into_typed() };
                 let slot = &self.state as *const AtomicTaggedSlot<2>;
