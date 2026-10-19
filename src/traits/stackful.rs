@@ -17,7 +17,7 @@ pub use crate::traits::component::wait::Resumable;
 pub use crate::traits::system::TaskSystem;
 pub use crate::traits::system::block_on::BlockOnSystem;
 pub use crate::traits::system::bundle::StackfulTaskSystem;
-pub use crate::traits::system::delegation::{Delegator, DelegationSystem};
+pub use crate::traits::system::delegation::{Delegator, DelegatorRun, DelegationSystem};
 pub use crate::traits::system::nesting::NestableSystem;
 pub use crate::traits::system::scoped::ScopedStackfulTaskSystem;
 pub use crate::traits::system::stackful::{
