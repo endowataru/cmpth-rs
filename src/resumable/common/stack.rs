@@ -69,6 +69,8 @@ pub enum StackMem {
     /// Guard-paged heap allocation — `ptr`/`size` are the usable region,
     /// same layout as [`HeapStackMem`].
     Heap { ptr: *mut u8, size: usize },
+    /// Plain heap allocation from [`MallocFrame`].
+    Malloc { ptr: *mut u8, size: usize },
 }
 
 unsafe impl Send for StackMem {}
@@ -78,7 +80,7 @@ impl StackMem {
     pub(crate) fn top(&self) -> *mut u8 {
         match *self {
             StackMem::None => std::ptr::null_mut(),
-            StackMem::Heap { ptr, size } => unsafe { ptr.add(size) },
+            StackMem::Heap { ptr, size } | StackMem::Malloc { ptr, size } => unsafe { ptr.add(size) },
         }
     }
 }
@@ -88,6 +90,7 @@ impl Drop for StackMem {
         match *self {
             StackMem::None => {}
             StackMem::Heap { ptr, size } => unsafe { dealloc_heap_stack(ptr, size) },
+            StackMem::Malloc { ptr, size } => unsafe { std::alloc::dealloc(ptr, MallocFrame::layout(size)) },
         }
     }
 }
@@ -166,6 +169,57 @@ impl StackAlloc for HeapStack {
         };
         assert_eq!(ret, 0, "cmpth: mprotect(commit) failed");
         HeapStackMem { ptr: usable_ptr, size: usable }
+    }
+}
+
+/// Storage from the global allocator, with no guard page and no rounding
+/// to pages: for `spawn_async` frames, which hold a future's state machine
+/// (written in bounds by construction, so a guard page protects nothing)
+/// rather than a stack that grows.  With [`HeapStack`] each pooled frame
+/// costs a page of memory however small it is.
+pub struct MallocFrame;
+
+impl MallocFrame {
+    fn layout(size: usize) -> std::alloc::Layout {
+        std::alloc::Layout::from_size_align(size.max(16), 64).unwrap()
+    }
+}
+
+/// Memory from [`MallocFrame`].
+pub struct MallocFrameMem {
+    ptr: *mut u8,
+    size: usize,
+}
+
+unsafe impl Send for MallocFrameMem {}
+
+impl UltStackMemory for MallocFrameMem {
+    fn stack_top(&self) -> *mut u8 {
+        unsafe { self.ptr.add(self.size) }
+    }
+}
+
+impl Drop for MallocFrameMem {
+    fn drop(&mut self) {
+        unsafe { std::alloc::dealloc(self.ptr, MallocFrame::layout(self.size)) };
+    }
+}
+
+impl From<MallocFrameMem> for StackMem {
+    fn from(m: MallocFrameMem) -> Self {
+        let s = StackMem::Malloc { ptr: m.ptr, size: m.size };
+        std::mem::forget(m);
+        s
+    }
+}
+
+impl StackAlloc for MallocFrame {
+    type Mem = MallocFrameMem;
+    fn alloc_stack(size: usize) -> MallocFrameMem {
+        let size = size.max(16);
+        let ptr = unsafe { std::alloc::alloc(Self::layout(size)) };
+        assert!(!ptr.is_null(), "cmpth: frame allocation failed");
+        MallocFrameMem { ptr, size }
     }
 }
 
