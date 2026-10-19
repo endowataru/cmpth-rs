@@ -1,7 +1,10 @@
 use std::cell::Cell;
+use std::mem::ManuallyDrop;
+use std::pin::Pin;
+use std::task::Poll;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::traits::{Delegator as DelegatorTrait, DelegatorConsumer, Resumable, StackfulResumable};
+use crate::traits::{CallSlot, Delegator as DelegatorTrait, DelegatorConsumer, Resumable, StackfulResumable};
 use crate::resumable::stackful::desc::StackfulTaskDesc;
 use crate::resumable::common::system::PoolSystem;
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
@@ -13,14 +16,20 @@ use crate::resumable::stackful::thread::spawn;
 // DelegatorNode — content of each queue node
 // ---------------------------------------------------------------------------
 
+type Req<S, C> = ManuallyDrop<<C as DelegatorConsumer<S>>::Request<'static>>;
+
+/// A queue node: a delegated call (its request and slot, both in the
+/// caller's frame), or a caller waiting for the lock itself (asleep on
+/// `sth`; `req` is null).
 pub struct DelegatorNode<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     pub(super) sth:  <S as SuspendableSystem>::SuspendedThread,
-    pub(super) work: C::Work,
+    pub(super) req:  *mut Req<S, C>,
+    pub(super) slot: *const CallSlot<S, C::Response>,
 }
 
 impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>> Default for DelegatorNode<S, C> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     fn default() -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc {
-        DelegatorNode { sth: Default::default(), work: Default::default() }
+        DelegatorNode { sth: Default::default(), req: std::ptr::null_mut(), slot: std::ptr::null() }
     }
 }
 
@@ -55,7 +64,11 @@ pub trait SyncQueue<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + S
 // Delegator<S, C, Q>
 // ---------------------------------------------------------------------------
 
-pub struct Delegator<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+pub struct Delegator<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>>
+where
+    <S as PoolSystem>::Desc: StackfulTaskDesc,
+    <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>,
+{
     queue:        Q,
     consumer:     std::cell::UnsafeCell<C>,
     consumer_sth: <S as SuspendableSystem>::SuspendedThread,
@@ -68,12 +81,12 @@ pub struct Delegator<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + 
 }
 
 unsafe impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Send
-    for Delegator<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc {}
+    for Delegator<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {}
 unsafe impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Sync
-    for Delegator<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc {}
+    for Delegator<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {}
 
 impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C> + Default>
-    Delegator<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc
+    Delegator<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>
 {
     pub fn new(consumer: C) -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc {
         Delegator {
@@ -92,7 +105,7 @@ impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSyste
 // Core algorithm (shared between MCS and ring-buffer variants)
 // ---------------------------------------------------------------------------
 
-impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Delegator<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Delegator<S, C, Q> where <S as PoolSystem>::Desc: StackfulTaskDesc, <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S> {
     fn consumer(&self) -> &mut C where <S as PoolSystem>::Desc: StackfulTaskDesc {
         unsafe { &mut *self.consumer.get() }
     }
@@ -172,40 +185,52 @@ impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSyste
         });
     }
 
-    // -- lock_or_delegate ----------------------------------------------------
+    // -- call --------------------------------------------------------------
 
-    /// Returns `true` if the caller acquired the lock (should call `unlock` after).
-    /// Returns `false` if the work was delegated; the caller is suspended and
-    /// will be woken by the consumer.
-    fn lock_or_delegate<Del>(&self, del: Del) -> bool
+    #[inline]
+    fn call_impl(&self, req: C::Request<'_>) -> C::Response
     where
-        Del: FnOnce(&mut C::Work) -> &<S as SuspendableSystem>::SuspendedThread,
         <S as PoolSystem>::Desc: StackfulTaskDesc,
         <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>,
+        S::Worker: crate::resumable::stackful::worker::ContextSwitcher<S>
+            + crate::resumable::common::worker::DescWorkerOps<S>,
     {
-        let (is_locked, _prev, cur) = self.queue.start_lock();
+        self.ensure_consumer_started();
+        let slot = CallSlot::<S, C::Response>::default();
+        let mut req = ManuallyDrop::new(req);
+        let (is_locked, prev, cur) = self.queue.start_lock();
         if is_locked {
-            return true;
-        }
-
-        // We are enqueued at `cur`.  Fill in the work and get back the sth to
-        // park on.  The actual linking (set_next) must happen INSIDE the wait
-        // callback — after the continuation is saved — so the holder can only
-        // call notify after our sth is ready.
-        let work_ptr: *mut C::Work = unsafe { &mut (*cur).work };
-        let sth_ref: &<S as SuspendableSystem>::SuspendedThread = del(unsafe { &mut *work_ptr });
-
-        // Park.  The callback links us into the predecessor's next pointer.
-        let queue_ptr = &self.queue as *const Q;
-        let prev_ptr = _prev;
-        let cur_ptr = cur;
-        sth_ref.wait_with(move || {
-            if !prev_ptr.is_null() {
-                unsafe { (*queue_ptr).set_next(prev_ptr, cur_ptr) };
+            let req = unsafe { ManuallyDrop::take(&mut req) };
+            let mut cx = slot.cx();
+            match self.consumer().execute(req, &mut cx) {
+                Poll::Ready(v) => {
+                    self.unlock();
+                    return v;
+                }
+                Poll::Pending => {
+                    debug_assert!(cx.is_deferred(), "Delegator: pending without defer");
+                    self.unlock_and_wait(slot.sth());
+                }
             }
-        });
-
-        false
+        } else {
+            // Enqueued at `cur`: point it at our request and slot, then
+            // sleep.  The link (set_next) happens inside the wait callback,
+            // once our continuation is saved, so the consumer can only wake
+            // us after that.
+            // SAFETY: only the lifetime is erased; the request is moved out
+            // before we are woken.
+            unsafe {
+                (*cur).req = (&mut req as *mut ManuallyDrop<C::Request<'_>>).cast();
+                (*cur).slot = &slot;
+            }
+            let queue_ptr = &self.queue as *const Q;
+            slot.sth().wait_with(move || {
+                if !prev.is_null() {
+                    unsafe { (*queue_ptr).set_next(prev, cur) };
+                }
+            });
+        }
+        unsafe { slot.take() }
     }
 
     // -- unlock --------------------------------------------------------------
@@ -227,8 +252,10 @@ impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSyste
             self.is_executed.set(false);
             if unsafe { (*next).sth.is_set() } {
                 // Next waiter is trying to lock — wake it directly.
+                // (Not `consumer_sth.swap`: that would park this caller in
+                // the consumer's slot.)
                 if !is_active {
-                    self.consumer_sth.swap(unsafe { &(*next).sth });
+                    unsafe { (*next).sth.enter() };
                 } else {
                     unsafe { (*next).sth.notify() };
                 }
@@ -243,32 +270,41 @@ impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSyste
         self.consumer_sth.notify();
     }
 
+    /// Release the lock and sleep on `wait_sth` (the caller's deferred
+    /// call), as the C++ reference's `unlock_and_wait` does: while the
+    /// consumer still has deferred calls to poll, hand the lock to it.
     fn unlock_and_wait(&self, wait_sth: &<S as SuspendableSystem>::SuspendedThread)
     where
         <S as PoolSystem>::Desc: StackfulTaskDesc,
         <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>,
     {
         self.is_executed.set(true);
+        let is_active = self.consumer().is_active();
         let head = self.queue.get_head();
+
+        if !is_active {
+            // Sleep, then release; cancelled if a successor appeared.
+            let unlocked = Cell::new(true);
+            let queue_ptr = &self.queue as *const Q;
+            wait_sth.wait_with_cond(|| {
+                let ok = unsafe { (*queue_ptr).try_unlock(head) };
+                unlocked.set(ok);
+                ok
+            });
+            if unlocked.get() {
+                return;
+            }
+        }
 
         if let Some(next) = self.queue.try_follow_head(head) {
             self.is_executed.set(false);
             if unsafe { (*next).sth.is_set() } {
                 wait_sth.swap(unsafe { &(*next).sth });
-            } else {
-                wait_sth.swap(&self.consumer_sth);
+                return;
             }
-            return;
         }
-
-        // Queue empty or successor not yet visible: try to unlock atomically.
-        let queue_ptr = &self.queue as *const Q;
-        let head_ptr = head;
-        wait_sth.wait_with(move || {
-            // If the unlock fails, a successor appeared; consumer_sth is
-            // notified in the unlock path, so nothing more to do here.
-            unsafe { (*queue_ptr).try_unlock(head_ptr) };
-        });
+        // Delegated work queued, or deferred calls to poll: the consumer.
+        wait_sth.swap(&self.consumer_sth);
     }
 
     // -- consume -------------------------------------------------------------
@@ -293,23 +329,22 @@ impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSyste
         }
 
         let do_progress = con.is_active();
-        let mut awake_sth: Option<<S as SuspendableSystem>::SuspendedThread> = None;
+        let mut awake_sth: Option<crate::traits::Ready<S>> = None;
 
         if !is_executed {
-            if !unsafe { (*head).sth.is_set() } {
-                // Delegated work — execute it.
-                let (done, sth_opt) =
-                    con.execute(unsafe { &mut (*head).work });
-                is_executed = done;
-                awake_sth = sth_opt;
-
-                if is_executed {
-                    self.is_executed.set(true);
-                    if let Some(sth) = awake_sth {
-                        sth.notify();
-                    }
-                    return;
+            if !unsafe { (*head).req.is_null() } {
+                // A delegated call — run it.  Deferred or not, it has been
+                // executed: a deferred one is completed later.
+                let req = unsafe { ManuallyDrop::take(&mut *(*head).req) };
+                let slot = unsafe { &*(*head).slot };
+                let mut cx = slot.cx();
+                let r = con.execute(req, &mut cx);
+                self.is_executed.set(true);
+                if let Poll::Ready(v) = r {
+                    // SAFETY: queue nodes are not in the callers' frames.
+                    unsafe { slot.finish(v).notify() };
                 }
+                return;
             } else {
                 // Lock-holder path: a ULT wants to acquire the lock.
                 self.consumer_sth.swap(unsafe { &(*head).sth });
@@ -320,7 +355,7 @@ impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSyste
         if do_progress {
             if let Some(sth) = con.progress() {
                 if let Some(prev) = awake_sth {
-                    prev.notify();
+                    unsafe { prev.notify() };
                 }
                 awake_sth = Some(sth);
             }
@@ -340,6 +375,13 @@ impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSyste
             // conditional suspend for exactly this reason. On cancel, the
             // outer `consumer_loop`'s `while !finished { consume() }` simply
             // re-enters and re-derives state from scratch.
+            //
+            // A caller completed by `progress` is woken first: once
+            // suspended, nothing would wake it.  (The C++ reference
+            // switches to it directly, `swap_with`.)
+            if let Some(sth) = awake_sth.take() {
+                unsafe { sth.notify() };
+            }
             let queue_ptr = &self.queue as *const Q;
             let head_ptr = head;
             self.consumer_sth.wait_with_cond(move || unsafe {
@@ -348,7 +390,7 @@ impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSyste
         }
 
         if let Some(sth) = awake_sth {
-            sth.notify();
+            unsafe { sth.notify() };
         }
     }
 
@@ -377,28 +419,49 @@ where
     S::Worker: crate::resumable::stackful::worker::ContextSwitcher<S>
         + crate::resumable::common::worker::DescWorkerOps<S>,
 {
-    fn start(consumer: C) -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc {
-        let del = Self::new(consumer);
+    fn start(consumer: C) -> Pin<Box<Self>> {
+        let del = Box::pin(Self::new(consumer));
 
         // Acquire the lock to initialise: the consumer ULT starts holding it.
         let (is_locked, _, _) = del.queue.start_lock();
         assert!(is_locked, "new queue must be empty");
 
-        // The consumer ULT itself is spawned lazily, on first
-        // `execute_or_delegate` call — see `ensure_consumer_started` for why
-        // spawning it here (before the caller has settled `del` at its final
-        // address, e.g. inside an `Arc`) is unsound.
+        // The consumer ULT itself is spawned on the first call (see
+        // `ensure_consumer_started`), so that a delegator can be made
+        // outside the worker pool.
         del
     }
 
-    fn stop(self) where <S as PoolSystem>::Desc: StackfulTaskDesc {
+    #[inline]
+    fn call(&self, req: C::Request<'_>) -> C::Response {
+        self.call_impl(req)
+    }
+
+    fn with_lock<R>(&self, f: impl FnOnce(&mut C) -> R) -> R {
+        self.ensure_consumer_started();
+        self.lock_wait();
+        let r = f(self.consumer());
+        self.unlock();
+        r
+    }
+}
+
+impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, Q: SyncQueue<S, C>> Drop
+    for Delegator<S, C, Q>
+where
+    <S as PoolSystem>::Desc: StackfulTaskDesc,
+    <S as SuspendableSystem>::SuspendedThread: StackfulResumable<S>,
+{
+    fn drop(&mut self) {
+        if !self.consumer_started.load(Ordering::Acquire) {
+            return;
+        }
         // Become the position holder first (waiting our turn if someone
         // else currently holds it) — matching the C++ reference's
         // `stop_consumer()`, which does `lock(); ...; unlock();`, not a bare
         // `unlock()`. Without this, `unlock()`'s `get_head()` can read a
-        // null `head` (whenever the queue is genuinely idle at the moment
-        // `stop()` happens to be called), since nothing established this
-        // caller as the current holder.
+        // null `head` (whenever the queue is genuinely idle), since nothing
+        // established this caller as the current holder.
         self.lock_wait();
         self.finished.store(true, Ordering::Release);
         let is_active = self.consumer().is_active();
@@ -406,25 +469,8 @@ where
         if !is_active {
             self.consumer_sth.notify();
         }
-        if let Some(th) = unsafe { &mut *self.consumer_th.get() }.take() {
+        if let Some(th) = self.consumer_th.get_mut().take() {
             th.join().ok();
-        }
-    }
-
-    fn execute_or_delegate<Imm, Del>(&self, imm: Imm, del: Del)
-    where
-        Imm: FnOnce(&mut C) -> (bool, Option<<S as SuspendableSystem>::SuspendedThread>),
-        Del: FnOnce(&mut C::Work) -> &<S as SuspendableSystem>::SuspendedThread, <S as PoolSystem>::Desc: StackfulTaskDesc
-    {
-        self.ensure_consumer_started();
-        let is_locked = self.lock_or_delegate(del);
-        if is_locked {
-            let (is_done, wait_sth) = imm(self.consumer());
-            self.is_executed.set(is_done);
-            match wait_sth {
-                Some(ref sth) => self.unlock_and_wait(sth),
-                None => self.unlock(),
-            }
         }
     }
 }

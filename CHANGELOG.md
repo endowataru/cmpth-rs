@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/),
 but this crate is **experimental**: the API may change between releases
 without a deprecation cycle (see README "Status").
 
+## [Unreleased]
+
+### Breaking
+
+- **Delegator interface redesigned.** A consumer now declares
+  `Request<'a>`/`Response` and runs a request with
+  `execute(req, cx) -> Poll<Response>`: `Poll::Ready` finishes the call,
+  `Poll::Pending` keeps it, with the `Completion` taken by `cx.defer()`;
+  a completed call comes back to the delegator from `progress` as a
+  `Ready`.  `progress`/`is_active` have defaults.  Callers use
+  `Delegator::call(req)` (returns the response; requests may borrow from
+  the caller's frame), `with_lock` and, for closures, `FnConsumer` with
+  `DelegatorRun::run`.  `start` returns `Pin<Box<Self>>` and dropping the
+  delegator stops it (no `stop`).  The `imm`/`del` closure pair,
+  `DelegatorConsumer::Work` and the mpsc-style `delegator()`/`Producer`
+  are removed.
+
+### Added
+
+- `CombiningDelegator`: no consumer thread; the lock holder runs the
+  queued requests.
+
+### Fixed
+
+- `McsDelegator`: releasing the lock to a caller waiting for it parked the
+  releasing thread in the consumer's slot; a caller whose call was kept
+  could be left asleep with the lock held (`unlock_and_wait` now follows
+  the C++ reference); a caller completed by `progress` just before the
+  consumer went idle was never woken.
+- `RingBufDelegator`: the lock was never released and the holder never
+  found its successor.
+- `OsDelegator`: every call runs inline under the mutex (it used to wake
+  all waiters on each call).
+
 ## [0.4.0] - 2026-08-11
 
 Large internal trait-ladder refactor (52 commits since 0.3.2). The

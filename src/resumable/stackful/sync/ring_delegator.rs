@@ -116,25 +116,28 @@ where
     }
 
     fn try_unlock(&self, _head: *mut DelegatorNode<S, C>) -> bool where <S as PoolSystem>::Desc: StackfulTaskDesc {
+        // The holder occupies slot `head`; with no one behind it the tail
+        // is `head + 1`.  Releasing gives the slot back: the next caller
+        // claims `head` and finds the queue empty.
         let head = self.head.load(Ordering::Relaxed);
-        let tail = self.tail.load(Ordering::Acquire);
-        if head == tail {
-            return true; // empty, effectively unlocked
-        }
-        false
+        self.tail
+            .compare_exchange(head.wrapping_add(1), head, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
     }
 
     fn try_follow_head(
         &self,
         head: *mut DelegatorNode<S, C>,
     ) -> Option<*mut DelegatorNode<S, C>> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+        // The successor is the slot after the holder's, once its caller has
+        // linked (marked it ready).
         let head_idx = self.head.load(Ordering::Relaxed);
-        let slot = &self.nodes[Self::mask(head_idx)];
+        let next_idx = head_idx.wrapping_add(1);
+        let slot = &self.nodes[Self::mask(next_idx)];
         if slot.ready.load(Ordering::Acquire) {
             slot.ready.store(false, Ordering::Relaxed);
-            // Reset node to default for reuse.
+            // Reset the old head for reuse.
             unsafe { *head = DelegatorNode::default() };
-            let next_idx = head_idx.wrapping_add(1);
             self.head.store(next_idx, Ordering::Release);
             return Some(self.slot_node(next_idx));
         }

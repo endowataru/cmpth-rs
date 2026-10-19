@@ -30,7 +30,7 @@ pub mod interchange;
 pub mod resumable;
 pub mod scoped;
 
-pub use traits::{BarrierWaitResult, BlockOnSystem, Context, ContextPolicy, DelegationSystem, DelegatorConsumer, Delegator, DualBarrier, DualMutex, HandoffTaskDesc, JoinHandleLike, NestableSystem, Poller, Resumable, ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, StackfulBuilder, StackfulInitSystem, StackfulResumable, StackfulSyncSystem, StacklessBuilder, StacklessInitSystem, StacklessSyncSystem, SuspendableSystem, TaskDesc, TaskExitSink, TaskSystem, TlsAnchor, TlsSlot, SpawnableStackfulTaskSystem, Transfer, WakerTaskDesc};
+pub use traits::{BarrierWaitResult, BlockOnSystem, Context, ContextPolicy, CallCx, CallSlot, Completion, DelegationSystem, DelegatorConsumer, Delegator, DelegatorRun, DualBarrier, FnConsumer, Ready, DualMutex, HandoffTaskDesc, JoinHandleLike, NestableSystem, Poller, Resumable, ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, StackfulBuilder, StackfulInitSystem, StackfulResumable, StackfulSyncSystem, StacklessBuilder, StacklessInitSystem, StacklessSyncSystem, SuspendableSystem, TaskDesc, TaskExitSink, TaskSystem, TlsAnchor, TlsSlot, SpawnableStackfulTaskSystem, Transfer, WakerTaskDesc};
 pub use scoped::{DefaultScopedMarker, ScopedIdentity, ScopedSystem, ScopedTaskSystem};
 pub use os::{available_parallelism, OsBarrier, OsCondvar, OsMutex, OsPoller, OsSystem, OsTls};
 pub use resumable::stackful::context::{LeanFrameContext, NativeContext};
@@ -51,7 +51,6 @@ pub use resumable::dual::dual_wait::DualResumable;
 pub use resumable::stackful::suspended::{BasicStackfulOnlyResumable, StackfulOnlyResumableCore};
 pub use resumable::stackful::sync::{Barrier as UltBarrier, CombiningDelegator, McsDelegator, McsMutex, McsMutexGuard, McsCondvar, BarrierCore, MutexCore};
 pub use resumable::common::sync::{DualBarrier as UltDualBarrier, DualMutex as UltDualMutex, DualMutexGuard as UltDualMutexGuard};
-pub use resumable::stackful::sync::{delegator, Producer as DelegatorProducer};
 pub use resumable::common::system::{PoolSystem, SchedulerSystem, WorkerSystem};
 pub use resumable::stackful::system::{StackfulSchedulerSystem, StackfulTaskSystem, StackfulWorkerSystem, UltIdentity};
 pub use resumable::stackless::system::{StacklessSchedulerSystem, StacklessTaskSystem, UltAsyncIdentity, UltAsyncSystem};
