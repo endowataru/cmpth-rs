@@ -37,11 +37,10 @@ impl<S: WorkerSystem> PoolCore<S> {
     /// [`WorkerCore::bind`] on each once the returned value has its final
     /// address.
     pub(crate) fn new<'a>(cores: impl Iterator<Item = &'a WorkerCore<S>>) -> Self {
-        PoolCore {
-            stealers: cores.map(|c| c.deque.stealer()).collect(),
-            finished: AtomicBool::new(false),
-            idle: S::Idle::default(),
-        }
+        let stealers: Box<[_]> = cores.map(|c| c.deque.stealer()).collect();
+        let idle = S::Idle::default();
+        idle.set_workers(stealers.len());
+        PoolCore { stealers, finished: AtomicBool::new(false), idle }
     }
 
     /// Hook for an external queue to notify this pool's idle policy.

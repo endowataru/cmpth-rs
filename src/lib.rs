@@ -41,7 +41,9 @@ pub use resumable::dual::desc::DualTaskDesc;
 pub use resumable::stackful::desc::{StackfulOnlyTaskDesc, StackfulTaskDesc};
 pub use resumable::stackless::desc::{AsyncTaskDesc, StacklessOnlyTaskDesc};
 pub use resumable::common::external_queue::{ExternalQueue, PollerUltQueue, StealPathQueue};
-pub use resumable::common::idle::{IdlePolicy, ParkIdle, SpinIdle};
+pub use resumable::common::idle::{
+    CondvarWait, FixedCap, FutexWait, GoCap, HalfCap, IdlePolicy, ParkIdle, ParkWait, SearchCap, SearchIdle, SpinIdle,
+};
 pub use resumable::common::lookup::{CurrentLookup, TlsCurrent};
 pub use resumable::stackless::lookup::InlineTlsCurrent;
 pub use resumable::common::pool::{DescPool, ReturnPool, SimplePool};
@@ -178,8 +180,15 @@ dual_task_system!(
 
 dual_task_system!(
     /// [`DefaultDualTaskSystem`] whose idle workers block their OS thread
-    /// ([`ParkIdle`]) instead of spinning.
-    ParkDualTaskSystem, resumable::common::idle::ParkIdle
+    /// instead of spinning: a few search, the others park ([`SearchIdle`]).
+    ParkDualTaskSystem, resumable::common::idle::SearchIdle
+);
+
+dual_task_system!(
+    /// [`ParkDualTaskSystem`] letting half the workers search
+    /// ([`HalfCap`], Tokio's limit): faster to pick up work when
+    /// parallelism is low, at more energy.
+    ParkHalfDualTaskSystem, resumable::common::idle::SearchIdle<resumable::common::idle::HalfCap>
 );
 
 /// A second-level ULT system: runs on top of [`DefaultDualTaskSystem`]'s ULTs.
