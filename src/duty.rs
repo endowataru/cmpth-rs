@@ -172,6 +172,11 @@ static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 static HALF_DUE: AtomicU64 = AtomicU64::new(0);
 /// When the keeper plans to wake up.
 static PLANNED: AtomicU64 = AtomicU64::new(NEVER);
+/// A parked worker keeps the [`DutyPlace::Anywhere`] duties' due times
+/// (see [`park_timeout`]) ...
+static TIMED: AtomicBool = AtomicBool::new(false);
+/// ... and wakes up at this time.
+static TIMED_UNTIL: AtomicU64 = AtomicU64::new(NEVER);
 
 static EPOCH: OnceLock<Instant> = OnceLock::new();
 
@@ -188,6 +193,8 @@ fn replan(i: &Inner) {
     if i.place == DutyPlace::Anywhere {
         HALF_DUE.fetch_min(i.half_due(), Ordering::Relaxed);
     }
+    // A parked worker's deadline only moves when it wakes: the keeper
+    // covers anything earlier.
     if i.due() < PLANNED.load(Ordering::Relaxed) {
         if let Some(k) = KEEPER.get() {
             k.unpark();
@@ -356,16 +363,27 @@ fn keeper() {
         let next = {
             let reg = REG.lock().unwrap();
             let now = now_ns();
-            let mut next = NEVER;
+            // Due times of the duties only the keeper runs, and of the
+            // others, which a timed parked worker may cover.
+            let (mut mine, mut any) = (NEVER, NEVER);
             for d in reg.iter() {
                 let mut due = d.due();
                 if now >= due {
                     run(d, true);
                     due = d.due();
                 }
-                next = next.min(due);
+                match d.place {
+                    DutyPlace::Keeper => mine = mine.min(due),
+                    DutyPlace::Anywhere => any = any.min(due),
+                }
             }
             update_half_due(&reg);
+            let until = TIMED_UNTIL.load(Ordering::Relaxed);
+            if TIMED.load(Ordering::Acquire) && any >= until && until != NEVER {
+                // Covered: look again only if the worker fails to renew.
+                any = until.saturating_add(TIMED_SLACK);
+            }
+            let next = mine.min(any);
             PLANNED.store(next, Ordering::Relaxed);
             next
         };
@@ -403,6 +421,64 @@ fn idle_slow() {
         }
     }
     update_half_due(&reg);
+}
+
+/// How long past a timed worker's wake-up time the keeper still trusts it
+/// (it may have found work, or exited, without saying so yet).
+const TIMED_SLACK: u64 = 1_000_000;
+
+/// Called by a worker about to park, `*timed` telling whether it already
+/// keeps the duties' due times: if no other parked worker does, this one
+/// does (`*timed` becomes true), and must park at most the returned time.
+/// Waking up, it runs the due duties on its way back to sleep (the idle
+/// hook before it parks) and keeps the role; a task they wake runs on it
+/// directly.  It gives the role up ([`idle_done`]) when it finds work.
+/// Meanwhile the keeper sleeps.
+#[inline(never)]
+pub(crate) fn park_timeout(timed: &mut bool) -> Option<Duration> {
+    if ACTIVE.load(Ordering::Relaxed) == 0 {
+        return None;
+    }
+    let reg = REG.try_lock().ok()?;
+    let next = reg.iter().filter(|d| d.place == DutyPlace::Anywhere).map(|d| d.due()).min().unwrap_or(NEVER);
+    drop(reg);
+    if next == NEVER {
+        if *timed {
+            idle_done(timed);
+        }
+        return None;
+    }
+    if !*timed {
+        // Taken, unless its holder stopped renewing it (a worker that
+        // exited holding it never found work to give it up).
+        let until = TIMED_UNTIL.load(Ordering::Relaxed);
+        if TIMED.swap(true, Ordering::AcqRel) && (until == NEVER || now_ns() < until.saturating_add(TIMED_SLACK)) {
+            return None;
+        }
+        *timed = true;
+    } else {
+        TIMED.store(true, Ordering::Release);
+    }
+    TIMED_UNTIL.store(next, Ordering::Relaxed);
+    Some(Duration::from_nanos(next.saturating_sub(now_ns()).max(1000)))
+}
+
+/// A worker that kept the due times found work (see [`park_timeout`]).
+#[cold]
+pub(crate) fn idle_done(timed: &mut bool) {
+    *timed = false;
+    release_timed();
+}
+
+/// A pool shuts down: its workers exit without finding work, so one may
+/// hold the role.  If another pool's worker holds it, it takes it back
+/// when it next renews.
+pub(crate) fn release_timed() {
+    TIMED_UNTIL.store(NEVER, Ordering::Relaxed);
+    TIMED.store(false, Ordering::Release);
+    if let Some(k) = KEEPER.get() {
+        k.unpark();
+    }
 }
 
 // ---------------------------------------------------------------------------
