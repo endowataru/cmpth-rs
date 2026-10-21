@@ -566,6 +566,7 @@ impl<C: SearchCap, W: ParkWait> IdlePolicy for SearchIdle<C, W> {
                         ep.since = Some(now);
                     }
                     ep.spin_ns = if ep.avg_ns < SEARCH_LIMIT_NS { 2 * ep.avg_ns.max(1000) } else { 0 };
+                    ep.spin_ns = ep.spin_ns.max(crate::duty::wait_spin_ns());
                     if self.try_search(ep, now) {
                         return;
                     }
@@ -574,8 +575,12 @@ impl<C: SearchCap, W: ParkWait> IdlePolicy for SearchIdle<C, W> {
                 Some(since) => {
                     ep.park.rounds += 1;
                     if ep.park.rounds & 0xF != 0 || (since.elapsed().as_nanos() as u64) < ep.spin_ns {
-                        if ep.park.rounds & 0x3F == 0 {
+                        if ep.park.rounds & 0x3 == 0 {
+                            // A searcher runs the duties often: one may
+                            // complete what a suspended task waits for.
                             crate::duty::idle_hook();
+                        }
+                        if ep.park.rounds & 0x3F == 0 {
                             yield_now();
                         } else {
                             std::hint::spin_loop();

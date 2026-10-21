@@ -49,6 +49,9 @@ pub const IDLE_POLLS: u32 = 50;
 /// "Never" as a time or a period.
 const NEVER: u64 = u64::MAX;
 
+/// How often an idle worker runs a duty that has waiters.
+const EAGER_NS: u64 = 1000;
+
 /// Where a duty's `poll` may run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DutyPlace {
@@ -94,10 +97,13 @@ impl Inner {
         last.saturating_add(self.effective_period()).min(self.deadline.load(Ordering::Relaxed))
     }
 
-    /// When an idle worker may run it.
+    /// When an idle worker may run it: half due, or with waiters, almost
+    /// at once (it has nothing better to do, and a waiter's completion
+    /// found late delays its task by as much).
     fn half_due(&self) -> u64 {
         let last = self.last.load(Ordering::Relaxed);
-        last.saturating_add(self.effective_period() / 2).min(self.deadline.load(Ordering::Relaxed))
+        let gap = if self.waiters.load(Ordering::Relaxed) != 0 { EAGER_NS } else { self.effective_period() / 2 };
+        last.saturating_add(gap).min(self.deadline.load(Ordering::Relaxed))
     }
 }
 
@@ -126,6 +132,7 @@ pub struct DutyWaiter(Arc<Inner>);
 
 impl DutyWaiter {
     fn new(i: &Arc<Inner>) -> DutyWaiter {
+        WAITERS.fetch_add(1, Ordering::Relaxed);
         if i.waiters.fetch_add(1, Ordering::Relaxed) == 0 {
             replan(i);
         }
@@ -136,6 +143,7 @@ impl DutyWaiter {
 impl Drop for DutyWaiter {
     fn drop(&mut self) {
         self.0.waiters.fetch_sub(1, Ordering::Relaxed);
+        WAITERS.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -166,6 +174,8 @@ static REG: Mutex<Vec<Arc<Inner>>> = Mutex::new(Vec::new());
 static KEEPER: OnceLock<std::thread::Thread> = OnceLock::new();
 /// Number of registered duties.
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+/// Number of registered waiters, all duties together.
+static WAITERS: AtomicUsize = AtomicUsize::new(0);
 /// Earliest time some duty is half due, as of its last poll (touches only
 /// make it later; a new waiter or deadline lowers it): idle workers take
 /// the lock only after it.
@@ -421,6 +431,24 @@ fn idle_slow() {
         }
     }
     update_half_due(&reg);
+}
+
+/// How long an idle worker searches (running the duties) before it parks
+/// while some task waits on a duty: what it waits for may need this
+/// process's progress, or arrive soon.  `CMPTH_WAIT_SPIN_US`, default 100.
+/// Measured with a transport whose one-sided operations need the target's
+/// progress (4 processes, medians of 7, time / energy): a barrier-bound
+/// loop 0.191 s / 4.24 J spinning, 0.318 / 5.02 parked at once, 0.224 /
+/// 4.08 at 100 us, 0.223 / 4.12 at 500 us; a dynamically scheduled loop
+/// with idle workers 0.091 s / 8.6 J spinning, 0.092 / 4.4, 0.090 / 5.2,
+/// 0.091 / 5.7.
+#[inline(never)]
+pub(crate) fn wait_spin_ns() -> u64 {
+    if WAITERS.load(Ordering::Relaxed) == 0 {
+        return 0;
+    }
+    static NS: OnceLock<u64> = OnceLock::new();
+    *NS.get_or_init(|| std::env::var("CMPTH_WAIT_SPIN_US").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(100) * 1000)
 }
 
 /// How long past a timed worker's wake-up time the keeper still trusts it
