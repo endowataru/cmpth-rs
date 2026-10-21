@@ -14,7 +14,7 @@
 //!
 //! A duty whose `poll` may block (it waits for something, or must not run
 //! on a worker) is registered [`DutyPlace::Keeper`]: only the keeper runs
-//! it.  The keeper runs at background QoS on macOS (see `keeper`).
+//! it.
 //!
 //! Busy workers never check, and neither does a worker between two tasks
 //! (fork-join code hits the idle loop between tasks): the scheduler's paths
@@ -207,16 +207,16 @@ fn update_half_due(duties: &[Arc<Inner>]) {
 }
 
 fn keeper() {
-    // Background QoS by default (`CMPTH_DUTY_QOS=default` keeps the
-    // caller's).  macOS then coalesces the keeper's timers: a 20 us period
-    // becomes polls milliseconds apart (100 ms: 11 polls instead of about
-    // 400).  Measured with a transport's progress as the duty (4 processes,
-    // keeper at 20 us): a barrier-bound loop 0.189 s at background against
-    // 0.218 s at default (0.185 s without the duty), fork-join tasks that
-    // need the peers' progress about equal (0.29 / 0.28 s, 0.74 s without);
-    // a fixed 2 ms period at default did not reproduce that (0.64 s).  A
-    // duty that waits in its poll suffers on an efficiency core.
-    if std::env::var("CMPTH_DUTY_QOS").as_deref() != Ok("default") {
+    // `CMPTH_DUTY_QOS=background` runs the keeper at background QoS.
+    // macOS then coalesces its timers: a 20 us period becomes polls
+    // milliseconds apart (100 ms: 11 polls instead of about 400), so the
+    // period no longer means what it says.  Measured with a transport's
+    // progress as the duty (4 processes, medians of 7): fork-join tasks that
+    // need the peers' progress 0.64 s without the duty, 0.28 / 0.29 / 0.43 /
+    // 0.72 s at 20 / 100 / 200 / 500 us, 0.32 s at background and 20 us; a
+    // barrier-bound loop 0.183 s without, 0.210 / 0.205 / 0.195 s at 20 /
+    // 100 / 500 us, 0.192 s at background.
+    if std::env::var("CMPTH_DUTY_QOS").as_deref() == Ok("background") {
         sys::background();
     }
     loop {
