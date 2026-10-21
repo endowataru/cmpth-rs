@@ -100,4 +100,15 @@ fn duties() {
     });
     let e = t0.elapsed();
     assert!(e < Duration::from_millis(60), "64 sleeps of 2 ms took {e:?}");
+
+    // All workers parked, one task waiting: a parked worker, not the keeper,
+    // keeps the duty's due times.
+    let d = Arc::new(Duty::on_demand(Duration::from_micros(200), DutyPlace::Anywhere, || false));
+    let d2 = Arc::clone(&d);
+    ParkDualTaskSystem::builder().workers(2).run(move || {
+        let _w = d2.waiter();
+        ParkDualTaskSystem::block_on(cmpth::duty::sleep(Duration::from_millis(50)));
+    });
+    let st = d.stats();
+    assert!(st.worker_polls > 50 && st.keeper_polls * 4 < st.worker_polls, "{st:?}");
 }

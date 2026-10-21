@@ -13,7 +13,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering, fence};
 use std::sync::{Condvar, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Idle/wakeup protocol of one worker pool. One value is shared by all
 /// workers of a pool (it lives in `PoolCore`).
@@ -137,6 +137,9 @@ pub trait ParkWait: Default + Send + Sync + 'static {
     /// returns allowed: the caller re-checks).
     fn wait(&self, epoch: &AtomicU32, seen: u32, finished: &AtomicBool);
 
+    /// [`wait`](Self::wait), returning after `timeout` at the latest.
+    fn wait_timeout(&self, epoch: &AtomicU32, seen: u32, finished: &AtomicBool, timeout: Duration);
+
     /// Called after `epoch` was bumped: wake one waiter.
     fn wake_one(&self, epoch: &AtomicU32);
 
@@ -154,6 +157,12 @@ impl ParkWait for FutexWait {
     fn wait(&self, epoch: &AtomicU32, seen: u32, finished: &AtomicBool) {
         if epoch.load(Ordering::SeqCst) == seen && !finished.load(Ordering::Acquire) {
             futex::wait(epoch, seen);
+        }
+    }
+
+    fn wait_timeout(&self, epoch: &AtomicU32, seen: u32, finished: &AtomicBool, timeout: Duration) {
+        if epoch.load(Ordering::SeqCst) == seen && !finished.load(Ordering::Acquire) {
+            futex::wait_timeout(epoch, seen, timeout);
         }
     }
 
@@ -183,6 +192,13 @@ impl ParkWait for CondvarWait {
         }
     }
 
+    fn wait_timeout(&self, epoch: &AtomicU32, seen: u32, finished: &AtomicBool, timeout: Duration) {
+        let g = self.lock.lock().unwrap();
+        if epoch.load(Ordering::SeqCst) == seen && !finished.load(Ordering::Acquire) {
+            drop(self.cv.wait_timeout(g, timeout).unwrap());
+        }
+    }
+
     #[inline(never)]
     fn wake_one(&self, _epoch: &AtomicU32) {
         drop(self.lock.lock().unwrap());
@@ -197,10 +213,19 @@ impl ParkWait for CondvarWait {
 
 mod futex {
     use std::sync::atomic::AtomicU32;
+    use std::time::Duration;
 
     #[cfg(target_os = "macos")]
     unsafe extern "C" {
         fn os_sync_wait_on_address(addr: *mut libc::c_void, value: u64, size: usize, flags: u32) -> i32;
+        fn os_sync_wait_on_address_with_timeout(
+            addr: *mut libc::c_void,
+            value: u64,
+            size: usize,
+            flags: u32,
+            clockid: u32,
+            timeout_ns: u64,
+        ) -> i32;
         fn os_sync_wake_by_address_any(addr: *mut libc::c_void, size: usize, flags: u32) -> i32;
         fn os_sync_wake_by_address_all(addr: *mut libc::c_void, size: usize, flags: u32) -> i32;
     }
@@ -208,6 +233,13 @@ mod futex {
     #[cfg(target_os = "macos")]
     pub(super) fn wait(a: &AtomicU32, seen: u32) {
         unsafe { os_sync_wait_on_address(a.as_ptr() as *mut _, seen as u64, 4, 0) };
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn wait_timeout(a: &AtomicU32, seen: u32, t: Duration) {
+        // OS_CLOCK_MACH_ABSOLUTE_TIME
+        let ns = (t.as_nanos() as u64).max(1);
+        unsafe { os_sync_wait_on_address_with_timeout(a.as_ptr() as *mut _, seen as u64, 4, 0, 32, ns) };
     }
 
     #[cfg(target_os = "macos")]
@@ -235,6 +267,14 @@ mod futex {
     }
 
     #[cfg(target_os = "linux")]
+    pub(super) fn wait_timeout(a: &AtomicU32, seen: u32, t: Duration) {
+        let ts = libc::timespec { tv_sec: t.as_secs() as libc::time_t, tv_nsec: t.subsec_nanos() as libc::c_long };
+        unsafe {
+            libc::syscall(libc::SYS_futex, a.as_ptr(), libc::FUTEX_WAIT | libc::FUTEX_PRIVATE_FLAG, seen, &ts as *const libc::timespec)
+        };
+    }
+
+    #[cfg(target_os = "linux")]
     pub(super) fn wake(a: &AtomicU32, all: bool) {
         let n = if all { i32::MAX } else { 1 };
         unsafe { libc::syscall(libc::SYS_futex, a.as_ptr(), libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG, n) };
@@ -242,6 +282,11 @@ mod futex {
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     pub(super) fn wait(_a: &AtomicU32, _seen: u32) {
+        std::thread::yield_now();
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    pub(super) fn wait_timeout(_a: &AtomicU32, _seen: u32, _t: Duration) {
         std::thread::yield_now();
     }
 
@@ -254,6 +299,9 @@ pub struct ParkEpisode {
     rounds: u32,
     /// `Some(epoch snapshot)` iff this worker is registered in `sleepers`.
     ticket: Option<u32>,
+    /// This worker keeps the duties' due times while parked
+    /// (`duty::park_timeout`).
+    timed: bool,
 }
 
 impl<W: ParkWait> ParkIdle<W> {
@@ -284,8 +332,11 @@ impl<W: ParkWait> IdlePolicy for ParkIdle<W> {
 
     #[inline]
     fn work_found(&self, ep: &mut ParkEpisode) {
-        if ep.ticket.is_some() || ep.rounds != 0 {
+        if ep.ticket.is_some() || ep.rounds != 0 || ep.timed {
             self.unregister(ep);
+            if ep.timed {
+                crate::duty::idle_done(&mut ep.timed);
+            }
         }
     }
 
@@ -312,7 +363,12 @@ impl<W: ParkWait> IdlePolicy for ParkIdle<W> {
                 }
             }
             Some(seen) => {
-                self.wait.wait(&self.epoch, seen, finished);
+                // The one worker that keeps the duties' deadlines while
+                // asleep wakes at the earliest (see `duty::park_timeout`).
+                match crate::duty::park_timeout(&mut ep.timed) {
+                    Some(t) => self.wait.wait_timeout(&self.epoch, seen, finished, t),
+                    None => self.wait.wait(&self.epoch, seen, finished),
+                }
                 self.unregister(ep);
             }
         }
@@ -322,6 +378,7 @@ impl<W: ParkWait> IdlePolicy for ParkIdle<W> {
         fence(Ordering::SeqCst);
         self.epoch.fetch_add(1, Ordering::SeqCst);
         self.wait.wake_all(&self.epoch);
+        crate::duty::release_timed();
     }
 }
 
