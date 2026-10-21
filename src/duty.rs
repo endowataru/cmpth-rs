@@ -246,6 +246,7 @@ fn keeper() {
 /// Idle-policy hook (at its yields): run the duties that are half due.
 /// Never inlined: inlined into `SpinIdle`'s loop, the rarely taken check
 /// alone made a one-worker fork-join fib 4.5 % slower.
+#[inline(never)]
 pub(crate) fn idle_hook() {
     if ACTIVE.load(Ordering::Relaxed) != 0 {
         idle_slow();

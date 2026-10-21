@@ -303,6 +303,9 @@ impl<W: ParkWait> IdlePolicy for ParkIdle<W> {
                     crate::duty::idle_hook();
                     yield_now();
                 } else {
+                    // Last chance before sleeping: once per park, which
+                    // costs a system call anyway.
+                    crate::duty::idle_hook();
                     self.sleepers.fetch_add(1, Ordering::SeqCst);
                     fence(Ordering::SeqCst);
                     ep.ticket = Some(self.epoch.load(Ordering::SeqCst));
@@ -515,6 +518,7 @@ impl<C: SearchCap, W: ParkWait> IdlePolicy for SearchIdle<C, W> {
                     ep.park.rounds += 1;
                     if ep.park.rounds & 0xF != 0 || (since.elapsed().as_nanos() as u64) < ep.spin_ns {
                         if ep.park.rounds & 0x3F == 0 {
+                            crate::duty::idle_hook();
                             yield_now();
                         } else {
                             std::hint::spin_loop();
