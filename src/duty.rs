@@ -439,7 +439,15 @@ pub(crate) fn park_timeout(timed: &mut bool) -> Option<Duration> {
     if ACTIVE.load(Ordering::Relaxed) == 0 {
         return None;
     }
-    let reg = REG.try_lock().ok()?;
+    let Ok(reg) = REG.try_lock() else {
+        // The keeper is busy with the registry: a holder keeps its last
+        // wake-up time rather than sleeping without one.
+        if !*timed {
+            return None;
+        }
+        let until = TIMED_UNTIL.load(Ordering::Relaxed);
+        return Some(Duration::from_nanos(until.saturating_sub(now_ns()).max(1000)));
+    };
     let next = reg.iter().filter(|d| d.place == DutyPlace::Anywhere).map(|d| d.due()).min().unwrap_or(NEVER);
     drop(reg);
     if next == NEVER {
