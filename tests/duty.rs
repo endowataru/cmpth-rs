@@ -10,9 +10,6 @@ use cmpth::duty::{Duty, DutyPlace};
 
 #[test]
 fn duties() {
-    // At background QoS macOS coalesces the keeper's timers to milliseconds.
-    // SAFETY: set before the keeper starts; no other thread reads it.
-    unsafe { std::env::set_var("CMPTH_DUTY_QOS", "default") };
     // Kept by the keeper alone: about one poll per period.
     let n = Arc::new(AtomicU64::new(0));
     let n2 = Arc::clone(&n);
