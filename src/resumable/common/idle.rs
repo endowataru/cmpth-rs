@@ -80,6 +80,7 @@ impl IdlePolicy for SpinIdle {
         if !retry {
             *ep += 1;
             if *ep & 0x3F == 0 {
+                crate::duty::idle_hook();
                 yield_now();
             }
         }
@@ -299,6 +300,7 @@ impl<W: ParkWait> IdlePolicy for ParkIdle<W> {
                 if ep.rounds <= SPIN_ROUNDS {
                     std::hint::spin_loop();
                 } else if ep.rounds <= SPIN_ROUNDS + YIELD_ROUNDS {
+                    crate::duty::idle_hook();
                     yield_now();
                 } else {
                     self.sleepers.fetch_add(1, Ordering::SeqCst);
