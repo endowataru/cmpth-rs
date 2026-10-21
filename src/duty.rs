@@ -1,16 +1,25 @@
-//! Duties: work a process owes to something outside its own tasks, which
-//! must run at least every so often whether or not a task waits for it
-//! (e.g. a transport whose progress engine serves other processes'
-//! requests).
+//! Duties: work that someone must check every so often because nothing
+//! will announce its result.  Three kinds share one mechanism:
 //!
-//! A duty is registered with a period.  It is run, cheapest first, by:
+//! - an obligation: a transport whose progress engine serves other
+//!   processes' requests must run at least every `period`, whether or not a
+//!   task waits for it ([`Duty::new`]);
+//! - waits: tasks suspended until a completion only a poll can detect (a
+//!   transport's requests) register as waiters ([`Duty::waiter`]), and
+//!   while there is one the duty runs every `wait_period`
+//!   ([`Duty::on_demand`] has no obligation at all, only waits);
+//! - deadlines: a duty may ask to run at a given time
+//!   ([`Duty::set_deadline`]); [`sleep`] is built on that.
+//!
+//! A duty is run, cheapest first, by:
 //!
 //! 1. whoever makes the progress anyway, reporting it with
 //!    [`Duty::touch`] (the duty's `poll` does not run then);
-//! 2. an idle worker, once the duty is half due, at the points where its
-//!    idle policy already does something slow (yields its thread);
-//! 3. the keeper, a thread asleep until the earliest deadline, if nobody
-//!    touched or ran the duty within its period.
+//! 2. an idle worker, once the duty is half due (a deadline: once due), at
+//!    the points where its idle policy already does something slow (yields
+//!    its thread, or goes to sleep);
+//! 3. the keeper, a thread asleep until the earliest due time, if nobody
+//!    touched or ran the duty by then.
 //!
 //! A duty whose `poll` may block (it waits for something, or must not run
 //! on a worker) is registered [`DutyPlace::Keeper`]: only the keeper runs
@@ -19,19 +28,26 @@
 //! Busy workers never check, and neither does a worker between two tasks
 //! (fork-join code hits the idle loop between tasks): the scheduler's paths
 //! are unchanged up to the policy's yield, where a process without duties
-//! pays one relaxed load.  A duty's
-//! `poll` returns whether it
-//! did something; after [`IDLE_POLLS`] polls in a row that did nothing, the
+//! pays one relaxed load.  A duty's `poll` returns whether it did
+//! something; after [`IDLE_POLLS`] polls in a row that did nothing, the
 //! period doubles up to the duty's maximum, and a poll that did something or
 //! a touch resets it.  All polls run under one lock, so a dropped [`Duty`]
 //! is never polled again.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 /// Polls in a row that did nothing before a duty's period doubles.
 pub const IDLE_POLLS: u32 = 50;
+
+/// "Never" as a time or a period.
+const NEVER: u64 = u64::MAX;
 
 /// Where a duty's `poll` may run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,13 +64,41 @@ struct Inner {
     place: DutyPlace,
     /// Time (see `now_ns`) of the last poll or touch.
     last: AtomicU64,
-    /// Current period; between `min` and `max`.
+    /// Current obligation period, between `min` and `max`; `NEVER` if none.
     period: AtomicU64,
-    min: u64,
-    max: u64,
+    min: AtomicU64,
+    max: AtomicU64,
+    /// Period while `waiters != 0`.
+    wait_period: AtomicU64,
+    waiters: AtomicUsize,
+    /// Requested time of the next poll; `NEVER` if none.
+    deadline: AtomicU64,
     idle_polls: AtomicU32,
     keeper_polls: AtomicU64,
     worker_polls: AtomicU64,
+}
+
+impl Inner {
+    fn effective_period(&self) -> u64 {
+        let p = self.period.load(Ordering::Relaxed);
+        if self.waiters.load(Ordering::Relaxed) != 0 {
+            p.min(self.wait_period.load(Ordering::Relaxed))
+        } else {
+            p
+        }
+    }
+
+    /// When the keeper must run it.
+    fn due(&self) -> u64 {
+        let last = self.last.load(Ordering::Relaxed);
+        last.saturating_add(self.effective_period()).min(self.deadline.load(Ordering::Relaxed))
+    }
+
+    /// When an idle worker may run it.
+    fn half_due(&self) -> u64 {
+        let last = self.last.load(Ordering::Relaxed);
+        last.saturating_add(self.effective_period() / 2).min(self.deadline.load(Ordering::Relaxed))
+    }
 }
 
 /// A registered duty; dropping it unregisters it.
@@ -69,17 +113,43 @@ impl DutyToucher {
     pub fn touch(&self) {
         touch(&self.0);
     }
+
+    /// See [`Duty::waiter`].
+    pub fn waiter(&self) -> DutyWaiter {
+        DutyWaiter::new(&self.0)
+    }
+}
+
+/// A registered waiter of a duty (see [`Duty::waiter`]); dropping it
+/// unregisters it.
+pub struct DutyWaiter(Arc<Inner>);
+
+impl DutyWaiter {
+    fn new(i: &Arc<Inner>) -> DutyWaiter {
+        if i.waiters.fetch_add(1, Ordering::Relaxed) == 0 {
+            replan(i);
+        }
+        DutyWaiter(Arc::clone(i))
+    }
+}
+
+impl Drop for DutyWaiter {
+    fn drop(&mut self) {
+        self.0.waiters.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 #[inline]
 fn touch(i: &Inner) {
     let now = now_ns();
-    // Store only when it moves the deadline noticeably: touches come from
+    // Store only when it moves the due time noticeably: touches come from
     // every thread that calls into the resource.
-    if now.wrapping_sub(i.last.load(Ordering::Relaxed)) > i.min / 4 {
+    let grain = i.min.load(Ordering::Relaxed).min(i.wait_period.load(Ordering::Relaxed)) / 4;
+    if now.wrapping_sub(i.last.load(Ordering::Relaxed)) > grain {
         i.last.store(now, Ordering::Relaxed);
-        if i.period.load(Ordering::Relaxed) != i.min {
-            i.period.store(i.min, Ordering::Relaxed);
+        let min = i.min.load(Ordering::Relaxed);
+        if i.period.load(Ordering::Relaxed) != min {
+            i.period.store(min, Ordering::Relaxed);
             i.idle_polls.store(0, Ordering::Relaxed);
         }
     }
@@ -92,56 +162,111 @@ pub struct DutyStats {
     pub worker_polls: u64,
 }
 
-struct Registry {
-    duties: Vec<Arc<Inner>>,
-    keeper: Option<std::thread::Thread>,
-}
-
-static REG: Mutex<Registry> = Mutex::new(Registry { duties: Vec::new(), keeper: None });
+static REG: Mutex<Vec<Arc<Inner>>> = Mutex::new(Vec::new());
+static KEEPER: OnceLock<std::thread::Thread> = OnceLock::new();
 /// Number of registered duties.
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 /// Earliest time some duty is half due, as of its last poll (touches only
-/// make it later): idle workers take the lock only after it.
+/// make it later; a new waiter or deadline lowers it): idle workers take
+/// the lock only after it.
 static HALF_DUE: AtomicU64 = AtomicU64::new(0);
+/// When the keeper plans to wake up.
+static PLANNED: AtomicU64 = AtomicU64::new(NEVER);
+
+static EPOCH: OnceLock<Instant> = OnceLock::new();
 
 fn now_ns() -> u64 {
-    static EPOCH: OnceLock<Instant> = OnceLock::new();
     EPOCH.get_or_init(Instant::now).elapsed().as_nanos() as u64
+}
+
+fn ns(d: Duration) -> u64 {
+    d.as_nanos().min(NEVER as u128 - 1) as u64
+}
+
+/// `i` may be due earlier than planned: tell idle workers and the keeper.
+fn replan(i: &Inner) {
+    if i.place == DutyPlace::Anywhere {
+        HALF_DUE.fetch_min(i.half_due(), Ordering::Relaxed);
+    }
+    if i.due() < PLANNED.load(Ordering::Relaxed) {
+        if let Some(k) = KEEPER.get() {
+            k.unpark();
+        }
+    }
 }
 
 impl Duty {
     /// Register `poll`, to run at least every `period` (backing off up to
-    /// `max_period` while it finds nothing to do).
+    /// `max_period` while it finds nothing to do), and every `period` while
+    /// it has waiters.
     pub fn new(
         period: Duration,
         max_period: Duration,
         place: DutyPlace,
         poll: impl Fn() -> bool + Send + Sync + 'static,
     ) -> Duty {
-        let min = (period.as_nanos() as u64).max(1000);
+        let min = ns(period).max(1000);
+        Self::register(min, ns(max_period).max(min), min, place, Box::new(poll))
+    }
+
+    /// Register `poll`, to run only while it has waiters, every
+    /// `wait_period`, or at its deadline.
+    pub fn on_demand(wait_period: Duration, place: DutyPlace, poll: impl Fn() -> bool + Send + Sync + 'static) -> Duty {
+        Self::register(NEVER, NEVER, ns(wait_period).max(1000), place, Box::new(poll))
+    }
+
+    fn register(min: u64, max: u64, wait: u64, place: DutyPlace, poll: Box<dyn Fn() -> bool + Send + Sync>) -> Duty {
         let inner = Arc::new(Inner {
-            poll: Box::new(poll),
+            poll,
             place,
             last: AtomicU64::new(now_ns()),
             period: AtomicU64::new(min),
-            min,
-            max: (max_period.as_nanos() as u64).max(min),
+            min: AtomicU64::new(min),
+            max: AtomicU64::new(max),
+            wait_period: AtomicU64::new(wait),
+            waiters: AtomicUsize::new(0),
+            deadline: AtomicU64::new(NEVER),
             idle_polls: AtomicU32::new(0),
             keeper_polls: AtomicU64::new(0),
             worker_polls: AtomicU64::new(0),
         });
-        let mut reg = REG.lock().unwrap();
-        reg.duties.push(Arc::clone(&inner));
+        REG.lock().unwrap().push(Arc::clone(&inner));
         ACTIVE.fetch_add(1, Ordering::Relaxed);
-        HALF_DUE.store(0, Ordering::Relaxed);
-        match &reg.keeper {
-            Some(t) => t.unpark(),
-            None => {
-                let h = std::thread::Builder::new().name("cmpth-duty-keeper".into()).spawn(keeper).unwrap();
-                reg.keeper = Some(h.thread().clone());
-            }
-        }
+        KEEPER.get_or_init(|| {
+            std::thread::Builder::new().name("cmpth-duty-keeper".into()).spawn(keeper).unwrap().thread().clone()
+        });
+        replan(&inner);
         Duty(inner)
+    }
+
+    /// Change the obligation: at least every `period`, backing off up to
+    /// `max_period`; `None`: only while there are waiters.
+    pub fn set_period(&self, period: Option<(Duration, Duration)>) {
+        let (min, max) = match period {
+            Some((p, m)) => {
+                let min = ns(p).max(1000);
+                (min, ns(m).max(min))
+            }
+            None => (NEVER, NEVER),
+        };
+        let i = &self.0;
+        i.min.store(min, Ordering::Relaxed);
+        i.max.store(max, Ordering::Relaxed);
+        i.period.store(min, Ordering::Relaxed);
+        i.idle_polls.store(0, Ordering::Relaxed);
+        replan(i);
+    }
+
+    /// Change the period while there are waiters.
+    pub fn set_wait_period(&self, period: Duration) {
+        self.0.wait_period.store(ns(period).max(1000), Ordering::Relaxed);
+        replan(&self.0);
+    }
+
+    /// Ask for a poll at `at` (or none); the poll clears it, so a duty that
+    /// wants the next one sets it again from its `poll`.
+    pub fn set_deadline(&self, at: Option<Instant>) {
+        set_deadline(&self.0, at);
     }
 
     /// Report that the progress this duty stands for just happened anyway.
@@ -150,8 +275,16 @@ impl Duty {
         touch(&self.0);
     }
 
-    /// A handle that only touches, for code that makes the progress but
-    /// does not own the duty.  Touching an unregistered duty does nothing.
+    /// Register a waiter: until it is dropped, the duty runs every
+    /// `wait_period`.  Whoever detects the completion wakes the waiting
+    /// task; the duty only makes sure someone looks.
+    pub fn waiter(&self) -> DutyWaiter {
+        DutyWaiter::new(&self.0)
+    }
+
+    /// A handle that only touches and registers waiters, for code that
+    /// makes the progress but does not own the duty.  Touching an
+    /// unregistered duty does nothing.
     pub fn toucher(&self) -> DutyToucher {
         DutyToucher(Arc::clone(&self.0))
     }
@@ -164,29 +297,34 @@ impl Duty {
     }
 }
 
+fn set_deadline(i: &Inner, at: Option<Instant>) {
+    let t = at.map_or(NEVER, |at| ns(at.saturating_duration_since(*EPOCH.get_or_init(Instant::now))));
+    i.deadline.store(t, Ordering::Relaxed);
+    replan(i);
+}
+
 impl Drop for Duty {
     fn drop(&mut self) {
         let mut reg = REG.lock().unwrap();
-        reg.duties.retain(|d| !Arc::ptr_eq(d, &self.0));
+        reg.retain(|d| !Arc::ptr_eq(d, &self.0));
         ACTIVE.fetch_sub(1, Ordering::Relaxed);
-        if let Some(t) = &reg.keeper {
-            t.unpark();
-        }
     }
 }
 
 /// Run `d`'s poll (registry lock held) and update its period.
 fn run(d: &Inner, by_keeper: bool) {
+    d.deadline.store(NEVER, Ordering::Relaxed);
     let did = (d.poll)();
     d.last.store(now_ns(), Ordering::Relaxed);
+    let (min, max) = (d.min.load(Ordering::Relaxed), d.max.load(Ordering::Relaxed));
     if did {
-        d.period.store(d.min, Ordering::Relaxed);
+        d.period.store(min, Ordering::Relaxed);
         d.idle_polls.store(0, Ordering::Relaxed);
-    } else if d.max > d.min {
+    } else if max > min {
         let n = d.idle_polls.load(Ordering::Relaxed) + 1;
         if n >= IDLE_POLLS {
             let p = d.period.load(Ordering::Relaxed);
-            d.period.store((p * 2).min(d.max), Ordering::Relaxed);
+            d.period.store(p.saturating_mul(2).min(max), Ordering::Relaxed);
             d.idle_polls.store(0, Ordering::Relaxed);
         } else {
             d.idle_polls.store(n, Ordering::Relaxed);
@@ -197,12 +335,7 @@ fn run(d: &Inner, by_keeper: bool) {
 }
 
 fn update_half_due(duties: &[Arc<Inner>]) {
-    let h = duties
-        .iter()
-        .filter(|d| d.place == DutyPlace::Anywhere)
-        .map(|d| d.last.load(Ordering::Relaxed) + d.period.load(Ordering::Relaxed) / 2)
-        .min()
-        .unwrap_or(u64::MAX);
+    let h = duties.iter().filter(|d| d.place == DutyPlace::Anywhere).map(|d| d.half_due()).min().unwrap_or(NEVER);
     HALF_DUE.store(h, Ordering::Relaxed);
 }
 
@@ -220,32 +353,36 @@ fn keeper() {
         sys::background();
     }
     loop {
-        let wait = {
-            let mut reg = REG.lock().unwrap();
-            if reg.duties.is_empty() {
-                reg.keeper = None;
-                return;
-            }
+        let next = {
+            let reg = REG.lock().unwrap();
             let now = now_ns();
-            let mut next = u64::MAX;
-            for d in &reg.duties {
-                let mut due = d.last.load(Ordering::Relaxed) + d.period.load(Ordering::Relaxed);
+            let mut next = NEVER;
+            for d in reg.iter() {
+                let mut due = d.due();
                 if now >= due {
                     run(d, true);
-                    due = d.last.load(Ordering::Relaxed) + d.period.load(Ordering::Relaxed);
+                    due = d.due();
                 }
                 next = next.min(due);
             }
-            update_half_due(&reg.duties);
-            next.saturating_sub(now_ns())
+            update_half_due(&reg);
+            PLANNED.store(next, Ordering::Relaxed);
+            next
         };
-        std::thread::park_timeout(Duration::from_nanos(wait.max(1000)));
+        // A replan between the store above and the park unparks us first,
+        // and `park` then returns at once.
+        if next == NEVER {
+            std::thread::park();
+        } else {
+            std::thread::park_timeout(Duration::from_nanos(next.saturating_sub(now_ns()).max(1000)));
+        }
+        PLANNED.store(NEVER, Ordering::Relaxed);
     }
 }
 
-/// Idle-policy hook (at its yields): run the duties that are half due.
-/// Never inlined: inlined into `SpinIdle`'s loop, the rarely taken check
-/// alone made a one-worker fork-join fib 4.5 % slower.
+/// Idle-policy hook (at its yields and before it sleeps): run the duties
+/// that are half due.  Never inlined: inlined into `SpinIdle`'s loop, the
+/// rarely taken check alone made a one-worker fork-join fib 4.5 % slower.
 #[inline(never)]
 pub(crate) fn idle_hook() {
     if ACTIVE.load(Ordering::Relaxed) != 0 {
@@ -260,12 +397,144 @@ fn idle_slow() {
         return;
     }
     let Ok(reg) = REG.try_lock() else { return };
-    for d in &reg.duties {
-        if d.place == DutyPlace::Anywhere && now >= d.last.load(Ordering::Relaxed) + d.period.load(Ordering::Relaxed) / 2 {
+    for d in reg.iter() {
+        if d.place == DutyPlace::Anywhere && now >= d.half_due() {
             run(d, false);
         }
     }
-    update_half_due(&reg.duties);
+    update_half_due(&reg);
+}
+
+// ---------------------------------------------------------------------------
+// Timers
+// ---------------------------------------------------------------------------
+
+struct TimerSlot {
+    fired: AtomicBool,
+    waker: Mutex<Option<Waker>>,
+}
+
+#[derive(Default)]
+struct TimerQueue {
+    heap: BinaryHeap<Reverse<(u64, u64)>>,
+    slots: std::collections::HashMap<u64, Arc<TimerSlot>>,
+}
+
+struct Timers {
+    /// Also guards the timer duty's deadline: both `fire_timers` and a new
+    /// sleeper set it under this lock, so neither overwrites the other's.
+    q: Mutex<TimerQueue>,
+    seq: AtomicU64,
+    duty: OnceLock<Duty>,
+}
+
+static TIMERS: OnceLock<Timers> = OnceLock::new();
+
+fn timers() -> &'static Timers {
+    let t = TIMERS.get_or_init(|| Timers {
+        q: Mutex::new(TimerQueue::default()),
+        seq: AtomicU64::new(0),
+        duty: OnceLock::new(),
+    });
+    t.duty.get_or_init(|| Duty::on_demand(Duration::from_secs(3600), DutyPlace::Anywhere, fire_timers));
+    t
+}
+
+/// The timer duty's poll: wake every sleeper whose time has come.
+fn fire_timers() -> bool {
+    let t = TIMERS.get().unwrap();
+    let now = now_ns();
+    let mut woken = Vec::new();
+    {
+        let mut q = t.q.lock().unwrap();
+        while let Some(&Reverse((at, id))) = q.heap.peek() {
+            if at > now {
+                break;
+            }
+            q.heap.pop();
+            if let Some(s) = q.slots.remove(&id) {
+                s.fired.store(true, Ordering::Release);
+                if let Some(w) = s.waker.lock().unwrap().take() {
+                    woken.push(w);
+                }
+            }
+        }
+        if let Some(&Reverse((at, _))) = q.heap.peek() {
+            // Under the registry lock: set the field directly (`run` has
+            // cleared it); the caller recomputes the plan.
+            t.duty.get().unwrap().0.deadline.fetch_min(at, Ordering::Relaxed);
+        }
+    }
+    let did = !woken.is_empty();
+    for w in woken {
+        w.wake();
+    }
+    did
+}
+
+/// A future that resolves at `at` (see [`sleep`]).
+pub struct Sleep {
+    at: u64,
+    slot: Option<(u64, Arc<TimerSlot>)>,
+}
+
+/// Sleep for `d`: on a ULT (through `block_on`) or in a stackless task,
+/// the task suspends and its worker may run others or park; an idle worker
+/// or the keeper wakes it.  Precision is the keeper's (tens of
+/// microseconds), not better.
+pub fn sleep(d: Duration) -> Sleep {
+    Sleep { at: now_ns().saturating_add(ns(d)), slot: None }
+}
+
+impl Future for Sleep {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let this = self.get_mut();
+        match &this.slot {
+            None => {
+                if now_ns() >= this.at {
+                    return Poll::Ready(());
+                }
+                let t = timers();
+                let id = t.seq.fetch_add(1, Ordering::Relaxed);
+                let slot = Arc::new(TimerSlot { fired: AtomicBool::new(false), waker: Mutex::new(Some(cx.waker().clone())) });
+                let d = &t.duty.get().unwrap().0;
+                let earlier = {
+                    let mut q = t.q.lock().unwrap();
+                    q.slots.insert(id, Arc::clone(&slot));
+                    q.heap.push(Reverse((this.at, id)));
+                    d.deadline.fetch_min(this.at, Ordering::Relaxed) > this.at
+                };
+                if earlier {
+                    replan(d);
+                }
+                this.slot = Some((id, slot));
+                Poll::Pending
+            }
+            Some((_, slot)) => {
+                if slot.fired.load(Ordering::Acquire) {
+                    return Poll::Ready(());
+                }
+                *slot.waker.lock().unwrap() = Some(cx.waker().clone());
+                if slot.fired.load(Ordering::Acquire) {
+                    return Poll::Ready(());
+                }
+                Poll::Pending
+            }
+        }
+    }
+}
+
+impl Drop for Sleep {
+    fn drop(&mut self) {
+        if let Some((id, slot)) = self.slot.take() {
+            // Never wake a task that stopped waiting: its waker may outlive
+            // the task.  The heap entry fires harmlessly later.
+            slot.waker.lock().unwrap().take();
+            TIMERS.get().unwrap().q.lock().unwrap().slots.remove(&id);
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
