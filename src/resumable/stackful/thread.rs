@@ -143,7 +143,8 @@ where
     // this function just did, rather than threading them through as a
     // separate payload.
     let ctx = unsafe { S::Ctx::make_context(exec_top, branch_entry::<S, Fb, Rb>, std::ptr::null_mut()) };
-    token.set_ctx(ctx.0);
+    let fresh_ctx = ctx.0;
+    token.set_ctx(fresh_ctx);
 
     let desc = token.desc();
     wk.push(token.into());
@@ -161,15 +162,20 @@ where
     match wk.try_pop() {
         Some(raw) => {
             let popped: SuspendedTaskToken<S::Desc> = raw.into();
-            if std::ptr::eq(popped.desc(), desc) {
+            // `desc` on top is not enough: if `a` yielded, this worker may
+            // have started `b` itself, and `b`, suspended (a yield or a
+            // wait of its own), is back in the queue under the same
+            // descriptor.  Only the untouched context from `make_context`
+            // means `b` never ran.
+            if std::ptr::eq(popped.desc(), desc) && popped.ctx() == fresh_ctx {
                 // Not stolen: discard the never-switched-into context and
                 // stack reservation, and run `b` as a plain function call.
                 unsafe { wk.free_task(popped.into_raw()) };
                 let rb = unsafe { f_ptr.read() }();
                 (ra, rb)
             } else {
-                // Something else was on top; put it back and fall through
-                // to the stolen path below.
+                // Something else was on top, or `b` already started: put
+                // it back and join.
                 wk.push(popped.into());
                 let handle = JoinHandle::<S, Rb> { desc, result_ptr, result_drop: drop_stack_result::<Rb>, _marker: PhantomData };
                 (ra, JoinHandleLike::join(handle))
