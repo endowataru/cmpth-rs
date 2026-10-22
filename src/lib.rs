@@ -30,8 +30,9 @@ pub mod interchange;
 pub mod resumable;
 pub mod scoped;
 pub mod duty;
+pub mod post;
 
-pub use traits::{BarrierWaitResult, BlockOnSystem, Context, ContextPolicy, CallCx, CallSlot, Completion, DelegationSystem, DelegatorConsumer, Delegator, DelegatorRun, DualBarrier, FnConsumer, Ready, DualMutex, HandoffTaskDesc, JoinHandleLike, NestableSystem, Poller, Resumable, ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, StackfulBuilder, StackfulInitSystem, StackfulResumable, StackfulSyncSystem, StacklessBuilder, StacklessInitSystem, StacklessSyncSystem, SuspendableSystem, TaskDesc, TaskExitSink, TaskSystem, TlsAnchor, TlsSlot, SpawnableStackfulTaskSystem, Transfer, WakerTaskDesc};
+pub use traits::{BarrierWaitResult, BlockOnSystem, Context, ContextPolicy, CallCx, CallSlot, Completion, DelegationSystem, DelegatorConsumer, Delegator, DelegatorRun, DualBarrier, FavorPosting, FavorServing, FnConsumer, PostChoice, PostConfig, PostConsumer, PostDelegator, PostDelegatorOf, PostFavor, PostingSystem, Ready, Ticket, DualMutex, HandoffTaskDesc, JoinHandleLike, NestableSystem, Poller, Resumable, ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, StackfulBuilder, StackfulInitSystem, StackfulResumable, StackfulSyncSystem, StacklessBuilder, StacklessInitSystem, StacklessSyncSystem, SuspendableSystem, TaskDesc, TaskExitSink, TaskSystem, TlsAnchor, TlsSlot, SpawnableStackfulTaskSystem, Transfer, WakerTaskDesc};
 pub use scoped::{DefaultScopedMarker, ScopedIdentity, ScopedSystem, ScopedTaskSystem};
 pub use os::{available_parallelism, OsBarrier, OsCondvar, OsMutex, OsPoller, OsSystem, OsTls};
 pub use resumable::stackful::context::{LeanFrameContext, NativeContext};
@@ -60,6 +61,7 @@ pub use resumable::stackless::system::{StacklessSchedulerSystem, StacklessTaskSy
 pub use resumable::stackful::tls::UltTls;
 pub use resumable::common::worker::{LocalQueue, TaskPool, UltWorker, WorkerOps, current_worker};
 pub use resumable::stackful::worker::ContextSwitcher;
+pub use post::{DefaultPostChoice, QueuePostDelegator, SlotPostDelegator};
 
 // ---------------------------------------------------------------------------
 // Default instantiations
@@ -167,6 +169,10 @@ macro_rules! dual_task_system {
             type Delegator<C: DelegatorConsumer<Self>> = McsDelegator<Self, C>;
         }
 
+        impl PostingSystem for $name {
+            type PostChoice = post::DefaultPostChoice;
+        }
+
         impl NestableSystem for $name {
             type ThreadSpecific<T: 'static> = resumable::stackful::tls::UltTls<Self, T>;
         }
@@ -269,6 +275,10 @@ impl SuspendableSystem for DefaultNestedDualTaskSystem {
 
 impl DelegationSystem for DefaultNestedDualTaskSystem {
     type Delegator<C: DelegatorConsumer<Self>> = McsDelegator<Self, C>;
+}
+
+impl PostingSystem for DefaultNestedDualTaskSystem {
+    type PostChoice = post::DefaultPostChoice;
 }
 
 impl NestableSystem for DefaultNestedDualTaskSystem {
