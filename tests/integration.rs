@@ -1033,6 +1033,51 @@ fn dual_parallel_call_stolen_branch_actually_runs() {
     });
 }
 
+/// `a` yields, so the one worker runs `b` itself; `b` yields too (inside
+/// a nested `parallel_call`) and goes back to the queue under its own
+/// descriptor.  When `a` returns and pops that descriptor, `b` has started:
+/// it must be joined, not run again from the start as if never stolen.
+fn parallel_call_branch_started_by_a_yield_runs_once<S: ScopedStackfulTaskSystem + SpawnableStackfulTaskSystem>() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let starts = std::sync::Arc::new(AtomicUsize::new(0));
+    let s = std::sync::Arc::clone(&starts);
+    let (a, b) = S::parallel_call(
+        || {
+            for _ in 0..4 {
+                S::yield_now();
+            }
+            1u64
+        },
+        move || {
+            s.fetch_add(1, Ordering::Relaxed);
+            let (x, y) = S::parallel_call(
+                || {
+                    for _ in 0..4 {
+                        S::yield_now();
+                    }
+                    2u64
+                },
+                || 3u64,
+            );
+            x + y
+        },
+    );
+    assert_eq!((a, b), (1, 5));
+    assert_eq!(starts.load(Ordering::Relaxed), 1, "b ran more than once");
+}
+
+#[test]
+fn dual_parallel_call_branch_started_by_a_yield_runs_once() {
+    run(1, parallel_call_branch_started_by_a_yield_runs_once::<DefaultDualTaskSystem>);
+}
+
+#[test]
+fn stackful_only_parallel_call_branch_started_by_a_yield_runs_once() {
+    DefaultStackfulOnlyTaskSystem::builder()
+        .workers(1)
+        .run(parallel_call_branch_started_by_a_yield_runs_once::<DefaultStackfulOnlyTaskSystem>);
+}
+
 #[test]
 fn dual_parallel_call_unstolen_branch_panic_propagates() {
     run(1, || {
