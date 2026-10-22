@@ -97,6 +97,10 @@ impl DelegationSystem for OsSystem {
     type Delegator<C: DelegatorConsumer<Self>> = OsDelegator<C>;
 }
 
+impl crate::traits::PostingSystem for OsSystem {
+    type PostChoice = crate::post::DefaultPostChoice;
+}
+
 impl NestableSystem for OsSystem {
     type ThreadSpecific<T: 'static> = OsTls<T>;
 }
