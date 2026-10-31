@@ -14,6 +14,12 @@ use super::delegator::{Delegator, DelegatorNode, SyncQueue};
 // RingBufQueue
 // ---------------------------------------------------------------------------
 
+/// `tail` holds the number of claimed slots shifted left by one; its low
+/// bit (`FREE`) says nobody holds the lock.  Releasing sets the bit
+/// rather than moving `tail` back, so `tail` never repeats a value: a
+/// caller that read `head` and then lost a race to a hand-over followed by
+/// a release fails its compare-exchange instead of queueing behind a
+/// holder that is gone.
 pub struct RingBufQueue<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, const N: usize> where <S as PoolSystem>::Desc: StackfulTaskDesc {
     head:  AtomicUsize,
     tail:  AtomicUsize,
@@ -24,6 +30,9 @@ struct RingSlot<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + Suspe
     ready: AtomicBool,
     node:  std::cell::UnsafeCell<DelegatorNode<S, C>>,
 }
+
+/// The low bit of `RingBufQueue::tail`: the lock is free.
+const FREE: usize = 1;
 
 unsafe impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSystem, C: DelegatorConsumer<S>, const N: usize> Send
     for RingBufQueue<S, C, N> where <S as PoolSystem>::Desc: StackfulTaskDesc {}
@@ -44,7 +53,7 @@ impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSyste
             .collect();
         RingBufQueue {
             head:  AtomicUsize::new(0),
-            tail:  AtomicUsize::new(0),
+            tail:  AtomicUsize::new(FREE),
             nodes: nodes.into_boxed_slice().try_into().unwrap_or_else(|_| {
                 panic!("RingBufQueue: size mismatch")
             }),
@@ -70,11 +79,13 @@ where
         &self,
     ) -> (bool, *mut DelegatorNode<S, C>, *mut DelegatorNode<S, C>) where <S as PoolSystem>::Desc: StackfulTaskDesc {
         loop {
-            let tail = self.tail.load(Ordering::Relaxed);
-            let head = self.head.load(Ordering::Acquire);
+            let tail = self.tail.load(Ordering::Acquire);
+            let idx = tail >> 1;
+            let is_locked = tail & FREE != 0;
 
-            // Queue full: yield and retry.
-            if tail.wrapping_sub(head) >= N {
+            // Queue full: yield and retry.  (A stale `head` only makes
+            // this more cautious.)
+            if !is_locked && idx.wrapping_sub(self.head.load(Ordering::Acquire)) >= N {
                 if let Some(wk) = S::Worker::current() {
                     wk.yield_now();
                 } else {
@@ -83,17 +94,16 @@ where
                 continue;
             }
 
-            let is_locked = tail == head;
             match self.tail.compare_exchange_weak(
-                tail, tail.wrapping_add(1), Ordering::AcqRel, Ordering::Relaxed,
+                tail, idx.wrapping_add(1) << 1, Ordering::AcqRel, Ordering::Relaxed,
             ) {
                 Ok(_) => {
-                    let prev_node = if is_locked {
-                        std::ptr::null_mut()
-                    } else {
-                        self.slot_node(tail.wrapping_sub(1))
-                    };
-                    return (is_locked, prev_node, self.slot_node(tail));
+                    if is_locked {
+                        // The holder occupies the slot it claimed.
+                        self.head.store(idx, Ordering::Release);
+                        return (true, std::ptr::null_mut(), self.slot_node(idx));
+                    }
+                    return (false, self.slot_node(idx.wrapping_sub(1)), self.slot_node(idx));
                 }
                 Err(_) => continue,
             }
@@ -116,12 +126,13 @@ where
     }
 
     fn try_unlock(&self, _head: *mut DelegatorNode<S, C>) -> bool where <S as PoolSystem>::Desc: StackfulTaskDesc {
-        // The holder occupies slot `head`; with no one behind it the tail
-        // is `head + 1`.  Releasing gives the slot back: the next caller
-        // claims `head` and finds the queue empty.
+        // The holder occupies slot `head`; with no one behind it `tail`
+        // counts `head + 1` slots.  Releasing marks the lock free: the next
+        // caller claims slot `head + 1` and holds the lock.
         let head = self.head.load(Ordering::Relaxed);
+        let tail = head.wrapping_add(1) << 1;
         self.tail
-            .compare_exchange(head.wrapping_add(1), head, Ordering::AcqRel, Ordering::Relaxed)
+            .compare_exchange(tail, tail | FREE, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
     }
 
