@@ -204,7 +204,9 @@ fn replan(i: &Inner) {
         HALF_DUE.fetch_min(i.half_due(), Ordering::Relaxed);
     }
     // A parked worker's deadline only moves when it wakes: the keeper
-    // covers anything earlier.
+    // covers anything earlier.  The fence pairs with the keeper's: either
+    // it sees our due time or we see its plan.
+    std::sync::atomic::fence(Ordering::SeqCst);
     if i.due() < PLANNED.load(Ordering::Relaxed) {
         if let Some(k) = KEEPER.get() {
             k.unpark();
@@ -370,6 +372,11 @@ fn keeper() {
         sys::background();
     }
     loop {
+        // Until the plan below is stored, any replan unparks us.  The
+        // fence pairs with `replan`'s: either it sees this or we see the
+        // due time it stored.
+        PLANNED.store(NEVER, Ordering::Relaxed);
+        std::sync::atomic::fence(Ordering::SeqCst);
         let next = {
             let reg = REG.lock().unwrap();
             let now = now_ns();
@@ -404,7 +411,6 @@ fn keeper() {
         } else {
             std::thread::park_timeout(Duration::from_nanos(next.saturating_sub(now_ns()).max(1000)));
         }
-        PLANNED.store(NEVER, Ordering::Relaxed);
     }
 }
 

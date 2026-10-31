@@ -75,9 +75,14 @@ fn duties() {
     std::thread::sleep(Duration::from_millis(30));
     assert_eq!(m.load(Ordering::Relaxed), after, "polled after the last waiter left");
 
-    // A deadline: one poll, then none.
+    // A deadline: one poll, then none.  (Waits up to 1 s for the poll: a
+    // loaded machine's timers fire late, but a keeper that missed the
+    // deadline would sleep for good.)
     let t0 = Instant::now();
     d.set_deadline(Some(t0 + Duration::from_millis(5)));
+    while m.load(Ordering::Relaxed) == after && t0.elapsed() < Duration::from_secs(1) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
     std::thread::sleep(Duration::from_millis(30));
     assert_eq!(m.load(Ordering::Relaxed), after + 1, "polls for one deadline");
     drop(d);
