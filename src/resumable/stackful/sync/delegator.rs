@@ -174,6 +174,12 @@ impl<S: StackfulSchedulerSystem + SpawnableStackfulTaskSystem + SuspendableSyste
         if is_locked {
             return;
         }
+        // A null request marks a lock waiter; a ring slot may still hold
+        // the request of its last user.
+        unsafe {
+            (*cur).req = std::ptr::null_mut();
+            (*cur).slot = std::ptr::null();
+        }
         let queue_ptr = &self.queue as *const Q;
         let prev_ptr = prev;
         let cur_ptr = cur;
