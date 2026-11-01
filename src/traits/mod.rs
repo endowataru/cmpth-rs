@@ -28,13 +28,13 @@ pub use component::wait::Resumable;
 pub use system::TaskSystem;
 pub use system::sync::{BarrierWaitResult, DualBarrier, DualMutex};
 pub use system::scoped::{ScopedStackfulTaskSystem, ScopedStacklessTaskSystem};
-pub use component::delegation::{CallCx, CallSlot, Completion, DelegatorConsumer, FnConsumer, Ready};
+pub use component::delegation::{CallCx, CallSlot, Completion, DelegatorConsumer, FnConsumer, PostConfig, PostConsumer, PostDelegator, Ready, Ticket};
 pub use component::stackful::{
     Context, ContextPolicy, HandoffTaskDesc, Poller, StackfulResumable, Transfer,
 };
 pub use system::block_on::BlockOnSystem;
 pub use system::bundle::StackfulTaskSystem;
-pub use system::delegation::{Delegator, DelegatorRun, DelegationSystem};
+pub use system::delegation::{Delegator, DelegatorRun, DelegationSystem, FavorPosting, FavorServing, PostChoice, PostDelegatorOf, PostFavor, PostingSystem};
 pub use system::nesting::NestableSystem;
 pub use system::stackful::{JoinHandleLike, StackfulBuilder, StackfulInitSystem, SpawnableStackfulTaskSystem};
 pub use system::suspend::SuspendableSystem;

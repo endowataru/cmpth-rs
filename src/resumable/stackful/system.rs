@@ -473,6 +473,13 @@ where
         crate::resumable::stackful::sync::McsDelegator<Self, C>;
 }
 
+impl<M: UltIdentity + StackfulSchedulerSystem> crate::traits::PostingSystem for M
+where
+    <M as PoolSystem>::Desc: StackfulTaskDesc,
+{
+    type PostChoice = crate::post::DefaultPostChoice;
+}
+
 impl<M: UltIdentity + StackfulSchedulerSystem> NestableSystem for M
 where
     <M as PoolSystem>::Desc: StackfulTaskDesc,

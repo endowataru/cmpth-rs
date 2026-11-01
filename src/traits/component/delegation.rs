@@ -13,6 +13,7 @@
 use std::cell::UnsafeCell;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
+use std::pin::Pin;
 use std::ptr::NonNull;
 use std::task::Poll;
 
@@ -198,4 +199,74 @@ impl<S: SuspendableSystem> DelegatorConsumer<S> for FnConsumer {
         req();
         Poll::Ready(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Posting: requests nobody waits for
+// ---------------------------------------------------------------------------
+
+/// One producer's posts up to `seq`: what a [`PostDelegator::post`]
+/// returns, and what [`PostConsumer::serve`] is told it covers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ticket {
+    /// The posting thread's index in this delegator (dense, from 0, in the
+    /// order threads first posted).
+    pub producer: u32,
+    /// The producer's post count: its `seq`-th post.
+    pub seq: u64,
+}
+
+/// What a [`PostDelegator`] serves: a resource that catches up, in one
+/// step, with everything its producers did before they posted (publishing
+/// writes, flushing a log, ...).  A post carries no data; serving once
+/// covers any number of them.
+pub trait PostConsumer: Send + 'static {
+    /// Which cost the delegator should keep low: posting or serving (see
+    /// [`PostFavor`](crate::traits::PostFavor)).
+    type Favor: crate::traits::PostFavor;
+
+    /// Catch up with every post `upto` lists: producer `t.producer`'s posts
+    /// up to `t.seq`.  Each producer appears at most once and its `seq`
+    /// grows from call to call; whatever the producer did before such a
+    /// post happens before this call.
+    fn serve(&mut self, upto: &[Ticket]);
+}
+
+/// When a [`PostDelegator`] serves unprompted (it also serves whenever
+/// someone calls [`PostDelegator::serve_now`]).
+#[derive(Clone, Copy, Debug)]
+pub struct PostConfig {
+    /// At most this long between a post and the serve covering it, while
+    /// nobody calls `serve_now`.
+    pub latency: std::time::Duration,
+    /// Where the consumer's `serve` may run (see [`crate::duty::DutyPlace`]).
+    pub place: crate::duty::DutyPlace,
+}
+
+/// A delegator for posts: [`post`](Self::post) asks the consumer to catch
+/// up with this thread and returns at once; the consumer serves later,
+/// once for many posts.  The caller learns of the serve only through the
+/// consumer (which may publish the tickets it served, e.g. for other
+/// processes to read).
+///
+/// Dropping it stops the unprompted serves; no call may be in progress
+/// then.
+pub trait PostDelegator<C: PostConsumer>: Send + Sync + 'static {
+    /// Start accepting posts.  The delegator stays at the returned address
+    /// until dropped.
+    fn start(consumer: C, cfg: PostConfig) -> Pin<Box<Self>>;
+
+    /// Ask for a serve covering what this thread did so far.  Never blocks
+    /// or suspends.  Not preemption-safe: a ULT switched out in the middle
+    /// by a signal, with another posting from the same OS thread, may get
+    /// a ticket the next serve does not cover.
+    fn post(&self) -> Ticket;
+
+    /// Serve the posts not served yet, unless someone else is serving;
+    /// whether it served any.
+    fn serve_now(&self) -> bool;
+
+    /// Run `f` on the consumer, waiting (spinning, then yielding the OS
+    /// thread) while someone serves.
+    fn with_lock<R>(&self, f: impl FnOnce(&mut C) -> R) -> R;
 }
