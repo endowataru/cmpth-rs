@@ -51,6 +51,7 @@ pub struct Scoped;
 cmpth::impl_with_defaults! {
     impl cmpth::ScopedIdentity for Scoped {
         type Idle = cmpth::ParkIdle;
+        type Duties = cmpth::duty::NoDuties;
     }
 }
 
@@ -62,13 +63,19 @@ fn defaults_and_overrides() {
     same::<<Stackful as UltIdentity>::RunQueue, HybridRunQueue<SuspendedTaskToken<StackfulOnlyTaskDesc<Stackful>>>>();
     same::<<Stackful as UltIdentity>::Alloc, cmpth::HeapStack>();
     same::<<Stackful as UltIdentity>::Idle, cmpth::SearchIdle>();
-    same::<<Stackful as UltIdentity>::Steal, cmpth::SweepSteal>();
+    same::<<Stackful as UltIdentity>::Steal, cmpth::RandomSweepSteal>();
+    same::<<Stackful as UltIdentity>::Dispatch, cmpth::StandardDispatch>();
+    same::<<Stackful as UltIdentity>::Duties, cmpth::duty::GlobalDuties>();
+    same::<<Stackful as UltIdentity>::Observe, cmpth::NoObserver>();
+    same::<<Stackful as UltIdentity>::ExternalQueue, cmpth::StealPathQueue<StackfulOnlyTaskDesc<Stackful>>>();
+    same::<<Stackful as UltIdentity>::PostChoice, cmpth::DefaultPostChoice>();
     assert_eq!(<Stackful as UltIdentity>::STACK_SIZE, 128 * 1024);
 
     same::<<Dual as UltDualIdentity>::Base, cmpth::DefaultDualTaskSystem>();
     same::<<Dual as UltDualIdentity>::RunQueue, HybridRunQueue<SuspendedTaskToken<DualTaskDesc<UltDualSystem<Dual>>>>>();
     same::<<Dual as UltDualIdentity>::Idle, SpinIdle>();
     same::<<Dual as UltDualIdentity>::Steal, cmpth::RandomSteal>();
+    same::<<Dual as UltDualIdentity>::ExternalQueue, cmpth::StealPathQueue<DualTaskDesc<UltDualSystem<Dual>>>>();
     assert_eq!(<Dual as UltDualIdentity>::ASYNC_POOL_SIZE, 512);
 
     same::<<Async as UltAsyncIdentity>::Desc, StacklessOnlyTaskDesc<UltAsyncSystem<Async>>>();
@@ -77,7 +84,8 @@ fn defaults_and_overrides() {
     same::<<Async as UltAsyncIdentity>::RunQueue, HybridRunQueue<SuspendedTaskToken<StacklessOnlyTaskDesc<UltAsyncSystem<Async>>>>>();
 
     same::<<Scoped as cmpth::ScopedIdentity>::Idle, cmpth::ParkIdle>();
-    same::<<Scoped as cmpth::ScopedIdentity>::Steal, cmpth::SweepSteal>();
+    same::<<Scoped as cmpth::ScopedIdentity>::Steal, cmpth::RandomSweepSteal>();
+    same::<<Scoped as cmpth::ScopedIdentity>::Duties, cmpth::duty::NoDuties>();
 
     // `Lookup` carries a `where` clause, so it is checked through the system.
     same::<<Stackful as cmpth::WorkerSystem>::Lookup, TlsCurrent>();

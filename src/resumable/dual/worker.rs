@@ -1,4 +1,4 @@
-//! Dual-only `StackfulSchedulerSystem::pop_or_root` body and the
+//! Dual-only `StackfulWorkerSystem::next_or_root` body and the
 //! [`RunnableItem`]/[`ReclaimableDesc`] impls for [`DualTaskDesc`]: a popped
 //! continuation may be either a real ULT or a `spawn_async` task, so
 //! dispatch needs the `poll_fn` tag check the stackful-only/stackless-only
@@ -7,7 +7,6 @@
 //! [`stackful::worker`](crate::resumable::stackful::worker) for the shared
 //! machinery this builds on.
 
-use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::worker::{AsyncTaskPool, DescWorkerOps, TaskPool, UltWorker};
 use crate::resumable::common::system::{PoolSystem, ReclaimableDesc, RunnableItem, WorkerSystem};
 use crate::resumable::stackful::system::StackfulWorkerSystem;
@@ -71,44 +70,38 @@ where
     }
 }
 
-/// `pop_or_root` body for dual systems: today's original logic — an async
-/// task popped off the top has no saved context to switch into, so requeue
-/// it and fall back to the root (scheduler-loop) continuation instead.
+/// `next_or_root` body for dual systems: a stackless task has no saved
+/// context to switch into, so if the dispatch policy picks one, put it back
+/// on the local queue and switch to the root (scheduler-loop) continuation
+/// instead, which runs it.
 ///
 /// Lowest rung: plain `WorkerSystem` + `S::Desc: AsyncTaskDesc` — same
 /// conversion need as
-/// [`crate::resumable::stackful::worker::pop_or_root_stackful`] (`wk.deque`
-/// round-trips `S::SuspendedToken`, converted via the `Into`/`From` bounds on
-/// [`crate::resumable::common::system::WorkerSystem::SuspendedToken`] rather
-/// than an equality pin), plus `AsyncTaskDesc` for `is_poll_fn_dispatch`. No
-/// context switch happens here, so — unlike `execute_dual` — this needs
-/// neither `StackfulWorkerSystem` nor `StackfulTaskDesc`.
-pub fn pop_or_root_dual<S>(wk: &UltWorker<S>) -> SuspendedTaskToken<S::Desc>
+/// [`crate::resumable::stackful::worker::next_or_root_stackful`], plus
+/// `AsyncTaskDesc` for `is_poll_fn_dispatch`. No context switch happens
+/// here, so — unlike `execute_dual` — this needs neither
+/// `StackfulWorkerSystem` nor `StackfulTaskDesc`.
+pub fn next_or_root_dual<S>(wk: &UltWorker<S>) -> SuspendedTaskToken<S::Desc>
 where
     S: WorkerSystem + PoolSystem,
     S::Desc: AsyncTaskDesc,
     SuspendedTaskToken<S::Desc>: From<S::SuspendedToken>,
     S::SuspendedToken: From<SuspendedTaskToken<S::Desc>>,
 {
-    // As in `pop_or_root_stackful`: a task woken from outside the pool first.
-    if let Some(c) = crate::resumable::common::external_queue::ExternalQueue::try_pop(wk.external_queue()) {
-        if !c.is_poll_fn_dispatch() {
-            return c;
+    match crate::resumable::stackful::worker::switch_next(wk) {
+        Some(c) if !c.is_poll_fn_dispatch() => {
+            <S::Observe as crate::resumable::common::observe::SchedObserver>::dispatch(
+                crate::resumable::common::worker::LocalQueue::num(&wk.core),
+                crate::resumable::common::dispatch::Site::Switch,
+            );
+            c
         }
-        crate::resumable::common::worker::LocalQueue::push(&wk.core, c.into());
-    }
-    if let Some(c) = wk.core.deque.try_pop() {
-        let c: SuspendedTaskToken<S::Desc> = c.into();
-        if c.is_poll_fn_dispatch() {
-            // Async tasks have no saved context; they can only be executed
-            // by the scheduler loop via execute().  Push the async task back
-            // so the scheduler loop handles it.
+        Some(c) => {
             crate::resumable::common::worker::LocalQueue::push(&wk.core, c.into());
-        } else {
-            return c;
+            wk.take_root_cont()
         }
+        None => wk.take_root_cont(),
     }
-    wk.take_root_cont()
 }
 
 /// Async tasks go through `S::AsyncPool` (a separate pool from the

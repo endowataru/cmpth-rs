@@ -12,12 +12,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::resumable::common::deque::{Steal, WorkerRunQueue};
 use crate::resumable::common::external_queue::WakeHook;
-use crate::resumable::common::idle::IdlePolicy;
+use crate::resumable::common::dispatch::{DispatchPolicy, Site, TaskSources};
+use crate::resumable::common::idle::{IdleCx, IdlePolicy};
+use crate::resumable::common::observe::{SchedObserver, StealOutcome};
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::steal::StealPolicy;
 use crate::resumable::common::system::{RunnableItem, WorkerSystem};
 use crate::resumable::common::worker::{LocalQueue, WorkerOps};
-use crate::traits::stackful::SpawnableStackfulTaskSystem;
 
 /// State shared by all workers of one pool: what a thief needs to reach a
 /// victim, and when to stop.
@@ -58,7 +59,7 @@ impl<S: WorkerSystem> PoolCore<S> {
     /// parked.
     pub(crate) fn finish(&self) {
         self.finished.store(true, Ordering::Release);
-        self.idle.shutdown();
+        self.idle.shutdown::<S>();
     }
 }
 
@@ -67,11 +68,12 @@ pub struct WorkerCore<S: WorkerSystem> {
     num: usize,
     pub(crate) deque: S::RunQueue,
     steal: <S::Steal as StealPolicy>::State,
+    dispatch: <S::Dispatch as DispatchPolicy>::State,
     pool: Cell<*const PoolCore<S>>,
 }
 
-// SAFETY: `Cell` fields and `steal` are only ever touched by the owning base
-// thread (a worker struct is pinned to one thread for its lifetime); `deque`
+// SAFETY: `Cell` fields, `steal` and `dispatch` are only ever touched by the
+// owning base thread (a worker struct is pinned to one thread for its lifetime); `deque`
 // is internally synchronized; `pool` is read-only after `bind`.
 unsafe impl<S: WorkerSystem> Send for WorkerCore<S> {}
 unsafe impl<S: WorkerSystem> Sync for WorkerCore<S> {}
@@ -82,6 +84,7 @@ impl<S: WorkerSystem> WorkerCore<S> {
             num,
             deque: S::RunQueue::default(),
             steal: <S::Steal as StealPolicy>::new_state(num),
+            dispatch: Default::default(),
             pool: Cell::new(std::ptr::null()),
         }
     }
@@ -124,7 +127,14 @@ impl<S: WorkerSystem> LocalQueue<S> for WorkerCore<S> {
         if n <= 1 {
             return Steal::Empty;
         }
-        <S::Steal as StealPolicy>::try_steal(&self.steal, self.num, stealers)
+        let s = <S::Steal as StealPolicy>::try_steal(&self.steal, self.num, stealers);
+        <S::Observe as SchedObserver>::steal(self.num, StealOutcome::of(&s));
+        s
+    }
+
+    #[inline]
+    fn dispatch_state(&self) -> &<S::Dispatch as DispatchPolicy>::State {
+        &self.dispatch
     }
 
     #[inline]
@@ -151,59 +161,107 @@ impl<S: WorkerSystem<Worker = WorkerCore<S>>> WorkerOps<S> for WorkerCore<S> {
 // Dispatch
 // ---------------------------------------------------------------------------
 
-/// Try to make progress once: pop our own local item, else steal. Returns
-/// `false` if nothing was found anywhere right now.
+/// A worker's task sources: its own queue, a steal round, and `external`
+/// (a source outside the run queues — the external queue for
+/// descriptor-backed pools, `|| None` otherwise).
+pub(crate) struct Sources<'a, S: WorkerSystem, X> {
+    pub(crate) wk: &'a S::Worker,
+    pub(crate) external: X,
+}
+
+impl<S: WorkerSystem, X: Fn() -> Option<S::SuspendedToken>> TaskSources for Sources<'_, S, X> {
+    type Item = S::SuspendedToken;
+
+    #[inline(always)]
+    fn local(&self) -> Option<S::SuspendedToken> {
+        self.wk.try_pop()
+    }
+
+    #[inline(always)]
+    fn steal(&self) -> Steal<S::SuspendedToken> {
+        self.wk.try_steal()
+    }
+
+    #[inline(always)]
+    fn external(&self) -> Option<S::SuspendedToken> {
+        (self.external)()
+    }
+}
+
+/// Pick the next task at `site` through the system's [`DispatchPolicy`],
+/// reporting it to the observer.
+#[inline(always)]
+pub(crate) fn next_task<S: WorkerSystem, X: Fn() -> Option<S::SuspendedToken>>(
+    wk: &S::Worker,
+    external: X,
+    site: Site,
+) -> Steal<S::SuspendedToken> {
+    let s = <S::Dispatch as DispatchPolicy>::next(wk.dispatch_state(), &Sources::<S, X> { wk, external }, site);
+    if let Steal::Success(_) = s {
+        <S::Observe as SchedObserver>::dispatch(wk.num(), site);
+    }
+    s
+}
+
+/// Try to make progress once at [`Site::Wait`] (a task waiting for a join
+/// on its own stack). Returns `false` if nothing was found anywhere right
+/// now.
 #[inline]
 pub(crate) fn try_run_one<S>(wk: &S::Worker) -> bool
 where
     S: WorkerSystem<SuspendedToken: RunnableItem<S>>,
 {
-    if let Some(c) = wk.try_pop() {
-        c.run_on(wk);
-        return true;
+    match next_task::<S, _>(wk, || None, Site::Wait) {
+        Steal::Success(c) => {
+            c.run_on(wk);
+            true
+        }
+        _ => false,
     }
-    if let Steal::Success(c) = wk.try_steal() {
-        c.run_on(wk);
-        return true;
-    }
-    false
 }
 
-/// The idle/dispatch loop every worker runs until `finished`: local pop,
-/// then steal, then `extra` (a source outside the run queues — the external
-/// queue for descriptor-backed pools, `|| None` otherwise), else hand control
-/// to the pool's [`IdlePolicy`].
-///
-/// `try_steal` distinguishes "every victim was genuinely empty"
-/// ([`Steal::Empty`]) from "some victim had work but it couldn't be taken
-/// right now" ([`Steal::Retry`], e.g. lost a CAS race). The policy is told
-/// which, because a `Retry` round must not count toward backing off: there is
-/// known work nearby, so backing off (let alone parking) on its account would
-/// be a real regression, not just noise.
+/// What a waiting task does after `try_run_one` found nothing: spin, and
+/// every 64 rounds run the system's duties (it cannot park: what it waits
+/// for does not count as new work, so nothing would wake it).
 #[inline]
-pub(crate) fn idle_loop<S, X>(wk: &S::Worker, pool: &PoolCore<S>, mut extra: X)
+pub(crate) fn wait_round<S: WorkerSystem>(rounds: &mut u32) {
+    std::hint::spin_loop();
+    *rounds = rounds.wrapping_add(1);
+    if *rounds & 0x3F == 0 {
+        if let Some(r) = <S::Duties as crate::duty::DutyDomain>::registry() {
+            r.run_idle();
+        }
+    }
+}
+
+/// The idle/dispatch loop every worker runs until `finished`: the next task
+/// at [`Site::Loop`] through the system's [`DispatchPolicy`], else hand
+/// control to the pool's [`IdlePolicy`].
+///
+/// A dispatch that found nothing distinguishes "every source was genuinely
+/// empty" ([`Steal::Empty`]) from "some victim had work but it couldn't be
+/// taken right now" ([`Steal::Retry`], e.g. lost a CAS race). The policy is
+/// told which, because a `Retry` round must not count toward backing off:
+/// there is known work nearby, so backing off (let alone parking) on its
+/// account would be a real regression, not just noise.
+#[inline]
+pub(crate) fn idle_loop<S, X>(wk: &S::Worker, pool: &PoolCore<S>, external: X)
 where
     S: WorkerSystem<SuspendedToken: RunnableItem<S>>,
-    X: FnMut() -> Option<S::SuspendedToken>,
+    X: Fn() -> Option<S::SuspendedToken>,
 {
+    let me = wk.num();
     let mut ep = <S::Idle as IdlePolicy>::Episode::default();
     while !pool.finished.load(Ordering::Acquire) {
-        if let Some(c) = wk.try_pop() {
-            pool.idle.work_found(&mut ep);
-            c.run_on(wk);
-            continue;
+        match next_task::<S, _>(wk, &external, Site::Loop) {
+            Steal::Success(c) => {
+                pool.idle.work_found(&mut ep, &IdleCx::<S>::new(me, false, &pool.finished));
+                c.run_on(wk);
+            }
+            s => {
+                <S::Observe as SchedObserver>::idle(me);
+                pool.idle.no_work_found(&mut ep, &IdleCx::<S>::new(me, matches!(s, Steal::Retry), &pool.finished));
+            }
         }
-        let steal = wk.try_steal();
-        if let Steal::Success(c) = steal {
-            pool.idle.work_found(&mut ep);
-            c.run_on(wk);
-            continue;
-        }
-        if let Some(c) = extra() {
-            pool.idle.work_found(&mut ep);
-            c.run_on(wk);
-            continue;
-        }
-        pool.idle.no_work_found(&mut ep, matches!(steal, Steal::Retry), &pool.finished, S::Base::yield_now);
     }
 }

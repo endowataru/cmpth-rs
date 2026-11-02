@@ -204,7 +204,12 @@ impl cmpth::UltIdentity for MySystem {
     type Alloc = cmpth::HeapStack;                         // stack allocator
     type Lookup = cmpth::TlsCurrent;                       // current-worker lookup
     type Idle = cmpth::SpinIdle;                           // what idle workers do (spin / park)
-    type Steal = cmpth::SweepSteal;                        // which victims a thief tries
+    type Steal = cmpth::RandomSweepSteal;                  // which victims a thief tries
+    type Dispatch = cmpth::StandardDispatch;               // order of own queue / steal / external queue
+    type Duties = cmpth::duty::GlobalDuties;               // whose periodic polls idle workers run
+    type Observe = cmpth::NoObserver;                      // scheduler event hooks
+    type ExternalQueue = cmpth::StealPathQueue<cmpth::StackfulOnlyTaskDesc<Self>>; // tasks woken off the pool
+    type PostChoice = cmpth::DefaultPostChoice;            // how `post` picks a delegator
 }
 ```
 

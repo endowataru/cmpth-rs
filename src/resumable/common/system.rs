@@ -15,6 +15,9 @@ use crate::resumable::common::desc::{SuspendedTaskToken, TaskDescAlloc};
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::pool::{DescPool, DynamicPool};
 use crate::resumable::common::steal::StealPolicy;
+use crate::resumable::common::dispatch::DispatchPolicy;
+use crate::resumable::common::observe::SchedObserver;
+use crate::duty::DutyDomain;
 use crate::resumable::common::worker::{LocalQueue, WorkerOps};
 
 /// Storage-related subset of [`SchedulerSystem`]: the descriptor type and
@@ -124,6 +127,16 @@ pub trait WorkerSystem: Sized + Send + Sync + 'static {
 
     /// Which victims an idle worker tries to steal from, and in what order.
     type Steal: StealPolicy;
+
+    /// In what order a worker looks at its task sources when it picks the
+    /// next task.
+    type Dispatch: DispatchPolicy;
+
+    /// Which duties this system's idle workers run.
+    type Duties: DutyDomain;
+
+    /// Receives the scheduler's events.
+    type Observe: SchedObserver;
 
     /// The concrete worker type driving this scheduler. Every system today
     /// sets this to [`UltWorker<Self>`](crate::resumable::common::worker::UltWorker) — kept as its own associated type
