@@ -126,6 +126,10 @@ pub trait LocalQueue<S: WorkerSystem> {
     /// don't mistake contention for idleness.
     fn try_steal(&self) -> Steal<S::SuspendedToken>;
 
+    /// This worker's state for the pool's
+    /// [`WorkerHooks`](crate::traits::component::worker_hooks::WorkerHooks).
+    fn hooks_slot(&self) -> &crate::resumable::common::worker_hooks::HooksSlot<S::Hooks>;
+
     /// This worker's [`DispatchPolicy`](crate::DispatchPolicy) state.
     fn dispatch_state(&self) -> &<S::Dispatch as crate::resumable::common::dispatch::DispatchPolicy>::State;
 
@@ -511,6 +515,11 @@ impl<S: WorkerSystem + PoolSystem> LocalQueue<S> for UltWorker<S> {
     #[inline]
     fn try_steal(&self) -> Steal<S::SuspendedToken> {
         self.core.try_steal()
+    }
+
+    #[inline]
+    fn hooks_slot(&self) -> &crate::resumable::common::worker_hooks::HooksSlot<S::Hooks> {
+        self.core.hooks_slot()
     }
 
     #[inline]

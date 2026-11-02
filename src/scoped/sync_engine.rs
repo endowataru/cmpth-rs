@@ -202,6 +202,7 @@ mod tests {
         type Dispatch = crate::resumable::common::dispatch::StandardDispatch;
         type Duties = crate::duty::GlobalDuties;
         type Observe = crate::resumable::common::observe::NoObserver;
+        type Hooks = crate::resumable::common::worker_hooks::NoHooks;
     }
     struct ParkMarker;
     impl ScopedIdentity for ParkMarker {
@@ -210,6 +211,7 @@ mod tests {
         type Dispatch = crate::resumable::common::dispatch::StandardDispatch;
         type Duties = crate::duty::GlobalDuties;
         type Observe = crate::resumable::common::observe::NoObserver;
+        type Hooks = crate::resumable::common::worker_hooks::NoHooks;
     }
 
     fn fib<M: ScopedIdentity>(n: u64) -> u64 {

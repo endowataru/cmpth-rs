@@ -9,3 +9,4 @@ pub mod steal;
 pub mod task;
 pub mod tls;
 pub mod wait;
+pub mod worker_hooks;

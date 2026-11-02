@@ -15,6 +15,7 @@ use crate::resumable::common::external_queue::WakeHook;
 use crate::resumable::common::dispatch::{DispatchPolicy, Site, TaskSources};
 use crate::resumable::common::idle::{IdleCx, IdlePolicy};
 use crate::resumable::common::observe::{SchedObserver, StealOutcome};
+use crate::resumable::common::worker_hooks::HooksSlot;
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::steal::StealPolicy;
 use crate::resumable::common::system::{RunnableItem, WorkerSystem};
@@ -32,6 +33,7 @@ pub struct PoolCore<S: WorkerSystem> {
     pub(crate) stealers: Box<[<S::RunQueue as WorkerRunQueue<S::SuspendedToken>>::Stealer]>,
     pub(crate) finished: AtomicBool,
     pub(crate) idle: S::Idle,
+    pub(crate) hooks: S::Hooks,
 }
 
 impl<S: WorkerSystem> PoolCore<S> {
@@ -42,7 +44,7 @@ impl<S: WorkerSystem> PoolCore<S> {
         let stealers: Box<[_]> = cores.map(|c| c.deque.stealer()).collect();
         let idle = S::Idle::default();
         idle.set_workers(stealers.len());
-        PoolCore { stealers, finished: AtomicBool::new(false), idle }
+        PoolCore { stealers, finished: AtomicBool::new(false), idle, hooks: S::Hooks::default() }
     }
 
     /// Hook for an external queue to notify this pool's idle policy.
@@ -69,6 +71,7 @@ pub struct WorkerCore<S: WorkerSystem> {
     pub(crate) deque: S::RunQueue,
     steal: <S::Steal as StealPolicy>::State,
     dispatch: <S::Dispatch as DispatchPolicy>::State,
+    hooks: HooksSlot<S::Hooks>,
     pool: Cell<*const PoolCore<S>>,
 }
 
@@ -85,6 +88,7 @@ impl<S: WorkerSystem> WorkerCore<S> {
             deque: S::RunQueue::default(),
             steal: <S::Steal as StealPolicy>::new_state(num),
             dispatch: Default::default(),
+            hooks: HooksSlot::default(),
             pool: Cell::new(std::ptr::null()),
         }
     }
@@ -119,6 +123,11 @@ impl<S: WorkerSystem> LocalQueue<S> for WorkerCore<S> {
     #[inline]
     fn try_pop(&self) -> Option<S::SuspendedToken> {
         self.deque.try_pop()
+    }
+
+    #[inline]
+    fn hooks_slot(&self) -> &HooksSlot<S::Hooks> {
+        &self.hooks
     }
 
     fn try_steal(&self) -> Steal<S::SuspendedToken> {
@@ -252,6 +261,7 @@ where
 {
     let me = wk.num();
     let mut ep = <S::Idle as IdlePolicy>::Episode::default();
+    wk.hooks_slot().start(&pool.hooks, me, pool.stealers.len());
     while !pool.finished.load(Ordering::Acquire) {
         match next_task::<S, _>(wk, &external, Site::Loop) {
             Steal::Success(c) => {
@@ -264,4 +274,5 @@ where
             }
         }
     }
+    wk.hooks_slot().stop(&pool.hooks);
 }

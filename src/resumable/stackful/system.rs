@@ -297,6 +297,7 @@ impl<
 ///     type Dispatch = cmpth::StandardDispatch;
 ///     type Duties = cmpth::duty::GlobalDuties;
 ///     type Observe = cmpth::NoObserver;
+///     type Hooks = cmpth::NoHooks;
 ///     type ExternalQueue = cmpth::StealPathQueue<cmpth::StackfulOnlyTaskDesc<Self>>;
 ///     type PostChoice = cmpth::DefaultPostChoice;
 /// }
@@ -357,6 +358,9 @@ pub trait UltIdentity: WorkerTlsAnchor + Sized + Send + Sync + 'static {
     /// Scheduler observer; see [`crate::WorkerSystem::Observe`].
     type Observe: crate::resumable::common::observe::SchedObserver;
 
+    /// Per-worker start/stop hooks; see [`crate::WorkerSystem::Hooks`].
+    type Hooks: crate::traits::component::worker_hooks::WorkerHooks;
+
     /// Where tasks woken from outside the pool wait; see
     /// [`PoolSystem::ExternalQueue`].
     type ExternalQueue: crate::resumable::common::external_queue::ExternalQueue<Self>
@@ -410,6 +414,7 @@ impl<M: UltIdentity> WorkerSystem for M {
     type Dispatch = <M as UltIdentity>::Dispatch;
     type Duties = <M as UltIdentity>::Duties;
     type Observe = <M as UltIdentity>::Observe;
+    type Hooks = <M as UltIdentity>::Hooks;
 
     fn worker_tls() -> &'static <M::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         TlsSlot::from_anchor(<M as WorkerTlsAnchor>::anchor())
