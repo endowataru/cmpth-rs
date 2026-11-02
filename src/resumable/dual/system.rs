@@ -163,6 +163,7 @@ impl<M: UltDualIdentity> crate::resumable::stackful::system::StackfulWorkerSyste
 
     type SuspendedThread = crate::resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>;
 
+    #[inline]
     fn next_or_root(wk: &UltWorker<Self>) -> SuspendedTaskToken<<Self as PoolSystem>::Desc>
     where
         SuspendedTaskToken<<Self as PoolSystem>::Desc>: From<<Self as WorkerSystem>::SuspendedToken>,
