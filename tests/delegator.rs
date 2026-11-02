@@ -228,6 +228,39 @@ fn combining_on_ults() {
     });
 }
 
+struct Bound1;
+impl cmpth::CombiningConfig for Bound1 {
+    const BOUND: usize = 1;
+}
+
+struct Bound2;
+impl cmpth::CombiningConfig for Bound2 {
+    const BOUND: usize = 2;
+}
+
+/// A bound of 1 or 2 hands the lock over on almost every request.
+#[test]
+fn bounded_combining_on_ults() {
+    with_watchdog(|| {
+        run(4, || {
+            counter_case::<U, CombiningDelegator<U, Counter, Bound1>>();
+            gate_case::<U, CombiningDelegator<U, Gate<U>, Bound1>>();
+            fn_case::<U, CombiningDelegator<U, FnConsumer, Bound2>>();
+            lock_case::<U, CombiningDelegator<U, Counter, Bound1>>();
+        })
+    });
+}
+
+#[test]
+fn bounded_combining_on_os_threads() {
+    with_watchdog(|| {
+        counter_case::<OsSystem, CombiningDelegator<OsSystem, Counter, Bound1>>();
+        gate_case::<OsSystem, CombiningDelegator<OsSystem, Gate<OsSystem>, Bound1>>();
+        fn_case::<OsSystem, CombiningDelegator<OsSystem, FnConsumer, Bound2>>();
+        lock_case::<OsSystem, CombiningDelegator<OsSystem, Counter, Bound1>>();
+    });
+}
+
 #[test]
 fn os_on_os_threads() {
     with_watchdog(|| {

@@ -60,7 +60,7 @@ pub use resumable::stackless::async_wait::SuspendedFuture;
 pub use resumable::dual::dual_wait::DualResumable;
 pub use resumable::dual::system::{UltDualIdentity, UltDualSystem};
 pub use resumable::stackful::suspended::{BasicStackfulOnlyResumable, StackfulOnlyResumableCore};
-pub use resumable::stackful::sync::{Barrier as UltBarrier, CombiningDelegator, McsDelegator, McsMutex, McsMutexGuard, McsCondvar, BarrierCore, MutexCore};
+pub use resumable::stackful::sync::{Barrier as UltBarrier, CombiningConfig, CombiningDelegator, DefaultCombining, McsDelegator, McsMutex, McsMutexGuard, McsCondvar, BarrierCore, MutexCore};
 pub use resumable::common::sync::{DualBarrier as UltDualBarrier, DualMutex as UltDualMutex, DualMutexGuard as UltDualMutexGuard};
 pub use resumable::common::system::{PoolSystem, SchedulerSystem, WorkerSystem};
 pub use resumable::stackful::system::{StackfulSchedulerSystem, StackfulTaskSystem, StackfulWorkerSystem, UltIdentity};

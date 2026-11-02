@@ -7,7 +7,7 @@ pub mod mutex;
 pub mod ring_delegator;
 
 pub use barrier::{Barrier, BarrierCore, BarrierState};
-pub use combining_delegator::CombiningDelegator;
+pub use combining_delegator::{CombiningConfig, CombiningDelegator, DefaultCombining};
 pub use delegator::{DelegatorNode, SyncQueue};
 pub use mcs_delegator::McsDelegator;
 pub use mcs_mutex::{McsMutex, McsMutexGuard, McsCondvar};
