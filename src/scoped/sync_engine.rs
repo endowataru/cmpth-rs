@@ -197,10 +197,12 @@ mod tests {
     struct SpinMarker;
     impl ScopedIdentity for SpinMarker {
         type Idle = SpinIdle;
+        type Steal = crate::resumable::common::steal::SweepSteal;
     }
     struct ParkMarker;
     impl ScopedIdentity for ParkMarker {
         type Idle = ParkIdle;
+        type Steal = crate::resumable::common::steal::SweepSteal;
     }
 
     fn fib<M: ScopedIdentity>(n: u64) -> u64 {

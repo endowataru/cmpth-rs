@@ -299,6 +299,7 @@ impl<
 ///     type Alloc = cmpth::HeapStack;
 ///     type Lookup = cmpth::TlsCurrent;
 ///     type Idle = cmpth::SpinIdle;
+///     type Steal = cmpth::SweepSteal;
 /// }
 ///
 /// MySystem::builder().workers(2).run(|| {
@@ -345,6 +346,9 @@ pub trait UltIdentity: WorkerTlsAnchor + Sized + Send + Sync + 'static {
     /// [`Lookup`](Self::Lookup).
     type Idle: crate::resumable::common::idle::IdlePolicy;
 
+    /// Steal policy; see [`crate::WorkerSystem::Steal`].
+    type Steal: crate::resumable::common::steal::StealPolicy;
+
     /// Stack allocation policy.
     type Alloc: StackAlloc;
 
@@ -384,6 +388,7 @@ impl<M: UltIdentity> WorkerSystem for M {
     type RunQueue = M::RunQueue;
     type Lookup = <M as UltIdentity>::Lookup;
     type Idle = <M as UltIdentity>::Idle;
+    type Steal = <M as UltIdentity>::Steal;
 
     fn worker_tls() -> &'static <M::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         TlsSlot::from_anchor(<M as WorkerTlsAnchor>::anchor())

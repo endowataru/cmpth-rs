@@ -74,6 +74,7 @@ macro_rules! worker_tls_anchor {
 /// | `Alloc` | [`HeapStack`](crate::HeapStack) | [`HeapStack`](crate::HeapStack) | | |
 /// | `Lookup` | [`TlsCurrent`](crate::TlsCurrent) | [`TlsCurrent`](crate::TlsCurrent) | [`InlineTlsCurrent`](crate::InlineTlsCurrent) | |
 /// | `Idle` | [`SpinIdle`](crate::SpinIdle) | [`SpinIdle`](crate::SpinIdle) | [`SpinIdle`](crate::SpinIdle) | [`SpinIdle`](crate::SpinIdle) |
+/// | `Steal` | [`SweepSteal`](crate::SweepSteal) | [`SweepSteal`](crate::SweepSteal) | [`SweepSteal`](crate::SweepSteal) | [`SweepSteal`](crate::SweepSteal) |
 ///
 /// The type implementing the trait must not be generic (as for
 /// `worker_tls_anchor!`).
@@ -99,176 +100,136 @@ macro_rules! worker_tls_anchor {
 macro_rules! impl_with_defaults {
     // --- entry: one pair of arms per config trait ------------------------
     //
-    // The state is `[items given so far] [slots]`: one slot per defaulted
-    // type, `(def)` until the body gives that type, then `(set)`.
+    // The trait path is kept as written, so a bare name needs its import
+    // like a plain impl.  The body is emitted unchanged, followed by one
+    // `@or` per defaulted type: each scans the body and emits its default
+    // only if the body does not give that type.
 
-    (impl cmpth::UltIdentity for $t:ty { $($body:tt)* }) => {
-        $crate::impl_with_defaults!(@ult [$crate::UltIdentity] $t; []; [(def) (def) (def) (def) (def) (def) (def)]; $($body)*);
-    };
-    (impl UltIdentity for $t:ty { $($body:tt)* }) => {
-        $crate::impl_with_defaults!(@ult [UltIdentity] $t; []; [(def) (def) (def) (def) (def) (def) (def)]; $($body)*);
-    };
-    (impl cmpth::UltDualIdentity for $t:ty { $($body:tt)* }) => {
-        $crate::impl_with_defaults!(@dual [$crate::UltDualIdentity] $t; []; [(def) (def) (def) (def) (def) (def)]; $($body)*);
-    };
-    (impl UltDualIdentity for $t:ty { $($body:tt)* }) => {
-        $crate::impl_with_defaults!(@dual [UltDualIdentity] $t; []; [(def) (def) (def) (def) (def) (def)]; $($body)*);
-    };
-    (impl cmpth::UltAsyncIdentity for $t:ty { $($body:tt)* }) => {
-        $crate::impl_with_defaults!(@async [$crate::UltAsyncIdentity] $t; []; [(def) (def) (def) (def) (def)]; $($body)*);
-    };
-    (impl UltAsyncIdentity for $t:ty { $($body:tt)* }) => {
-        $crate::impl_with_defaults!(@async [UltAsyncIdentity] $t; []; [(def) (def) (def) (def) (def)]; $($body)*);
-    };
-    (impl cmpth::ScopedIdentity for $t:ty { $($body:tt)* }) => {
-        $crate::impl_with_defaults!(@scoped [$crate::ScopedIdentity] $t; []; [(def)]; $($body)*);
-    };
-    (impl ScopedIdentity for $t:ty { $($body:tt)* }) => {
-        $crate::impl_with_defaults!(@scoped [ScopedIdentity] $t; []; [(def)]; $($body)*);
-    };
+    (impl cmpth::UltIdentity for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@ult [$crate::UltIdentity] $t; $($b)*); };
+    (impl UltIdentity for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@ult [UltIdentity] $t; $($b)*); };
+    (impl cmpth::UltDualIdentity for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@dual [$crate::UltDualIdentity] $t; $($b)*); };
+    (impl UltDualIdentity for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@dual [UltDualIdentity] $t; $($b)*); };
+    (impl cmpth::UltAsyncIdentity for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@async [$crate::UltAsyncIdentity] $t; $($b)*); };
+    (impl UltAsyncIdentity for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@async [UltAsyncIdentity] $t; $($b)*); };
+    (impl cmpth::ScopedIdentity for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@scoped [$crate::ScopedIdentity] $t; $($b)*); };
+    (impl ScopedIdentity for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@scoped [ScopedIdentity] $t; $($b)*); };
 
-    // --- a default, emitted only while its slot is still `(def)` --------
+    // --- the defaults, per trait -----------------------------------------
 
-    (@d (def) $($item:tt)*) => { $($item)* };
-    (@d (set) $($item:tt)*) => {};
-
-    // --- UltIdentity: Base Ctx Desc RunQueue Alloc Lookup Idle -----------
-
-    (@ult $tr:tt $t:ty; [$($i:tt)*]; [$b:tt $c:tt $d:tt $r:tt $a:tt $l:tt $id:tt]; type Base = $v:ty; $($rest:tt)*) => {
-        $crate::impl_with_defaults!(@ult $tr $t; [$($i)* type Base = $v;]; [(set) $c $d $r $a $l $id]; $($rest)*);
-    };
-    (@ult $tr:tt $t:ty; [$($i:tt)*]; [$b:tt $c:tt $d:tt $r:tt $a:tt $l:tt $id:tt]; type Ctx = $v:ty; $($rest:tt)*) => {
-        $crate::impl_with_defaults!(@ult $tr $t; [$($i)* type Ctx = $v;]; [$b (set) $d $r $a $l $id]; $($rest)*);
-    };
-    (@ult $tr:tt $t:ty; [$($i:tt)*]; [$b:tt $c:tt $d:tt $r:tt $a:tt $l:tt $id:tt]; type Desc = $v:ty; $($rest:tt)*) => {
-        $crate::impl_with_defaults!(@ult $tr $t; [$($i)* type Desc = $v;]; [$b $c (set) $r $a $l $id]; $($rest)*);
-    };
-    (@ult $tr:tt $t:ty; [$($i:tt)*]; [$b:tt $c:tt $d:tt $r:tt $a:tt $l:tt $id:tt]; type RunQueue = $v:ty; $($rest:tt)*) => {
-        $crate::impl_with_defaults!(@ult $tr $t; [$($i)* type RunQueue = $v;]; [$b $c $d (set) $a $l $id]; $($rest)*);
-    };
-    (@ult $tr:tt $t:ty; [$($i:tt)*]; [$b:tt $c:tt $d:tt $r:tt $a:tt $l:tt $id:tt]; type Alloc = $v:ty; $($rest:tt)*) => {
-        $crate::impl_with_defaults!(@ult $tr $t; [$($i)* type Alloc = $v;]; [$b $c $d $r (set) $l $id]; $($rest)*);
-    };
-    (@ult $tr:tt $t:ty; [$($i:tt)*]; [$b:tt $c:tt $d:tt $r:tt $a:tt $l:tt $id:tt]; type Lookup = $v:ty; $($rest:tt)*) => {
-        $crate::impl_with_defaults!(@ult $tr $t; [$($i)* type Lookup = $v;]; [$b $c $d $r $a (set) $id]; $($rest)*);
-    };
-    (@ult $tr:tt $t:ty; [$($i:tt)*]; [$b:tt $c:tt $d:tt $r:tt $a:tt $l:tt $id:tt]; type Idle = $v:ty; $($rest:tt)*) => {
-        $crate::impl_with_defaults!(@ult $tr $t; [$($i)* type Idle = $v;]; [$b $c $d $r $a $l (set)]; $($rest)*);
-    };
-    (@ult $tr:tt $t:ty; [$($i:tt)*]; $s:tt; const $n:ident : $ct:ty = $e:expr; $($rest:tt)*) => {
-        $crate::impl_with_defaults!(@ult $tr $t; [$($i)* const $n: $ct = $e;]; $s; $($rest)*);
-    };
-    (@ult [$($trp:tt)*] $t:ty; [$($i:tt)*]; [$b:tt $c:tt $d:tt $r:tt $a:tt $l:tt $id:tt];) => {
-        impl $($trp)* for $t {
-            $($i)*
-            $crate::impl_with_defaults!(@d $b type Base = $crate::OsSystem;);
-            $crate::impl_with_defaults!(@d $c type Ctx = $crate::NativeContext;);
-            $crate::impl_with_defaults!(@d $d type Desc = $crate::StackfulOnlyTaskDesc<Self>;);
-            $crate::impl_with_defaults!(@d $r type RunQueue = $crate::HybridRunQueue<$crate::SuspendedTaskToken<<Self as $crate::UltIdentity>::Desc>>;);
-            $crate::impl_with_defaults!(@d $a type Alloc = $crate::HeapStack;);
-            $crate::impl_with_defaults!(@d $l type Lookup = $crate::TlsCurrent;);
-            $crate::impl_with_defaults!(@d $id type Idle = $crate::SpinIdle;);
+    (@ult [$($tr:tt)*] $t:ty; $($b:tt)*) => {
+        $crate::impl_with_defaults!(@check UltIdentity; $($b)*);
+        impl $($tr)* for $t {
+            $($b)*
+            $crate::impl_with_defaults!(@or Base [$($b)*] type Base = $crate::OsSystem;);
+            $crate::impl_with_defaults!(@or Ctx [$($b)*] type Ctx = $crate::NativeContext;);
+            $crate::impl_with_defaults!(@or Desc [$($b)*] type Desc = $crate::StackfulOnlyTaskDesc<Self>;);
+            $crate::impl_with_defaults!(@or RunQueue [$($b)*] type RunQueue = $crate::HybridRunQueue<$crate::SuspendedTaskToken<<Self as $crate::UltIdentity>::Desc>>;);
+            $crate::impl_with_defaults!(@or Alloc [$($b)*] type Alloc = $crate::HeapStack;);
+            $crate::impl_with_defaults!(@or Lookup [$($b)*] type Lookup = $crate::TlsCurrent;);
+            $crate::impl_with_defaults!(@or Idle [$($b)*] type Idle = $crate::SpinIdle;);
+            $crate::impl_with_defaults!(@or Steal [$($b)*] type Steal = $crate::SweepSteal;);
         }
     };
-    (@ult $tr:tt $t:ty; $i:tt; $s:tt; $($rest:tt)+) => {
-        $crate::impl_with_defaults!(@unknown UltIdentity; $($rest)+);
-    };
-
-    // --- UltDualIdentity: Base Ctx RunQueue Alloc Lookup Idle ------------
-
-    (@dual $tr:tt $t:ty; [$($i:tt)*]; [$b:tt $c:tt $r:tt $a:tt $l:tt $id:tt]; type Base = $v:ty; $($rest:tt)*) => {
-        $crate::impl_with_defaults!(@dual $tr $t; [$($i)* type Base = $v;]; [(set) $c $r $a $l $id]; $($rest)*);
-    };
-    (@dual $tr:tt $t:ty; [$($i:tt)*]; [$b:tt $c:tt $r:tt $a:tt $l:tt $id:tt]; type Ctx = $v:ty; $($rest:tt)*) => {
-        $crate::impl_with_defaults!(@dual $tr $t; [$($i)* type Ctx = $v;]; [$b (set) $r $a $l $id]; $($rest)*);
-    };
-    (@dual $tr:tt $t:ty; [$($i:tt)*]; [$b:tt $c:tt $r:tt $a:tt $l:tt $id:tt]; type RunQueue = $v:ty; $($rest:tt)*) => {
-        $crate::impl_with_defaults!(@dual $tr $t; [$($i)* type RunQueue = $v;]; [$b $c (set) $a $l $id]; $($rest)*);
-    };
-    (@dual $tr:tt $t:ty; [$($i:tt)*]; [$b:tt $c:tt $r:tt $a:tt $l:tt $id:tt]; type Alloc = $v:ty; $($rest:tt)*) => {
-        $crate::impl_with_defaults!(@dual $tr $t; [$($i)* type Alloc = $v;]; [$b $c $r (set) $l $id]; $($rest)*);
-    };
-    (@dual $tr:tt $t:ty; [$($i:tt)*]; [$b:tt $c:tt $r:tt $a:tt $l:tt $id:tt]; type Lookup = $v:ty; $($rest:tt)*) => {
-        $crate::impl_with_defaults!(@dual $tr $t; [$($i)* type Lookup = $v;]; [$b $c $r $a (set) $id]; $($rest)*);
-    };
-    (@dual $tr:tt $t:ty; [$($i:tt)*]; [$b:tt $c:tt $r:tt $a:tt $l:tt $id:tt]; type Idle = $v:ty; $($rest:tt)*) => {
-        $crate::impl_with_defaults!(@dual $tr $t; [$($i)* type Idle = $v;]; [$b $c $r $a $l (set)]; $($rest)*);
-    };
-    (@dual $tr:tt $t:ty; [$($i:tt)*]; $s:tt; const $n:ident : $ct:ty = $e:expr; $($rest:tt)*) => {
-        $crate::impl_with_defaults!(@dual $tr $t; [$($i)* const $n: $ct = $e;]; $s; $($rest)*);
-    };
-    (@dual [$($trp:tt)*] $t:ty; [$($i:tt)*]; [$b:tt $c:tt $r:tt $a:tt $l:tt $id:tt];) => {
-        impl $($trp)* for $t {
-            $($i)*
-            $crate::impl_with_defaults!(@d $b type Base = $crate::OsSystem;);
-            $crate::impl_with_defaults!(@d $c type Ctx = $crate::NativeContext;);
-            $crate::impl_with_defaults!(@d $r type RunQueue = $crate::HybridRunQueue<$crate::SuspendedTaskToken<$crate::DualTaskDesc<$crate::UltDualSystem<Self>>>>;);
-            $crate::impl_with_defaults!(@d $a type Alloc = $crate::HeapStack;);
-            $crate::impl_with_defaults!(@d $l type Lookup = $crate::TlsCurrent;);
-            $crate::impl_with_defaults!(@d $id type Idle = $crate::SpinIdle;);
+    (@dual [$($tr:tt)*] $t:ty; $($b:tt)*) => {
+        $crate::impl_with_defaults!(@check UltDualIdentity; $($b)*);
+        impl $($tr)* for $t {
+            $($b)*
+            $crate::impl_with_defaults!(@or Base [$($b)*] type Base = $crate::OsSystem;);
+            $crate::impl_with_defaults!(@or Ctx [$($b)*] type Ctx = $crate::NativeContext;);
+            $crate::impl_with_defaults!(@or RunQueue [$($b)*] type RunQueue = $crate::HybridRunQueue<$crate::SuspendedTaskToken<$crate::DualTaskDesc<$crate::UltDualSystem<Self>>>>;);
+            $crate::impl_with_defaults!(@or Alloc [$($b)*] type Alloc = $crate::HeapStack;);
+            $crate::impl_with_defaults!(@or Lookup [$($b)*] type Lookup = $crate::TlsCurrent;);
+            $crate::impl_with_defaults!(@or Idle [$($b)*] type Idle = $crate::SpinIdle;);
+            $crate::impl_with_defaults!(@or Steal [$($b)*] type Steal = $crate::SweepSteal;);
         }
     };
-    (@dual $tr:tt $t:ty; $i:tt; $s:tt; $($rest:tt)+) => {
-        $crate::impl_with_defaults!(@unknown UltDualIdentity; $($rest)+);
-    };
-
-    // --- UltAsyncIdentity: Base Desc RunQueue Lookup Idle ----------------
-
-    (@async $tr:tt $t:ty; [$($i:tt)*]; [$b:tt $d:tt $r:tt $l:tt $id:tt]; type Base = $v:ty; $($rest:tt)*) => {
-        $crate::impl_with_defaults!(@async $tr $t; [$($i)* type Base = $v;]; [(set) $d $r $l $id]; $($rest)*);
-    };
-    (@async $tr:tt $t:ty; [$($i:tt)*]; [$b:tt $d:tt $r:tt $l:tt $id:tt]; type Desc = $v:ty; $($rest:tt)*) => {
-        $crate::impl_with_defaults!(@async $tr $t; [$($i)* type Desc = $v;]; [$b (set) $r $l $id]; $($rest)*);
-    };
-    (@async $tr:tt $t:ty; [$($i:tt)*]; [$b:tt $d:tt $r:tt $l:tt $id:tt]; type RunQueue = $v:ty; $($rest:tt)*) => {
-        $crate::impl_with_defaults!(@async $tr $t; [$($i)* type RunQueue = $v;]; [$b $d (set) $l $id]; $($rest)*);
-    };
-    (@async $tr:tt $t:ty; [$($i:tt)*]; [$b:tt $d:tt $r:tt $l:tt $id:tt]; type Lookup = $v:ty; $($rest:tt)*) => {
-        $crate::impl_with_defaults!(@async $tr $t; [$($i)* type Lookup = $v;]; [$b $d $r (set) $id]; $($rest)*);
-    };
-    (@async $tr:tt $t:ty; [$($i:tt)*]; [$b:tt $d:tt $r:tt $l:tt $id:tt]; type Idle = $v:ty; $($rest:tt)*) => {
-        $crate::impl_with_defaults!(@async $tr $t; [$($i)* type Idle = $v;]; [$b $d $r $l (set)]; $($rest)*);
-    };
-    (@async $tr:tt $t:ty; [$($i:tt)*]; $s:tt; const $n:ident : $ct:ty = $e:expr; $($rest:tt)*) => {
-        $crate::impl_with_defaults!(@async $tr $t; [$($i)* const $n: $ct = $e;]; $s; $($rest)*);
-    };
-    (@async [$($trp:tt)*] $t:ty; [$($i:tt)*]; [$b:tt $d:tt $r:tt $l:tt $id:tt];) => {
-        impl $($trp)* for $t {
-            $($i)*
-            $crate::impl_with_defaults!(@d $b type Base = $crate::OsSystem;);
-            $crate::impl_with_defaults!(@d $d type Desc = $crate::StacklessOnlyTaskDesc<$crate::UltAsyncSystem<Self>>;);
-            $crate::impl_with_defaults!(@d $r type RunQueue = $crate::HybridRunQueue<$crate::SuspendedTaskToken<<Self as $crate::UltAsyncIdentity>::Desc>>;);
-            $crate::impl_with_defaults!(@d $l type Lookup = $crate::InlineTlsCurrent;);
-            $crate::impl_with_defaults!(@d $id type Idle = $crate::SpinIdle;);
+    (@async [$($tr:tt)*] $t:ty; $($b:tt)*) => {
+        $crate::impl_with_defaults!(@check UltAsyncIdentity; $($b)*);
+        impl $($tr)* for $t {
+            $($b)*
+            $crate::impl_with_defaults!(@or Base [$($b)*] type Base = $crate::OsSystem;);
+            $crate::impl_with_defaults!(@or Desc [$($b)*] type Desc = $crate::StacklessOnlyTaskDesc<$crate::UltAsyncSystem<Self>>;);
+            $crate::impl_with_defaults!(@or RunQueue [$($b)*] type RunQueue = $crate::HybridRunQueue<$crate::SuspendedTaskToken<<Self as $crate::UltAsyncIdentity>::Desc>>;);
+            $crate::impl_with_defaults!(@or Lookup [$($b)*] type Lookup = $crate::InlineTlsCurrent;);
+            $crate::impl_with_defaults!(@or Idle [$($b)*] type Idle = $crate::SpinIdle;);
+            $crate::impl_with_defaults!(@or Steal [$($b)*] type Steal = $crate::SweepSteal;);
         }
     };
-    (@async $tr:tt $t:ty; $i:tt; $s:tt; $($rest:tt)+) => {
-        $crate::impl_with_defaults!(@unknown UltAsyncIdentity; $($rest)+);
-    };
-
-    // --- ScopedIdentity: Idle --------------------------------------------
-
-    (@scoped $tr:tt $t:ty; [$($i:tt)*]; [$id:tt]; type Idle = $v:ty; $($rest:tt)*) => {
-        $crate::impl_with_defaults!(@scoped $tr $t; [$($i)* type Idle = $v;]; [(set)]; $($rest)*);
-    };
-    (@scoped [$($trp:tt)*] $t:ty; [$($i:tt)*]; [$id:tt];) => {
-        impl $($trp)* for $t {
-            $($i)*
-            $crate::impl_with_defaults!(@d $id type Idle = $crate::SpinIdle;);
+    (@scoped [$($tr:tt)*] $t:ty; $($b:tt)*) => {
+        $crate::impl_with_defaults!(@check ScopedIdentity; $($b)*);
+        impl $($tr)* for $t {
+            $($b)*
+            $crate::impl_with_defaults!(@or Idle [$($b)*] type Idle = $crate::SpinIdle;);
+            $crate::impl_with_defaults!(@or Steal [$($b)*] type Steal = $crate::SweepSteal;);
         }
     };
-    (@scoped $tr:tt $t:ty; $i:tt; $s:tt; $($rest:tt)+) => {
-        $crate::impl_with_defaults!(@unknown ScopedIdentity; $($rest)+);
-    };
 
-    // --- errors ----------------------------------------------------------
+    // --- which types each trait has --------------------------------------
 
-    (@unknown $tr:ident; type $k:ident $($rest:tt)*) => {
+    (@has UltIdentity Base) => {};
+    (@has UltIdentity Ctx) => {};
+    (@has UltIdentity Desc) => {};
+    (@has UltIdentity RunQueue) => {};
+    (@has UltIdentity Alloc) => {};
+    (@has UltIdentity Lookup) => {};
+    (@has UltIdentity Idle) => {};
+    (@has UltIdentity Steal) => {};
+    (@has UltDualIdentity Base) => {};
+    (@has UltDualIdentity Ctx) => {};
+    (@has UltDualIdentity RunQueue) => {};
+    (@has UltDualIdentity Alloc) => {};
+    (@has UltDualIdentity Lookup) => {};
+    (@has UltDualIdentity Idle) => {};
+    (@has UltDualIdentity Steal) => {};
+    (@has UltAsyncIdentity Base) => {};
+    (@has UltAsyncIdentity Desc) => {};
+    (@has UltAsyncIdentity RunQueue) => {};
+    (@has UltAsyncIdentity Lookup) => {};
+    (@has UltAsyncIdentity Idle) => {};
+    (@has UltAsyncIdentity Steal) => {};
+    (@has ScopedIdentity Idle) => {};
+    (@has ScopedIdentity Steal) => {};
+    (@has $tr:ident $k:ident) => {
         compile_error!(concat!("impl_with_defaults!: `", stringify!($tr), "` has no associated type `", stringify!($k), "`"));
     };
-    (@unknown $tr:ident; $($rest:tt)*) => {
-        compile_error!(concat!("impl_with_defaults!: expected `type Name = Type;` or `const NAME: Type = value;` in the `", stringify!($tr), "` impl, found `", stringify!($($rest)*), "`"));
+
+    // --- `@check`: every item is a known `type` or a `const` -------------
+
+    (@check $tr:ident;) => {};
+    (@check $tr:ident; type $k:ident = $v:ty; $($r:tt)*) => {
+        $crate::impl_with_defaults!(@has $tr $k);
+        $crate::impl_with_defaults!(@check $tr; $($r)*);
     };
+    (@check $tr:ident; const $n:ident : $ct:ty = $e:expr; $($r:tt)*) => {
+        $crate::impl_with_defaults!(@check $tr; $($r)*);
+    };
+    (@check $tr:ident; $($r:tt)*) => {
+        compile_error!(concat!("impl_with_defaults!: expected `type Name = Type;` or `const NAME: Type = value;` in the `", stringify!($tr), "` impl, found `", stringify!($($r)*), "`"));
+    };
+
+    // --- `@or K [body] default`: the default unless the body gives `K` ---
+    //
+    // One arm per type name (any trait), since macro_rules cannot compare
+    // two identifiers.
+
+    (@or $k:ident [] $($d:tt)*) => { $($d)* };
+    (@or Base [type Base = $v:ty; $($r:tt)*] $($d:tt)*) => {};
+    (@or Ctx [type Ctx = $v:ty; $($r:tt)*] $($d:tt)*) => {};
+    (@or Desc [type Desc = $v:ty; $($r:tt)*] $($d:tt)*) => {};
+    (@or RunQueue [type RunQueue = $v:ty; $($r:tt)*] $($d:tt)*) => {};
+    (@or Alloc [type Alloc = $v:ty; $($r:tt)*] $($d:tt)*) => {};
+    (@or Lookup [type Lookup = $v:ty; $($r:tt)*] $($d:tt)*) => {};
+    (@or Idle [type Idle = $v:ty; $($r:tt)*] $($d:tt)*) => {};
+    (@or Steal [type Steal = $v:ty; $($r:tt)*] $($d:tt)*) => {};
+    (@or $k:ident [type $o:ident = $v:ty; $($r:tt)*] $($d:tt)*) => {
+        $crate::impl_with_defaults!(@or $k [$($r)*] $($d)*);
+    };
+    (@or $k:ident [const $n:ident : $ct:ty = $e:expr; $($r:tt)*] $($d:tt)*) => {
+        $crate::impl_with_defaults!(@or $k [$($r)*] $($d)*);
+    };
+    // Anything else: `@check` has already reported it.
+    (@or $k:ident [$($r:tt)*] $($d:tt)*) => {};
+
     ($($other:tt)*) => {
         compile_error!("impl_with_defaults!: expected `impl Trait for Type { ... }` with Trait one of UltIdentity, UltDualIdentity, UltAsyncIdentity, ScopedIdentity");
     };

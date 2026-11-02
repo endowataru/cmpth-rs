@@ -741,6 +741,7 @@ impl cmpth::WorkerSystem for ManualSystem {
     type RunQueue = HybridRunQueue<cmpth::SuspendedTaskToken<DualTaskDesc<Self>>>;
     type Lookup          = TlsCurrent;
     type Idle = cmpth::SpinIdle;
+    type Steal = cmpth::SweepSteal;
 
     fn worker_tls() -> &'static <OsSystem as cmpth::NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         // The one thing a macro (or the user, as here) must write:
@@ -843,6 +844,7 @@ impl cmpth::WorkerSystem for PollerSystem {
     type RunQueue = HybridRunQueue<cmpth::SuspendedTaskToken<StackfulOnlyTaskDesc<Self>>>;
     type Lookup          = TlsCurrent;
     type Idle = cmpth::SpinIdle;
+    type Steal = cmpth::SweepSteal;
 
     fn worker_tls() -> &'static <OsSystem as cmpth::NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         static TLS: OsTls<UltWorker<PollerSystem>> =
