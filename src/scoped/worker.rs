@@ -140,6 +140,7 @@ impl<M: ScopedIdentity> WorkerSystem for ScopedSystem<M> {
     type RunQueue = HybridRunQueue<TaskRef>;
     type Lookup = ScopedLookup<M>;
     type Idle = M::Idle;
+    type Steal = M::Steal;
     type Worker = ScopedWorker<M>;
 
     // Dead code for every `M`: nothing in `scoped` ever calls

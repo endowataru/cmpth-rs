@@ -365,10 +365,12 @@ mod tests {
     struct SpinMarker;
     impl ScopedIdentity for SpinMarker {
         type Idle = SpinIdle;
+        type Steal = crate::resumable::common::steal::SweepSteal;
     }
     struct ParkMarker;
     impl ScopedIdentity for ParkMarker {
         type Idle = ParkIdle;
+        type Steal = crate::resumable::common::steal::SweepSteal;
     }
 
     // Recursive `async fn`s can't pass their own opaque return type as a

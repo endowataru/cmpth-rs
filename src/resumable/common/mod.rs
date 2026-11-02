@@ -9,6 +9,7 @@ pub mod lookup;
 pub mod pool;
 pub mod scheduler;
 pub mod stack;
+pub mod steal;
 pub mod sync;
 pub mod system;
 pub mod thread;

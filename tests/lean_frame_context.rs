@@ -30,6 +30,7 @@ impl UltIdentity for LeanContextSystem {
     type Alloc = cmpth::resumable::common::stack::HeapStack;
     type Lookup = cmpth::resumable::common::lookup::TlsCurrent;
     type Idle = cmpth::SpinIdle;
+    type Steal = cmpth::SweepSteal;
 }
 
 #[test]

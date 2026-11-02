@@ -10,10 +10,11 @@
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::resumable::common::deque::{RunQueueStealer, Steal, WorkerRunQueue};
+use crate::resumable::common::deque::{Steal, WorkerRunQueue};
 use crate::resumable::common::external_queue::WakeHook;
 use crate::resumable::common::idle::IdlePolicy;
 use crate::resumable::common::lookup::CurrentLookup;
+use crate::resumable::common::steal::StealPolicy;
 use crate::resumable::common::system::{RunnableItem, WorkerSystem};
 use crate::resumable::common::worker::{LocalQueue, WorkerOps};
 use crate::traits::stackful::SpawnableStackfulTaskSystem;
@@ -65,13 +66,13 @@ impl<S: WorkerSystem> PoolCore<S> {
 pub struct WorkerCore<S: WorkerSystem> {
     num: usize,
     pub(crate) deque: S::RunQueue,
-    steal_seed: Cell<usize>,
+    steal: <S::Steal as StealPolicy>::State,
     pool: Cell<*const PoolCore<S>>,
 }
 
-// SAFETY: `Cell` fields are only ever touched by the owning base thread (a
-// worker struct is pinned to one thread for its lifetime); `deque` is
-// internally synchronized; `pool` is read-only after `bind`.
+// SAFETY: `Cell` fields and `steal` are only ever touched by the owning base
+// thread (a worker struct is pinned to one thread for its lifetime); `deque`
+// is internally synchronized; `pool` is read-only after `bind`.
 unsafe impl<S: WorkerSystem> Send for WorkerCore<S> {}
 unsafe impl<S: WorkerSystem> Sync for WorkerCore<S> {}
 
@@ -80,7 +81,7 @@ impl<S: WorkerSystem> WorkerCore<S> {
         WorkerCore {
             num,
             deque: S::RunQueue::default(),
-            steal_seed: Cell::new(num.wrapping_mul(0x9E37_79B9).wrapping_add(1)),
+            steal: <S::Steal as StealPolicy>::new_state(num),
             pool: Cell::new(std::ptr::null()),
         }
     }
@@ -123,21 +124,7 @@ impl<S: WorkerSystem> LocalQueue<S> for WorkerCore<S> {
         if n <= 1 {
             return Steal::Empty;
         }
-        let seed = self.steal_seed.get();
-        self.steal_seed.set(seed.wrapping_add(1));
-        let mut saw_retry = false;
-        for i in 0..n {
-            let victim = (seed + i) % n;
-            if victim == self.num {
-                continue;
-            }
-            match stealers[victim].try_steal() {
-                Steal::Success(c) => return Steal::Success(c),
-                Steal::Retry => saw_retry = true,
-                Steal::Empty => {}
-            }
-        }
-        if saw_retry { Steal::Retry } else { Steal::Empty }
+        <S::Steal as StealPolicy>::try_steal(&self.steal, self.num, stealers)
     }
 
     #[inline]
