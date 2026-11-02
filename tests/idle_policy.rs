@@ -9,7 +9,7 @@ use std::task::Waker;
 use std::time::{Duration, Instant};
 
 use cmpth::{
-    FixedCap, HalfCap, JoinHandleLike, OsSystem, ParkIdle, SearchIdle, SpawnableStackfulTaskSystem, StackfulBuilder, StacklessBuilder,
+    FixedCap, HalfCap, JoinHandleLike, ParkIdle, SearchIdle, SpawnableStackfulTaskSystem, StackfulBuilder, StacklessBuilder,
     StackfulInitSystem, StacklessInitSystem, UltAsyncIdentity, UltAsyncSystem, UltIdentity,
 };
 
@@ -22,25 +22,19 @@ macro_rules! suite {
         pub struct ParkStackful;
         cmpth::worker_tls_anchor!(ParkStackful);
 
-        impl UltIdentity for ParkStackful {
-            type Base = OsSystem;
-            type Ctx = cmpth::NativeContext;
-            type Desc = cmpth::StackfulOnlyTaskDesc<Self>;
-            type RunQueue = cmpth::HybridRunQueue<cmpth::SuspendedTaskToken<cmpth::StackfulOnlyTaskDesc<Self>>>;
-            type Alloc = cmpth::HeapStack;
-            type Lookup = cmpth::TlsCurrent;
-            type Idle = $idle;
+        cmpth::impl_with_defaults! {
+            impl UltIdentity for ParkStackful {
+                type Idle = $idle;
+            }
         }
 
         pub struct ParkAsyncMarker;
         cmpth::worker_tls_anchor!(ParkAsyncMarker);
 
-        impl UltAsyncIdentity for ParkAsyncMarker {
-            type Base = OsSystem;
-            type Desc = cmpth::StacklessOnlyTaskDesc<UltAsyncSystem<Self>>;
-            type RunQueue = cmpth::HybridRunQueue<cmpth::SuspendedTaskToken<cmpth::StacklessOnlyTaskDesc<UltAsyncSystem<Self>>>>;
-            type Lookup = cmpth::InlineTlsCurrent;
-            type Idle = $idle;
+        cmpth::impl_with_defaults! {
+            impl UltAsyncIdentity for ParkAsyncMarker {
+                type Idle = $idle;
+            }
         }
 
         type ParkAsync = UltAsyncSystem<ParkAsyncMarker>;

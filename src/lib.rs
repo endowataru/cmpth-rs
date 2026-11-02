@@ -74,20 +74,16 @@ pub use post::{DefaultPostChoice, QueuePostDelegator, SlotPostDelegator};
 // ULTs, and their `Mutex`/`Barrier` are contended together from either
 // calling convention; see `UltDualIdentity`.  Each is a marker type plus
 // its config, named through `UltDualSystem<_>`; the markers stay hidden,
-// as for `DefaultStacklessOnlyTaskSystem`.
+// as for `DefaultStacklessOnlyTaskSystem`.  Every system below states only
+// what differs from `impl_with_defaults!`'s defaults.
 
 #[doc(hidden)]
 pub struct DefaultDualMarker;
 
 worker_tls_anchor!(DefaultDualMarker);
 
-impl UltDualIdentity for DefaultDualMarker {
-    type Base = OsSystem;
-    type Ctx = NativeContext;
-    type RunQueue = HybridRunQueue<SuspendedTaskToken<DualTaskDesc<UltDualSystem<Self>>>>;
-    type Alloc = HeapStack;
-    type Lookup = TlsCurrent;
-    type Idle = SpinIdle;
+impl_with_defaults! {
+    impl UltDualIdentity for DefaultDualMarker {}
 }
 
 /// The default ULT system: runs on top of [`OsSystem`].
@@ -98,13 +94,10 @@ pub struct ParkDualMarker;
 
 worker_tls_anchor!(ParkDualMarker);
 
-impl UltDualIdentity for ParkDualMarker {
-    type Base = OsSystem;
-    type Ctx = NativeContext;
-    type RunQueue = HybridRunQueue<SuspendedTaskToken<DualTaskDesc<UltDualSystem<Self>>>>;
-    type Alloc = HeapStack;
-    type Lookup = TlsCurrent;
-    type Idle = SearchIdle;
+impl_with_defaults! {
+    impl UltDualIdentity for ParkDualMarker {
+        type Idle = SearchIdle;
+    }
 }
 
 /// [`DefaultDualTaskSystem`] whose idle workers block their OS thread
@@ -116,13 +109,10 @@ pub struct ParkHalfDualMarker;
 
 worker_tls_anchor!(ParkHalfDualMarker);
 
-impl UltDualIdentity for ParkHalfDualMarker {
-    type Base = OsSystem;
-    type Ctx = NativeContext;
-    type RunQueue = HybridRunQueue<SuspendedTaskToken<DualTaskDesc<UltDualSystem<Self>>>>;
-    type Alloc = HeapStack;
-    type Lookup = TlsCurrent;
-    type Idle = SearchIdle<HalfCap>;
+impl_with_defaults! {
+    impl UltDualIdentity for ParkHalfDualMarker {
+        type Idle = SearchIdle<HalfCap>;
+    }
 }
 
 /// [`ParkDualTaskSystem`] letting half the workers search
@@ -135,13 +125,10 @@ pub struct DefaultNestedDualMarker;
 
 worker_tls_anchor!(DefaultNestedDualMarker);
 
-impl UltDualIdentity for DefaultNestedDualMarker {
-    type Base = DefaultDualTaskSystem;
-    type Ctx = NativeContext;
-    type RunQueue = HybridRunQueue<SuspendedTaskToken<DualTaskDesc<UltDualSystem<Self>>>>;
-    type Alloc = HeapStack;
-    type Lookup = TlsCurrent;
-    type Idle = SpinIdle;
+impl_with_defaults! {
+    impl UltDualIdentity for DefaultNestedDualMarker {
+        type Base = DefaultDualTaskSystem;
+    }
 }
 
 /// A second-level ULT system: runs on top of [`DefaultDualTaskSystem`]'s ULTs.
@@ -165,14 +152,8 @@ pub struct DefaultStackfulOnlyTaskSystem;
 
 worker_tls_anchor!(DefaultStackfulOnlyTaskSystem);
 
-impl UltIdentity for DefaultStackfulOnlyTaskSystem {
-    type Base = OsSystem;
-    type Ctx = NativeContext;
-    type Desc = resumable::stackful::desc::StackfulOnlyTaskDesc<Self>;
-    type RunQueue = HybridRunQueue<SuspendedTaskToken<resumable::stackful::desc::StackfulOnlyTaskDesc<Self>>>;
-    type Alloc = HeapStack;
-    type Lookup = TlsCurrent;
-    type Idle = resumable::common::idle::SpinIdle;
+impl_with_defaults! {
+    impl UltIdentity for DefaultStackfulOnlyTaskSystem {}
 }
 
 // `DefaultStacklessOnlyTaskSystem`'s marker: implements `UltAsyncIdentity`
@@ -184,12 +165,8 @@ pub struct DefaultStacklessOnlyMarker;
 
 worker_tls_anchor!(DefaultStacklessOnlyMarker);
 
-impl resumable::stackless::system::UltAsyncIdentity for DefaultStacklessOnlyMarker {
-    type Base = OsSystem;
-    type Desc = resumable::stackless::desc::StacklessOnlyTaskDesc<UltAsyncSystem<Self>>;
-    type RunQueue = HybridRunQueue<SuspendedTaskToken<resumable::stackless::desc::StacklessOnlyTaskDesc<UltAsyncSystem<Self>>>>;
-    type Lookup = InlineTlsCurrent;
-    type Idle = resumable::common::idle::SpinIdle;
+impl_with_defaults! {
+    impl UltAsyncIdentity for DefaultStacklessOnlyMarker {}
 }
 
 /// The default stackless-*only* ULT system: runs on top of [`OsSystem`],
