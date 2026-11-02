@@ -49,6 +49,7 @@ pub use resumable::common::idle::{
     CondvarWait, FixedCap, FutexWait, GoCap, HalfCap, IdlePolicy, ParkIdle, ParkWait, SearchCap, SearchIdle, SpinIdle,
 };
 pub use resumable::common::lookup::{CurrentLookup, TlsCurrent};
+pub use resumable::common::steal::{RandomSteal, RandomSweepSteal, StealPolicy, SweepSteal};
 pub use resumable::stackless::lookup::InlineTlsCurrent;
 pub use resumable::common::pool::{DescPool, ReturnPool, SimplePool};
 pub use resumable::common::stack::{HeapStack, MallocFrame, StackAlloc};

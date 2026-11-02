@@ -52,6 +52,7 @@ use super::{async_engine, sync_engine};
 ///
 /// impl cmpth::ScopedIdentity for MyScopedMarker {
 ///     type Idle = cmpth::ParkIdle;
+///     type Steal = cmpth::SweepSteal;
 /// }
 ///
 /// type MyScopedSystem = cmpth::ScopedSystem<MyScopedMarker>;
@@ -68,6 +69,9 @@ use super::{async_engine, sync_engine};
 pub trait ScopedIdentity: Sized + Send + Sync + 'static {
     /// Idle/wakeup policy — see [`crate::IdlePolicy`].
     type Idle: IdlePolicy;
+
+    /// Steal policy — see [`crate::StealPolicy`].
+    type Steal: crate::resumable::common::steal::StealPolicy;
 }
 
 /// The default [`ScopedIdentity`]: [`SpinIdle`], same as every other
@@ -78,6 +82,7 @@ pub struct DefaultScopedMarker;
 
 impl ScopedIdentity for DefaultScopedMarker {
     type Idle = SpinIdle;
+    type Steal = crate::resumable::common::steal::SweepSteal;
 }
 
 /// The generic `scoped` system — `M`'s [`ScopedIdentity::Idle`] is this

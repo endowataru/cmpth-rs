@@ -47,6 +47,7 @@ use crate::traits::{TlsSlot, WorkerTlsAnchor};
 ///     type Alloc = cmpth::HeapStack;
 ///     type Lookup = cmpth::TlsCurrent;
 ///     type Idle = cmpth::SearchIdle;
+///     type Steal = cmpth::SweepSteal;
 /// }
 ///
 /// type MyDualSystem = cmpth::UltDualSystem<MyDualMarker>;
@@ -77,6 +78,9 @@ pub trait UltDualIdentity: WorkerTlsAnchor + Sized + Send + Sync + 'static {
 
     /// Idle/wakeup policy; see [`WorkerSystem::Idle`].
     type Idle: crate::resumable::common::idle::IdlePolicy;
+
+    /// Steal policy; see [`crate::WorkerSystem::Steal`].
+    type Steal: crate::resumable::common::steal::StealPolicy;
 
     /// Current-worker lookup policy.  `where UltDualSystem<Self>:
     /// WorkerSystem`, as for [`UltAsyncIdentity`](crate::UltAsyncIdentity)'s
@@ -114,6 +118,7 @@ impl<M: UltDualIdentity> WorkerSystem for UltDualSystem<M> {
     type RunQueue = M::RunQueue;
     type Lookup = <M as UltDualIdentity>::Lookup;
     type Idle = <M as UltDualIdentity>::Idle;
+    type Steal = <M as UltDualIdentity>::Steal;
 
     fn worker_tls() -> &'static <M::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         TlsSlot::from_anchor(<M as WorkerTlsAnchor>::anchor())

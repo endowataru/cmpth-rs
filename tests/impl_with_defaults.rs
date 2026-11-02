@@ -34,13 +34,17 @@ cmpth::worker_tls_anchor!(Dual);
 cmpth::impl_with_defaults! {
     impl UltDualIdentity for Dual {
         type Base = cmpth::DefaultDualTaskSystem;
+        type Steal = cmpth::RandomSteal;
     }
 }
 
 pub struct Async;
 cmpth::worker_tls_anchor!(Async);
 cmpth::impl_with_defaults! {
-    impl cmpth::UltAsyncIdentity for Async {}
+    impl cmpth::UltAsyncIdentity for Async {
+        const ASYNC_POOL_SIZE: usize = 256;
+        type Steal = cmpth::RandomSweepSteal;
+    }
 }
 
 pub struct Scoped;
@@ -58,17 +62,22 @@ fn defaults_and_overrides() {
     same::<<Stackful as UltIdentity>::RunQueue, HybridRunQueue<SuspendedTaskToken<StackfulOnlyTaskDesc<Stackful>>>>();
     same::<<Stackful as UltIdentity>::Alloc, cmpth::HeapStack>();
     same::<<Stackful as UltIdentity>::Idle, cmpth::SearchIdle>();
+    same::<<Stackful as UltIdentity>::Steal, cmpth::SweepSteal>();
     assert_eq!(<Stackful as UltIdentity>::STACK_SIZE, 128 * 1024);
 
     same::<<Dual as UltDualIdentity>::Base, cmpth::DefaultDualTaskSystem>();
     same::<<Dual as UltDualIdentity>::RunQueue, HybridRunQueue<SuspendedTaskToken<DualTaskDesc<UltDualSystem<Dual>>>>>();
     same::<<Dual as UltDualIdentity>::Idle, SpinIdle>();
+    same::<<Dual as UltDualIdentity>::Steal, cmpth::RandomSteal>();
     assert_eq!(<Dual as UltDualIdentity>::ASYNC_POOL_SIZE, 512);
 
     same::<<Async as UltAsyncIdentity>::Desc, StacklessOnlyTaskDesc<UltAsyncSystem<Async>>>();
+    same::<<Async as UltAsyncIdentity>::Steal, cmpth::RandomSweepSteal>();
+    assert_eq!(<Async as UltAsyncIdentity>::ASYNC_POOL_SIZE, 256);
     same::<<Async as UltAsyncIdentity>::RunQueue, HybridRunQueue<SuspendedTaskToken<StacklessOnlyTaskDesc<UltAsyncSystem<Async>>>>>();
 
     same::<<Scoped as cmpth::ScopedIdentity>::Idle, cmpth::ParkIdle>();
+    same::<<Scoped as cmpth::ScopedIdentity>::Steal, cmpth::SweepSteal>();
 
     // `Lookup` carries a `where` clause, so it is checked through the system.
     same::<<Stackful as cmpth::WorkerSystem>::Lookup, TlsCurrent>();

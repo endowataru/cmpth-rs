@@ -204,6 +204,7 @@ impl cmpth::UltIdentity for MySystem {
     type Alloc = cmpth::HeapStack;                         // stack allocator
     type Lookup = cmpth::TlsCurrent;                       // current-worker lookup
     type Idle = cmpth::SpinIdle;                           // what idle workers do (spin / park)
+    type Steal = cmpth::SweepSteal;                        // which victims a thief tries
 }
 ```
 
