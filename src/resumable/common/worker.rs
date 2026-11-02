@@ -126,6 +126,9 @@ pub trait LocalQueue<S: WorkerSystem> {
     /// don't mistake contention for idleness.
     fn try_steal(&self) -> Steal<S::SuspendedToken>;
 
+    /// This worker's [`DispatchPolicy`](crate::DispatchPolicy) state.
+    fn dispatch_state(&self) -> &<S::Dispatch as crate::resumable::common::dispatch::DispatchPolicy>::State;
+
     /// This worker's index within its scheduler.
     fn num(&self) -> usize;
 
@@ -395,7 +398,7 @@ impl<S: WorkerSystem + PoolSystem> UltWorker<S> {
     }
 
     /// Take the stored root (scheduler-loop) continuation. Shared by
-    /// `pop_or_root_stackful`/`pop_or_root_dual`.
+    /// `next_or_root_stackful`/`next_or_root_dual`.
     pub(crate) fn take_root_cont(&self) -> SuspendedTaskToken<S::Desc> {
         self.root_cont.take()
             .unwrap_or_else(|| panic!("no runnable continuation on worker {}", self.core.num()))
@@ -508,6 +511,11 @@ impl<S: WorkerSystem + PoolSystem> LocalQueue<S> for UltWorker<S> {
     #[inline]
     fn try_steal(&self) -> Steal<S::SuspendedToken> {
         self.core.try_steal()
+    }
+
+    #[inline]
+    fn dispatch_state(&self) -> &<S::Dispatch as crate::resumable::common::dispatch::DispatchPolicy>::State {
+        self.core.dispatch_state()
     }
 
     #[inline]

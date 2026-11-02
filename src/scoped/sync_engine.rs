@@ -33,7 +33,7 @@
 use std::sync::Arc;
 
 use crate::resumable::common::worker::{LocalQueue, WorkerOps};
-use crate::resumable::common::worker_core::try_run_one;
+use crate::resumable::common::worker_core::{try_run_one, wait_round};
 
 use super::system::{ScopedIdentity, ScopedSystem};
 use super::task::StackTask;
@@ -87,9 +87,10 @@ where
                 wk.push(other);
             }
             // Stolen: help execute other stealable work while waiting.
+            let mut rounds = 0;
             while !task_b.latch.probe() {
                 if !try_execute_one(wk) {
-                    std::hint::spin_loop();
+                    wait_round::<ScopedSystem<M>>(&mut rounds);
                 }
             }
             task_b.take_result()
@@ -197,12 +198,18 @@ mod tests {
     struct SpinMarker;
     impl ScopedIdentity for SpinMarker {
         type Idle = SpinIdle;
-        type Steal = crate::resumable::common::steal::SweepSteal;
+        type Steal = crate::resumable::common::steal::RandomSweepSteal;
+        type Dispatch = crate::resumable::common::dispatch::StandardDispatch;
+        type Duties = crate::duty::GlobalDuties;
+        type Observe = crate::resumable::common::observe::NoObserver;
     }
     struct ParkMarker;
     impl ScopedIdentity for ParkMarker {
         type Idle = ParkIdle;
-        type Steal = crate::resumable::common::steal::SweepSteal;
+        type Steal = crate::resumable::common::steal::RandomSweepSteal;
+        type Dispatch = crate::resumable::common::dispatch::StandardDispatch;
+        type Duties = crate::duty::GlobalDuties;
+        type Observe = crate::resumable::common::observe::NoObserver;
     }
 
     fn fib<M: ScopedIdentity>(n: u64) -> u64 {

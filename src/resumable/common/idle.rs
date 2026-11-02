@@ -11,9 +11,105 @@
 //!
 //! Swap the implementation via [`crate::WorkerSystem::Idle`].
 
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering, fence};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
+
+use crate::duty::DutyDomain;
+use crate::resumable::common::observe::SchedObserver;
+use crate::resumable::common::system::WorkerSystem;
+use crate::traits::stackful::SpawnableStackfulTaskSystem;
+
+/// What an idle policy may use from the worker that calls it: whether the
+/// last round saw work it could not take, the pool's `finished` flag, a
+/// yield of the base thread, the system's duties
+/// ([`WorkerSystem::Duties`]) and its observer
+/// ([`WorkerSystem::Observe`]).
+pub struct IdleCx<'a, S: WorkerSystem> {
+    me: usize,
+    retry: bool,
+    finished: &'a AtomicBool,
+    _s: PhantomData<fn() -> S>,
+}
+
+impl<'a, S: WorkerSystem> IdleCx<'a, S> {
+    #[inline(always)]
+    pub(crate) fn new(me: usize, retry: bool, finished: &'a AtomicBool) -> Self {
+        IdleCx { me, retry, finished, _s: PhantomData }
+    }
+
+    /// The calling worker's index in its pool.
+    #[inline(always)]
+    pub fn worker(&self) -> usize {
+        self.me
+    }
+
+    /// The round saw a victim that had work but could not be robbed right
+    /// now ([`Steal::Retry`](crate::Steal::Retry)): not evidence of
+    /// idleness.
+    #[inline(always)]
+    pub fn retry(&self) -> bool {
+        self.retry
+    }
+
+    /// Set once the pool stops; a policy that blocks must return promptly
+    /// once it is (and [`IdlePolicy::shutdown`] wakes it).
+    #[inline(always)]
+    pub fn finished(&self) -> &'a AtomicBool {
+        self.finished
+    }
+
+    /// Yield the *base* thread (`S::Base::yield_now`): the base need not be
+    /// an OS thread, so never `std::thread::yield_now`.
+    #[inline(always)]
+    pub fn yield_now(&self) {
+        <S::Base as SpawnableStackfulTaskSystem>::yield_now();
+    }
+
+    /// Run the half-due duties (see [`DutyRegistry::run_idle`](crate::duty::DutyRegistry::run_idle)).
+    #[inline(always)]
+    pub fn run_duties(&self) {
+        if let Some(r) = <S::Duties as DutyDomain>::registry() {
+            r.run_idle();
+        }
+    }
+
+    /// See [`DutyRegistry::wait_spin_ns`](crate::duty::DutyRegistry::wait_spin_ns); 0 without duties.
+    #[inline(always)]
+    pub fn duty_wait_spin_ns(&self) -> u64 {
+        <S::Duties as DutyDomain>::registry().map_or(0, |r| r.wait_spin_ns())
+    }
+
+    /// Before parking: see [`DutyRegistry::park_timeout`](crate::duty::DutyRegistry::park_timeout).
+    #[inline(always)]
+    pub fn duty_park_timeout(&self, timed: &mut bool) -> Option<Duration> {
+        <S::Duties as DutyDomain>::registry().and_then(|r| r.park_timeout(timed))
+    }
+
+    /// Found work while keeping the duties' due times: see
+    /// [`DutyRegistry::idle_done`](crate::duty::DutyRegistry::idle_done).
+    #[inline(always)]
+    pub fn duty_idle_done(&self, timed: &mut bool) {
+        if let Some(r) = <S::Duties as DutyDomain>::registry() {
+            r.idle_done(timed);
+        } else {
+            *timed = false;
+        }
+    }
+
+    /// Report that this worker is about to block its thread...
+    #[inline(always)]
+    pub fn parking(&self) {
+        <S::Observe as SchedObserver>::park(self.me);
+    }
+
+    /// ... and that it woke up.
+    #[inline(always)]
+    pub fn woke(&self) {
+        <S::Observe as SchedObserver>::unpark(self.me);
+    }
+}
 
 /// Idle/wakeup protocol of one worker pool. One value is shared by all
 /// workers of a pool (it lives in `PoolCore`).
@@ -26,28 +122,29 @@ use std::time::{Duration, Instant};
 /// * `no_work_found` is called by an idle worker after each search round
 ///   that found nothing. The caller re-searches after it returns, so a policy
 ///   may use consecutive calls as "announce intent to sleep", then "re-check",
-///   then "sleep" (see [`ParkIdle`]).
+///   then "sleep" (see [`ParkIdle`]).  The re-check is a full search only if
+///   the system's [`StealPolicy`](crate::StealPolicy) tries every victim in
+///   a round (the standard ones but [`RandomSteal`](crate::RandomSteal) do);
+///   otherwise a sleeper may miss work that another worker will run itself.
 /// * `work_found` is called when a search succeeds, ending the idle episode.
 /// * `shutdown` is called once after `finished` has been set; every blocked
 ///   worker must return from `no_work_found` promptly.
+///
+/// The calls get an [`IdleCx`]: the system's duties, its observer and the
+/// base thread's yield.  A policy should run the duties
+/// ([`IdleCx::run_duties`]) where it already does something slow, as the
+/// standard ones do; a policy that never does leaves them to the keeper.
 pub trait IdlePolicy: Default + Send + Sync + 'static {
     /// Per-worker state for one idle episode (round counters, a sleep ticket).
     type Episode: Default;
 
     fn new_work(&self);
 
-    fn work_found(&self, ep: &mut Self::Episode);
+    fn work_found<S: WorkerSystem>(&self, ep: &mut Self::Episode, cx: &IdleCx<'_, S>);
 
-    /// `retry` is true when the search saw a victim that had work but could
-    /// not be robbed right now ([`Steal::Retry`](crate::resumable::common::deque::Steal::Retry));
-    /// such a round is not evidence of idleness.
-    ///
-    /// `yield_now` yields the *base* thread (`S::Base::yield_now`); policies
-    /// must use it rather than `std::thread::yield_now`, since the base need
-    /// not be an OS thread.
-    fn no_work_found(&self, ep: &mut Self::Episode, retry: bool, finished: &AtomicBool, yield_now: impl Fn());
+    fn no_work_found<S: WorkerSystem>(&self, ep: &mut Self::Episode, cx: &IdleCx<'_, S>);
 
-    fn shutdown(&self);
+    fn shutdown<S: WorkerSystem>(&self);
 
     /// Told the pool's worker count once, when the pool is built.
     fn set_workers(&self, _n: usize) {}
@@ -70,24 +167,24 @@ impl IdlePolicy for SpinIdle {
     fn new_work(&self) {}
 
     #[inline(always)]
-    fn work_found(&self, ep: &mut u32) {
+    fn work_found<S: WorkerSystem>(&self, ep: &mut u32, _cx: &IdleCx<'_, S>) {
         *ep = 0;
     }
 
     #[inline(always)]
-    fn no_work_found(&self, ep: &mut u32, retry: bool, _finished: &AtomicBool, yield_now: impl Fn()) {
+    fn no_work_found<S: WorkerSystem>(&self, ep: &mut u32, cx: &IdleCx<'_, S>) {
         std::hint::spin_loop();
-        if !retry {
+        if !cx.retry() {
             *ep += 1;
             if *ep & 0x3F == 0 {
-                crate::duty::idle_hook();
-                yield_now();
+                cx.run_duties();
+                cx.yield_now();
             }
         }
     }
 
     #[inline(always)]
-    fn shutdown(&self) {}
+    fn shutdown<S: WorkerSystem>(&self) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -300,7 +397,7 @@ pub struct ParkEpisode {
     /// `Some(epoch snapshot)` iff this worker is registered in `sleepers`.
     ticket: Option<u32>,
     /// This worker keeps the duties' due times while parked
-    /// (`duty::park_timeout`).
+    /// (`DutyRegistry::park_timeout`).
     timed: bool,
 }
 
@@ -331,17 +428,17 @@ impl<W: ParkWait> IdlePolicy for ParkIdle<W> {
     }
 
     #[inline]
-    fn work_found(&self, ep: &mut ParkEpisode) {
+    fn work_found<S: WorkerSystem>(&self, ep: &mut ParkEpisode, cx: &IdleCx<'_, S>) {
         if ep.ticket.is_some() || ep.rounds != 0 || ep.timed {
             self.unregister(ep);
             if ep.timed {
-                crate::duty::idle_done(&mut ep.timed);
+                cx.duty_idle_done(&mut ep.timed);
             }
         }
     }
 
-    fn no_work_found(&self, ep: &mut ParkEpisode, retry: bool, finished: &AtomicBool, yield_now: impl Fn()) {
-        if retry {
+    fn no_work_found<S: WorkerSystem>(&self, ep: &mut ParkEpisode, cx: &IdleCx<'_, S>) {
+        if cx.retry() {
             std::hint::spin_loop();
             return;
         }
@@ -351,12 +448,12 @@ impl<W: ParkWait> IdlePolicy for ParkIdle<W> {
                 if ep.rounds <= SPIN_ROUNDS {
                     std::hint::spin_loop();
                 } else if ep.rounds <= SPIN_ROUNDS + YIELD_ROUNDS {
-                    crate::duty::idle_hook();
-                    yield_now();
+                    cx.run_duties();
+                    cx.yield_now();
                 } else {
                     // Last chance before sleeping: once per park, which
                     // costs a system call anyway.
-                    crate::duty::idle_hook();
+                    cx.run_duties();
                     self.sleepers.fetch_add(1, Ordering::SeqCst);
                     fence(Ordering::SeqCst);
                     ep.ticket = Some(self.epoch.load(Ordering::SeqCst));
@@ -364,21 +461,25 @@ impl<W: ParkWait> IdlePolicy for ParkIdle<W> {
             }
             Some(seen) => {
                 // The one worker that keeps the duties' deadlines while
-                // asleep wakes at the earliest (see `duty::park_timeout`).
-                match crate::duty::park_timeout(&mut ep.timed) {
-                    Some(t) => self.wait.wait_timeout(&self.epoch, seen, finished, t),
-                    None => self.wait.wait(&self.epoch, seen, finished),
+                // asleep wakes at the earliest (see `DutyRegistry::park_timeout`).
+                cx.parking();
+                match cx.duty_park_timeout(&mut ep.timed) {
+                    Some(t) => self.wait.wait_timeout(&self.epoch, seen, cx.finished(), t),
+                    None => self.wait.wait(&self.epoch, seen, cx.finished()),
                 }
+                cx.woke();
                 self.unregister(ep);
             }
         }
     }
 
-    fn shutdown(&self) {
+    fn shutdown<S: WorkerSystem>(&self) {
         fence(Ordering::SeqCst);
         self.epoch.fetch_add(1, Ordering::SeqCst);
         self.wait.wake_all(&self.epoch);
-        crate::duty::release_timed();
+        if let Some(r) = <S::Duties as DutyDomain>::registry() {
+            r.release_timed();
+        }
     }
 }
 
@@ -532,14 +633,14 @@ impl<C: SearchCap, W: ParkWait> IdlePolicy for SearchIdle<C, W> {
     }
 
     #[inline]
-    fn work_found(&self, ep: &mut SearchEpisode) {
+    fn work_found<S: WorkerSystem>(&self, ep: &mut SearchEpisode, cx: &IdleCx<'_, S>) {
         if let Some(t) = ep.since.take() {
             let d = t.elapsed().as_nanos() as u64;
             ep.avg_ns = ep.avg_ns - ep.avg_ns / 4 + d / 4;
         }
         let last = self.stop_searching(ep);
         ep.parking = false;
-        self.park.work_found(&mut ep.park);
+        self.park.work_found(&mut ep.park, cx);
         if last {
             fence(Ordering::SeqCst);
             if self.park.sleepers.load(Ordering::Relaxed) != 0 {
@@ -548,8 +649,8 @@ impl<C: SearchCap, W: ParkWait> IdlePolicy for SearchIdle<C, W> {
         }
     }
 
-    fn no_work_found(&self, ep: &mut SearchEpisode, retry: bool, finished: &AtomicBool, yield_now: impl Fn()) {
-        if retry {
+    fn no_work_found<S: WorkerSystem>(&self, ep: &mut SearchEpisode, cx: &IdleCx<'_, S>) {
+        if cx.retry() {
             // Work nearby, or a poll hook waiting: stay awake, as a searcher
             // if the cap allows.
             if ep.search_since.is_none() && !ep.parking {
@@ -566,7 +667,7 @@ impl<C: SearchCap, W: ParkWait> IdlePolicy for SearchIdle<C, W> {
                         ep.since = Some(now);
                     }
                     ep.spin_ns = if ep.avg_ns < SEARCH_LIMIT_NS { 2 * ep.avg_ns.max(1000) } else { 0 };
-                    ep.spin_ns = ep.spin_ns.max(crate::duty::wait_spin_ns());
+                    ep.spin_ns = ep.spin_ns.max(cx.duty_wait_spin_ns());
                     if self.try_search(ep, now) {
                         return;
                     }
@@ -578,10 +679,10 @@ impl<C: SearchCap, W: ParkWait> IdlePolicy for SearchIdle<C, W> {
                         if ep.park.rounds & 0x3 == 0 {
                             // A searcher runs the duties often: one may
                             // complete what a suspended task waits for.
-                            crate::duty::idle_hook();
+                            cx.run_duties();
                         }
                         if ep.park.rounds & 0x3F == 0 {
-                            yield_now();
+                            cx.yield_now();
                         } else {
                             std::hint::spin_loop();
                         }
@@ -592,14 +693,14 @@ impl<C: SearchCap, W: ParkWait> IdlePolicy for SearchIdle<C, W> {
                 }
             }
         }
-        self.park.no_work_found(&mut ep.park, false, finished, yield_now);
+        self.park.no_work_found(&mut ep.park, &IdleCx::<S>::new(cx.worker(), false, cx.finished()));
         if ep.park.ticket.is_none() && ep.park.rounds == 0 {
             // Woken from the park: start over if nothing turns up.
             ep.parking = false;
         }
     }
 
-    fn shutdown(&self) {
-        self.park.shutdown();
+    fn shutdown<S: WorkerSystem>(&self) {
+        self.park.shutdown::<S>();
     }
 }

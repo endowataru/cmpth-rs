@@ -26,7 +26,7 @@
 //! the stackful-only [`RunnableItem`](crate::resumable::common::system::RunnableItem)
 //! impl (`resumable::stackful::worker`) unconditionally
 //! records *whatever was running right before a switch* as the worker's
-//! `root_cont` (the fallback `pop_or_root`
+//! `root_cont` (the fallback `next_or_root`
 //! resumes when the local deque is empty) — C++'s equivalent
 //! (`basic_worker::execute`) instead *dynamically* marks/unmarks the
 //! current task as root around each switch
@@ -285,7 +285,7 @@ where
     unsafe { wk0.suspend_to_new(exec_top, root_desc_ptr, scheduler_loop) };
 
     // Resumed here once something — typically the very scheduler loop just
-    // forked above, but any worker's `pop_or_root` may get there first —
+    // forked above, but any worker's `next_or_root` may get there first —
     // switches back into the continuation pushed above: exactly the
     // "control returns from the constructor already running as a ULT"
     // moment the C++ initializer's own constructor comment describes. May

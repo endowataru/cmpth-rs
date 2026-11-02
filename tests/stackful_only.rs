@@ -4,7 +4,7 @@
 //! tests calls `spawn_async` on this system — its dispatch never checks the
 //! `poll_fn` tag, so an async task would be mis-handled if one ever landed
 //! here — so this exercises exactly the branch-free path
-//! `execute_stackful`/`pop_or_root_stackful` were built for.
+//! `execute_stackful`/`next_or_root_stackful` were built for.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;

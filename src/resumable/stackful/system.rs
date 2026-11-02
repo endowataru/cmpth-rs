@@ -98,29 +98,22 @@ pub trait StackfulWorkerSystem: WorkerSystem
         Self: PoolSystem,
         Self::Desc: StackfulTaskDesc;
 
-    /// Resolve what a suspending/exiting ULT switches into when its local
-    /// deque is empty: the worker's own root (scheduler-loop) continuation.
+    /// What a suspending/exiting ULT switches into: the dispatch policy's
+    /// pick at [`Site::Switch`](crate::Site::Switch), else the worker's own
+    /// root (scheduler-loop) continuation.
     ///
-    /// No extra bound needed beyond this trait's own supertrait
-    /// (`StackfulWorkerSystem: WorkerSystem`):
-    /// [`pop_or_root_stackful`](crate::resumable::stackful::worker::pop_or_root_stackful)
-    /// converts `wk.deque.try_pop()`'s `Self::SuspendedToken` to this
-    /// method's `SuspendedTaskToken<Self::Desc>` return type via the
-    /// `Into` bound on [`crate::resumable::common::system::WorkerSystem::SuspendedToken`]
-    /// rather than needing `DescScheduler`'s equality pin.
-    ///
-    /// Default: [`crate::resumable::stackful::worker::pop_or_root_stackful`] — correct
-    /// whenever `Self::Desc` isn't also `AsyncTaskDesc` (stackful-only),
-    /// since every popped item is then guaranteed to be a real, switchable
-    /// continuation. Dual configs override with
-    /// [`crate::resumable::dual::worker::pop_or_root_dual`], which requeues an async
-    /// task popped off the top instead of trying to switch into it.
-    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedTaskToken<Self::Desc>
+    /// Default: [`crate::resumable::stackful::worker::next_or_root_stackful`] —
+    /// correct whenever `Self::Desc` isn't also `AsyncTaskDesc`
+    /// (stackful-only), since every task is then a real, switchable
+    /// continuation. Dual systems override with
+    /// [`crate::resumable::dual::worker::next_or_root_dual`], which puts a
+    /// stackless task back instead of trying to switch into it.
+    fn next_or_root(wk: &UltWorker<Self>) -> SuspendedTaskToken<Self::Desc>
     where
         Self: PoolSystem,
         SuspendedTaskToken<Self::Desc>: From<Self::SuspendedToken>,
     {
-        crate::resumable::stackful::worker::pop_or_root_stackful(wk)
+        crate::resumable::stackful::worker::next_or_root_stackful(wk)
     }
 }
 
@@ -299,7 +292,12 @@ impl<
 ///     type Alloc = cmpth::HeapStack;
 ///     type Lookup = cmpth::TlsCurrent;
 ///     type Idle = cmpth::SpinIdle;
-///     type Steal = cmpth::SweepSteal;
+///     type Steal = cmpth::RandomSweepSteal;
+///     type Dispatch = cmpth::StandardDispatch;
+///     type Duties = cmpth::duty::GlobalDuties;
+///     type Observe = cmpth::NoObserver;
+///     type ExternalQueue = cmpth::StealPathQueue<cmpth::StackfulOnlyTaskDesc<Self>>;
+///     type PostChoice = cmpth::DefaultPostChoice;
 /// }
 ///
 /// MySystem::builder().workers(2).run(|| {
@@ -335,7 +333,7 @@ pub trait UltIdentity: WorkerTlsAnchor + Sized + Send + Sync + 'static {
     /// is unconditional — it never routes back through `SchedulerSystem`.
     type Desc: crate::resumable::common::desc::TaskDescAlloc
         + StackfulTaskDesc
-        + TaskDescCore<Owned: HasExternalQueue<<Self as UltIdentity>::Desc, Queue = Self::ExternalQueue>>
+        + TaskDescCore<Owned: HasExternalQueue<<Self as UltIdentity>::Desc, Queue = <Self as PoolSystem>::ExternalQueue>>
     where
         Self: PoolSystem;
 
@@ -348,6 +346,25 @@ pub trait UltIdentity: WorkerTlsAnchor + Sized + Send + Sync + 'static {
 
     /// Steal policy; see [`crate::WorkerSystem::Steal`].
     type Steal: crate::resumable::common::steal::StealPolicy;
+
+    /// Dispatch policy; see [`crate::WorkerSystem::Dispatch`].
+    type Dispatch: crate::resumable::common::dispatch::DispatchPolicy;
+
+    /// Duties the idle workers run; see [`crate::WorkerSystem::Duties`].
+    type Duties: crate::duty::DutyDomain;
+
+    /// Scheduler observer; see [`crate::WorkerSystem::Observe`].
+    type Observe: crate::resumable::common::observe::SchedObserver;
+
+    /// Where tasks woken from outside the pool wait; see
+    /// [`PoolSystem::ExternalQueue`].
+    type ExternalQueue: crate::resumable::common::external_queue::ExternalQueue<Self>
+    where
+        Self: PoolSystem;
+
+    /// How `post` chooses a delegator; see
+    /// [`PostingSystem::PostChoice`](crate::traits::PostingSystem::PostChoice).
+    type PostChoice: crate::traits::PostChoice;
 
     /// Stack allocation policy.
     type Alloc: StackAlloc;
@@ -367,7 +384,7 @@ pub trait UltIdentity: WorkerTlsAnchor + Sized + Send + Sync + 'static {
 
 impl<M: UltIdentity> PoolSystem for M {
     type Desc  = M::Desc;
-    type ExternalQueue = crate::resumable::common::external_queue::StealPathQueue<M::Desc>;
+    type ExternalQueue = <M as UltIdentity>::ExternalQueue;
     type Pool          = crate::resumable::common::pool::ReturnPool<M::Desc, M::Alloc>;
     // Never actually allocated through: nothing calls spawn_async on a
     // stackful-only UltIdentity system (StacklessTaskSystem's blanket
@@ -389,6 +406,9 @@ impl<M: UltIdentity> WorkerSystem for M {
     type Lookup = <M as UltIdentity>::Lookup;
     type Idle = <M as UltIdentity>::Idle;
     type Steal = <M as UltIdentity>::Steal;
+    type Dispatch = <M as UltIdentity>::Dispatch;
+    type Duties = <M as UltIdentity>::Duties;
+    type Observe = <M as UltIdentity>::Observe;
 
     fn worker_tls() -> &'static <M::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         TlsSlot::from_anchor(<M as WorkerTlsAnchor>::anchor())
@@ -476,7 +496,7 @@ impl<M: UltIdentity + StackfulSchedulerSystem> crate::traits::PostingSystem for 
 where
     <M as PoolSystem>::Desc: StackfulTaskDesc,
 {
-    type PostChoice = crate::post::DefaultPostChoice;
+    type PostChoice = <M as UltIdentity>::PostChoice;
 }
 
 impl<M: UltIdentity + StackfulSchedulerSystem> NestableSystem for M

@@ -3,9 +3,11 @@
 
 pub mod deque;
 pub mod desc;
+pub mod dispatch;
 pub mod external_queue;
 pub mod idle;
 pub mod lookup;
+pub mod observe;
 pub mod pool;
 pub mod scheduler;
 pub mod stack;
