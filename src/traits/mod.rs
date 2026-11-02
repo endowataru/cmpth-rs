@@ -37,7 +37,7 @@ pub use system::bundle::StackfulTaskSystem;
 pub use system::delegation::{Delegator, DelegatorRun, DelegationSystem, FavorPosting, FavorServing, PostChoice, PostDelegatorOf, PostFavor, PostingSystem};
 pub use system::nesting::NestableSystem;
 pub use system::stackful::{JoinHandleLike, StackfulBuilder, StackfulInitSystem, SpawnableStackfulTaskSystem};
-pub use system::suspend::SuspendableSystem;
+pub use system::suspend::{StackfulParking, SuspendableSystem};
 pub use system::sync::{StackfulBarrier, StackfulMutex, StackfulSyncSystem};
 pub use system::stackless::{StacklessBuilder, StacklessInitSystem, StacklessTaskSystem};
 pub use system::sync::{StacklessBarrier, StacklessMutex, StacklessSyncSystem};

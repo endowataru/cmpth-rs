@@ -18,3 +18,22 @@ pub trait SuspendableSystem: TaskSystem {
     /// Parked-continuation handle for this system.
     type SuspendedThread: Resumable<Self> + Send + Default;
 }
+
+/// What a stackful sync primitive needs of a system: a parked-thread
+/// handle a ULT can wait on, and a yield.  The crate's mutexes, condition
+/// variables and barriers ([`McsMutex`](crate::McsMutex),
+/// [`UltBarrier`](crate::UltBarrier), ...) are written against this, not
+/// against the `resumable` engine, so a system with a scheduler of its own
+/// gets them by implementing the traits.  (`scoped` has no parked-thread
+/// handle: its tasks live on their caller's stack and cannot suspend.)
+pub trait StackfulParking:
+    SuspendableSystem<SuspendedThread: crate::traits::component::stackful::StackfulResumable<Self>>
+    + crate::traits::system::stackful::SpawnableStackfulTaskSystem
+{
+}
+
+impl<S> StackfulParking for S where
+    S: SuspendableSystem<SuspendedThread: crate::traits::component::stackful::StackfulResumable<S>>
+        + crate::traits::system::stackful::SpawnableStackfulTaskSystem
+{
+}
