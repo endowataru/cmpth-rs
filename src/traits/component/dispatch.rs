@@ -32,6 +32,12 @@ pub enum Site {
 pub trait TaskSources {
     type Item;
 
+    /// Tasks pinned to this worker's OS thread (a preempted task's
+    /// [`yield_pinned`](crate::SpawnableStackfulTaskSystem::yield_pinned)),
+    /// once their turn has come.  A policy must look here first: nothing
+    /// else can run them.
+    fn pinned(&self) -> Option<Self::Item>;
+
     /// The worker's own run queue.
     fn local(&self) -> Option<Self::Item>;
 

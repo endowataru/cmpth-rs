@@ -126,6 +126,13 @@ pub trait LocalQueue<S: WorkerSystem> {
     /// don't mistake contention for idleness.
     fn try_steal(&self) -> Steal<S::SuspendedToken>;
 
+    /// Queue `c` to resume on this worker's OS thread only (never stolen),
+    /// after the work queued now and before anything else.
+    fn pin(&self, c: S::SuspendedToken);
+
+    /// Take a task queued by [`pin`](Self::pin), once its turn has come.
+    fn take_pinned(&self) -> Option<S::SuspendedToken>;
+
     /// This worker's state for the pool's
     /// [`QosPolicy`](crate::traits::component::qos::QosPolicy).
     fn qos_slot(&self) -> &crate::resumable::common::qos::QosSlot;
@@ -519,6 +526,16 @@ impl<S: WorkerSystem + PoolSystem> LocalQueue<S> for UltWorker<S> {
     #[inline]
     fn try_steal(&self) -> Steal<S::SuspendedToken> {
         self.core.try_steal()
+    }
+
+    #[inline]
+    fn pin(&self, c: S::SuspendedToken) {
+        self.core.pin(c);
+    }
+
+    #[inline]
+    fn take_pinned(&self) -> Option<S::SuspendedToken> {
+        self.core.take_pinned()
     }
 
     #[inline]

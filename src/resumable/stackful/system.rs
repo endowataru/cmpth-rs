@@ -467,6 +467,15 @@ where
         }
     }
 
+    fn yield_pinned() {
+        use crate::resumable::common::worker::WorkerOps;
+        use crate::resumable::stackful::worker::StackfulWorker;
+        match M::Worker::current() {
+            Some(wk) => { wk.yield_pinned(); }
+            None => <<M as UltIdentity>::Base as SpawnableStackfulTaskSystem>::yield_now(),
+        }
+    }
+
     type JoinHandle<T: Send + 'static> = crate::resumable::common::thread::JoinHandle<Self, T>;
 
     fn spawn<T, F>(f: F) -> crate::resumable::common::thread::JoinHandle<Self, T>

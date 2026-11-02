@@ -144,6 +144,13 @@ where
         self.exit_to_cont(next, f)
     }
 
+    /// Yield, and resume on this OS thread only, after the work queued now
+    /// and before anything else (for a task preempted at a point that may
+    /// hold thread-specific state).
+    fn yield_pinned(&self) -> &Self {
+        self.suspend_to_sched(|wk, prev| wk.pin(prev.into()))
+    }
+
     /// Cooperative yield: defer so other tasks already queued run first.
     fn yield_now(&self) -> &Self {
         self.suspend_to_sched(|wk, prev| wk.defer(prev.into()))
@@ -178,6 +185,11 @@ where
             Steal::Empty => Steal::Empty,
             Steal::Retry => Steal::Retry,
         }
+    }
+
+    #[inline(always)]
+    fn pinned(&self) -> Option<Self::Item> {
+        LocalQueue::take_pinned(self.wk).map(Into::into)
     }
 
     #[inline(always)]

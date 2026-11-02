@@ -75,11 +75,17 @@ pub struct WorkerCore<S: WorkerSystem> {
     dispatch: <S::Dispatch as DispatchPolicy>::State,
     qos: QosSlot,
     hooks: HooksSlot,
+    /// Tasks that must resume on this OS thread (preempted ones): owner
+    /// only, never stolen.
+    pinned: std::cell::UnsafeCell<std::collections::VecDeque<S::SuspendedToken>>,
+    has_pinned: Cell<bool>,
+    /// Picks to let pass before the pinned queue's head runs.
+    pinned_skip: Cell<usize>,
     pool: Cell<*const PoolCore<S>>,
 }
 
-// SAFETY: `Cell` fields, `steal`, `dispatch` and `qos` are only ever touched
-// by the owning base thread (a worker struct is pinned to one thread for its lifetime); `deque`
+// SAFETY: `Cell` fields, `steal`, `dispatch`, `qos` and `pinned` are only
+// ever touched by the owning base thread (a worker struct is pinned to one thread for its lifetime); `deque`
 // is internally synchronized; `pool` is read-only after `bind`.
 unsafe impl<S: WorkerSystem> Send for WorkerCore<S> {}
 unsafe impl<S: WorkerSystem> Sync for WorkerCore<S> {}
@@ -93,6 +99,9 @@ impl<S: WorkerSystem> WorkerCore<S> {
             dispatch: Default::default(),
             qos: QosSlot::default(),
             hooks: HooksSlot::default(),
+            pinned: std::cell::UnsafeCell::new(std::collections::VecDeque::new()),
+            has_pinned: Cell::new(false),
+            pinned_skip: Cell::new(0),
             pool: Cell::new(std::ptr::null()),
         }
     }
@@ -127,6 +136,32 @@ impl<S: WorkerSystem> LocalQueue<S> for WorkerCore<S> {
     #[inline]
     fn try_pop(&self) -> Option<S::SuspendedToken> {
         self.deque.try_pop()
+    }
+
+    #[inline]
+    fn pin(&self, c: S::SuspendedToken) {
+        // SAFETY: owner-only (see the field).
+        unsafe { (*self.pinned.get()).push_back(c) };
+        self.has_pinned.set(true);
+        // Behind what is queued now, as if deferred.
+        self.pinned_skip.set(self.deque.len_hint());
+    }
+
+    #[inline]
+    fn take_pinned(&self) -> Option<S::SuspendedToken> {
+        if !self.has_pinned.get() {
+            return None;
+        }
+        let skip = self.pinned_skip.get();
+        if skip > 0 {
+            self.pinned_skip.set(skip - 1);
+            return None;
+        }
+        // SAFETY: owner-only (see the field).
+        let q = unsafe { &mut *self.pinned.get() };
+        let c = q.pop_front();
+        self.has_pinned.set(!q.is_empty());
+        c
     }
 
     #[inline]
@@ -198,6 +233,11 @@ impl<S: WorkerSystem, X: Fn() -> Option<S::SuspendedToken>> TaskSources for Sour
     #[inline(always)]
     fn steal(&self) -> Steal<S::SuspendedToken> {
         self.wk.try_steal()
+    }
+
+    #[inline(always)]
+    fn pinned(&self) -> Option<S::SuspendedToken> {
+        self.wk.take_pinned()
     }
 
     #[inline(always)]

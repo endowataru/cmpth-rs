@@ -198,6 +198,15 @@ impl<M: UltDualIdentity> SpawnableStackfulTaskSystem for UltDualSystem<M> {
         }
     }
 
+    fn yield_pinned() {
+        use crate::resumable::common::worker::WorkerOps;
+        use crate::resumable::stackful::worker::StackfulWorker;
+        match UltWorker::<Self>::current() {
+            Some(wk) => { wk.yield_pinned(); }
+            None => <M::Base as SpawnableStackfulTaskSystem>::yield_now(),
+        }
+    }
+
     type JoinHandle<T: Send + 'static> = crate::resumable::common::thread::JoinHandle<Self, T>;
 
     fn spawn<T, F>(f: F) -> crate::resumable::common::thread::JoinHandle<Self, T>
