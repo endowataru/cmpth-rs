@@ -16,6 +16,8 @@ use cmpth::{
 
 pub struct LeanContextSystem;
 
+cmpth::worker_tls_anchor!(LeanContextSystem);
+
 impl UltIdentity for LeanContextSystem {
     type Base = OsSystem;
     type Ctx = LeanFrameContext;
@@ -28,13 +30,6 @@ impl UltIdentity for LeanContextSystem {
     type Alloc = cmpth::resumable::common::stack::HeapStack;
     type Lookup = cmpth::resumable::common::lookup::TlsCurrent;
     type Idle = cmpth::SpinIdle;
-
-    fn worker_tls_anchor() -> &'static <OsSystem as cmpth::NestableSystem>::ThreadSpecific<
-        cmpth::resumable::common::worker::UltWorker<Self>,
-    > {
-        static A: cmpth::traits::component::tls::TlsAnchor = cmpth::traits::component::tls::TlsAnchor::new();
-        cmpth::traits::component::tls::TlsSlot::from_anchor(&A)
-    }
 }
 
 #[test]

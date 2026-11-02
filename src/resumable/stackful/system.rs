@@ -22,6 +22,7 @@ use crate::traits::stackful::{
     BlockOnSystem, ContextPolicy, DelegationSystem, NestableSystem, StackfulSyncSystem,
     SuspendableSystem, SpawnableStackfulTaskSystem,
 };
+use crate::traits::{TlsSlot, WorkerTlsAnchor};
 use crate::resumable::common::deque::WorkerRunQueue;
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::system::{PoolSystem, SchedulerSystem, WorkerSystem};
@@ -265,24 +266,27 @@ impl<
 /// `cmpth`, where they're allowed to name `cmpth`'s own traits freely) are
 /// what extend it with `SchedulerSystem`/etc.
 ///
-/// `Lookup`/`worker_tls_anchor` are the two members that must be resolved
-/// through `Self`, not a free type parameter of some other type: `Lookup`
-/// exposing itself as a blanket-impl condition on an unrelated generic
-/// parameter would create a self-referential trait-resolution cycle
-/// through [`CurrentLookup`]'s own blanket impl
+/// `Lookup` must be resolved through `Self`, not a free type parameter of
+/// some other type: `Lookup` exposing itself as a blanket-impl condition on
+/// an unrelated generic parameter would create a self-referential
+/// trait-resolution cycle through [`CurrentLookup`]'s own blanket impl
 /// (`impl<S: WorkerSystem> CurrentLookup<S> for TlsCurrent`) — proving this
 /// trait's own `where Self: WorkerSystem` gate (see [`Lookup`](Self::Lookup))
 /// would require re-entering that very impl if `Lookup` weren't pinned to
-/// `Self` directly. `worker_tls_anchor`'s `static` has the same requirement
-/// for an unrelated reason: a `static` declared inside a generic function
-/// body is one shared instance across every monomorphization, not one per
-/// instantiation (also verified directly) — every implementor needs its
-/// own `static`, anchored by its own function body.
+/// `Self` directly.
+///
+/// The worker's TLS slot comes from the [`WorkerTlsAnchor`] supertrait,
+/// implemented with [`worker_tls_anchor!`](crate::worker_tls_anchor):
+/// every implementor needs a `static` of its own, which no default can
+/// provide (a `static` in a generic function body is one instance shared
+/// by every monomorphization).
 ///
 /// ```
-/// use cmpth::{SpawnableStackfulTaskSystem, NestableSystem, StackfulBuilder, StackfulInitSystem, JoinHandleLike};
+/// use cmpth::{SpawnableStackfulTaskSystem, StackfulBuilder, StackfulInitSystem, JoinHandleLike};
 ///
 /// pub struct MySystem;
+///
+/// cmpth::worker_tls_anchor!(MySystem);
 ///
 /// impl cmpth::UltIdentity for MySystem {
 ///     type Base = cmpth::OsSystem;
@@ -292,11 +296,6 @@ impl<
 ///     type Alloc = cmpth::HeapStack;
 ///     type Lookup = cmpth::TlsCurrent;
 ///     type Idle = cmpth::SpinIdle;
-///
-///     fn worker_tls_anchor() -> &'static <cmpth::OsSystem as NestableSystem>::ThreadSpecific<cmpth::UltWorker<Self>> {
-///         static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
-///         cmpth::TlsSlot::from_anchor(&A)
-///     }
 /// }
 ///
 /// MySystem::builder().workers(2).run(|| {
@@ -307,7 +306,7 @@ impl<
 ///
 /// `STACK_SIZE` defaults to 64 KiB; override it like any other associated
 /// const.
-pub trait UltIdentity: Sized + Send + Sync + 'static {
+pub trait UltIdentity: WorkerTlsAnchor + Sized + Send + Sync + 'static {
     /// The threading system this scheduler runs on.
     type Base: SpawnableStackfulTaskSystem + NestableSystem;
 
@@ -357,14 +356,6 @@ pub trait UltIdentity: Sized + Send + Sync + 'static {
     type Lookup: CurrentLookup<Self>
     where
         Self: WorkerSystem;
-
-    /// The per-system TLS anchor backing [`WorkerSystem::worker_tls`].
-    /// `where Self: WorkerSystem` — `UltWorker<Self>` itself requires it
-    /// structurally (`UltWorker<S: WorkerSystem>`); same not-`SchedulerSystem`
-    /// reasoning as [`Desc`](Self::Desc).
-    fn worker_tls_anchor() -> &'static <<Self as UltIdentity>::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>>
-    where
-        Self: WorkerSystem;
 }
 
 impl<M: UltIdentity> PoolSystem for M {
@@ -392,7 +383,7 @@ impl<M: UltIdentity> WorkerSystem for M {
     type Idle = <M as UltIdentity>::Idle;
 
     fn worker_tls() -> &'static <M::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
-        <M as UltIdentity>::worker_tls_anchor()
+        TlsSlot::from_anchor(<M as WorkerTlsAnchor>::anchor())
     }
 }
 

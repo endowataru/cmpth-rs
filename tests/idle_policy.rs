@@ -20,6 +20,7 @@ macro_rules! suite {
             use super::*;
 
         pub struct ParkStackful;
+        cmpth::worker_tls_anchor!(ParkStackful);
 
         impl UltIdentity for ParkStackful {
             type Base = OsSystem;
@@ -29,14 +30,10 @@ macro_rules! suite {
             type Alloc = cmpth::HeapStack;
             type Lookup = cmpth::TlsCurrent;
             type Idle = $idle;
-
-            fn worker_tls_anchor() -> &'static <OsSystem as cmpth::NestableSystem>::ThreadSpecific<cmpth::UltWorker<Self>> {
-                static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
-                cmpth::TlsSlot::from_anchor(&A)
-            }
         }
 
         pub struct ParkAsyncMarker;
+        cmpth::worker_tls_anchor!(ParkAsyncMarker);
 
         impl UltAsyncIdentity for ParkAsyncMarker {
             type Base = OsSystem;
@@ -44,11 +41,6 @@ macro_rules! suite {
             type RunQueue = cmpth::HybridRunQueue<cmpth::SuspendedTaskToken<cmpth::StacklessOnlyTaskDesc<UltAsyncSystem<Self>>>>;
             type Lookup = cmpth::InlineTlsCurrent;
             type Idle = $idle;
-
-            fn worker_tls_anchor() -> &'static <OsSystem as cmpth::NestableSystem>::ThreadSpecific<cmpth::UltWorker<UltAsyncSystem<Self>>> {
-                static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
-                cmpth::TlsSlot::from_anchor(&A)
-            }
         }
 
         type ParkAsync = UltAsyncSystem<ParkAsyncMarker>;

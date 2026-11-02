@@ -23,7 +23,7 @@ pub mod stackful;
 pub mod stackless;
 
 pub use component::task::{TaskDesc, TaskExitSink};
-pub use component::tls::{TlsAnchor, TlsSlot};
+pub use component::tls::{TlsAnchor, TlsSlot, WorkerTlsAnchor};
 pub use component::wait::Resumable;
 pub use system::TaskSystem;
 pub use system::sync::{BarrierWaitResult, DualBarrier, DualMutex};

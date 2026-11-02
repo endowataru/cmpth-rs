@@ -194,6 +194,8 @@ types:
 ```rust
 pub struct MySystem;
 
+cmpth::worker_tls_anchor!(MySystem);                     // the worker's TLS slot
+
 impl cmpth::UltIdentity for MySystem {
     type Base = cmpth::OsSystem;                          // what the workers run on
     type Ctx = cmpth::NativeContext;                       // context-switch implementation
@@ -203,10 +205,6 @@ impl cmpth::UltIdentity for MySystem {
     type Lookup = cmpth::TlsCurrent;                       // current-worker lookup
     type Idle = cmpth::SpinIdle;                           // what idle workers do (spin / park)
 
-    fn worker_tls_anchor() -> &'static <cmpth::OsSystem as cmpth::NestableSystem>::ThreadSpecific<cmpth::UltWorker<Self>> {
-        static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
-        cmpth::TlsSlot::from_anchor(&A)
-    }
 }
 ```
 
