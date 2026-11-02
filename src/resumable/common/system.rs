@@ -148,6 +148,10 @@ pub trait WorkerSystem: Sized + Send + Sync + 'static {
     /// the pool should trade speed for energy.
     type Qos: crate::resumable::common::qos::QosPolicy;
 
+    /// Where new and woken tasks go on the worker that creates or wakes
+    /// them (spawn order, front or back of the queue).
+    type Placement: crate::resumable::common::placement::PlacementPolicy;
+
     /// The concrete worker type driving this scheduler. Every system today
     /// sets this to [`UltWorker<Self>`](crate::resumable::common::worker::UltWorker) — kept as its own associated type
     /// (rather than [`worker_tls`](Self::worker_tls)/[`CurrentLookup`]

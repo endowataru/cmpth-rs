@@ -107,3 +107,26 @@ fn scoped() {
 fn stackless() {
     conformance::stackless::<cmpth::DefaultDualTaskSystem>(W);
 }
+
+pub struct ParentFirstSpawn;
+cmpth::worker_tls_anchor!(ParentFirstSpawn);
+cmpth::impl_with_defaults! {
+    impl cmpth::UltDualIdentity for ParentFirstSpawn {
+        type Placement = cmpth::ParentFirst;
+    }
+}
+
+pub struct WakeBehind;
+cmpth::worker_tls_anchor!(WakeBehind);
+cmpth::impl_with_defaults! {
+    impl cmpth::UltIdentity for WakeBehind {
+        type Placement = cmpth::ParentFirstWakeBack;
+        type Idle = cmpth::SearchIdle;
+    }
+}
+
+#[test]
+fn placement_policies() {
+    full::<cmpth::UltDualSystem<ParentFirstSpawn>>();
+    stackful::<WakeBehind>();
+}

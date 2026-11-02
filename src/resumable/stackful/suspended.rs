@@ -75,7 +75,7 @@ where
 
     fn notify(&self) {
         let c = self.take_cont();
-        Self::wk().push(c.into());
+        crate::resumable::common::waker::place_woken::<T::StackfulWorkerSystem>(Self::wk(), c.into());
     }
 }
 

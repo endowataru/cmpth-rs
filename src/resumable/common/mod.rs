@@ -8,6 +8,7 @@ pub mod external_queue;
 pub mod idle;
 pub mod lookup;
 pub mod observe;
+pub mod placement;
 pub mod pool;
 pub mod qos;
 pub mod scheduler;

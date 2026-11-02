@@ -174,3 +174,32 @@ fn idle_workers_serve_their_own_registry() {
     assert_eq!(idle_polls::<ServesNone>(&d), 0, "workers serving no registry polled it");
     assert!(n.load(Ordering::Relaxed) > 0);
 }
+
+// --- placement ------------------------------------------------------------------
+
+pub struct ParentFirstSys;
+cmpth::worker_tls_anchor!(ParentFirstSys);
+cmpth::impl_with_defaults! {
+    impl cmpth::UltIdentity for ParentFirstSys {
+        type Placement = cmpth::ParentFirst;
+    }
+}
+
+/// On one worker, whether the child had run when `spawn` returned.
+fn child_ran_first<S: StackfulInitSystem + SpawnableStackfulTaskSystem>() -> bool {
+    S::builder().workers(1).run(|| {
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let r = Arc::clone(&ran);
+        let h = S::spawn(move || r.store(true, Ordering::SeqCst));
+        let first = ran.load(Ordering::SeqCst);
+        JoinHandleLike::join(h);
+        assert!(ran.load(Ordering::SeqCst));
+        first
+    })
+}
+
+#[test]
+fn spawn_order_follows_placement() {
+    assert!(child_ran_first::<cmpth::DefaultStackfulOnlyTaskSystem>());
+    assert!(!child_ran_first::<ParentFirstSys>());
+}

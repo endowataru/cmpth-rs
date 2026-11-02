@@ -210,6 +210,7 @@ impl cmpth::UltIdentity for MySystem {
     type Observe = cmpth::NoObserver;                      // scheduler event hooks
     type Yield = cmpth::LocalYield;                        // where a yielding task waits; turn budget
     type Qos = cmpth::OsQos;                               // QoS hints to the OS (macOS)
+    type Placement = cmpth::StandardPlacement;             // spawn order; woken tasks to front or back
     type ExternalQueue = cmpth::StealPathQueue<cmpth::StackfulOnlyTaskDesc<Self>>; // tasks woken off the pool
     type PostChoice = cmpth::DefaultPostChoice;            // how `post` picks a delegator
 }
