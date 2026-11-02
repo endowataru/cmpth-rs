@@ -2,15 +2,13 @@ use std::collections::VecDeque;
 
 use crate::spin::SpinLock;
 use crate::traits::{BarrierWaitResult, Resumable, StackfulBarrier, StackfulResumable};
-use crate::resumable::stackful::desc::StackfulTaskDesc;
-use crate::resumable::common::system::PoolSystem;
-use crate::resumable::stackful::system::{StackfulSchedulerSystem, StackfulWorkerSystem};
+use crate::traits::{StackfulParking, SuspendableSystem};
 
 // ---------------------------------------------------------------------------
 // BarrierCore
 // ---------------------------------------------------------------------------
 
-pub struct BarrierState<S: StackfulSchedulerSystem> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+pub struct BarrierState<S: StackfulParking> {
     pub(super) count: usize,
     pub(super) waiters: VecDeque<S::SuspendedThread>,
 }
@@ -19,12 +17,12 @@ pub struct BarrierState<S: StackfulSchedulerSystem> where <S as PoolSystem>::Des
 /// representation. Implementing this opts a type into [`StackfulBarrier`]
 /// for free via the blanket impl below — the same two-tier relationship as
 /// [`TaskDescCore`](crate::resumable::common::desc::TaskDescCore)/[`TaskDesc`](crate::resumable::common::desc::TaskDesc).
-pub trait BarrierCore: Send + Sync + Sized where <<Self as BarrierCore>::StackfulSchedulerSystem as PoolSystem>::Desc: StackfulTaskDesc {
-    type StackfulSchedulerSystem: StackfulSchedulerSystem;
+pub trait BarrierCore: Send + Sync + Sized {
+    type System: StackfulParking;
 
-    fn new_core(count: usize) -> Self where <<Self as BarrierCore>::StackfulSchedulerSystem as PoolSystem>::Desc: StackfulTaskDesc;
+    fn new_core(count: usize) -> Self;
     fn n(&self) -> usize;
-    fn state(&self) -> &SpinLock<BarrierState<Self::StackfulSchedulerSystem>>;
+    fn state(&self) -> &SpinLock<BarrierState<Self::System>>;
 }
 
 /// Blanket [`StackfulBarrier`] for any [`BarrierCore`]: the wait algorithm
@@ -46,7 +44,7 @@ impl<M: BarrierCore> StackfulBarrier for M {
             return BarrierWaitResult { is_leader: true };
         }
         s.waiters.push_back(Default::default());
-        let sth: *const <<Self as BarrierCore>::StackfulSchedulerSystem as StackfulWorkerSystem>::SuspendedThread = s.waiters.back().unwrap();
+        let sth: *const <<Self as BarrierCore>::System as SuspendableSystem>::SuspendedThread = s.waiters.back().unwrap();
         unsafe { &*sth }.wait_with(move || drop(s));
         BarrierWaitResult { is_leader: false }
     }
@@ -56,24 +54,24 @@ impl<M: BarrierCore> StackfulBarrier for M {
 // Barrier
 // ---------------------------------------------------------------------------
 
-pub struct Barrier<S: StackfulSchedulerSystem> where <S as PoolSystem>::Desc: StackfulTaskDesc {
+pub struct Barrier<S: StackfulParking> {
     n: usize,
     state: SpinLock<BarrierState<S>>,
 }
 
-unsafe impl<S: StackfulSchedulerSystem> Send for Barrier<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {}
-unsafe impl<S: StackfulSchedulerSystem> Sync for Barrier<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {}
+unsafe impl<S: StackfulParking> Send for Barrier<S> {}
+unsafe impl<S: StackfulParking> Sync for Barrier<S> {}
 
-impl<S: StackfulSchedulerSystem> Barrier<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {
-    pub fn new(n: usize) -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc {
+impl<S: StackfulParking> Barrier<S> {
+    pub fn new(n: usize) -> Self {
         assert!(n > 0);
         Barrier { n, state: SpinLock::new(BarrierState { count: 0, waiters: VecDeque::new() }) }
     }
 }
 
-impl<S: StackfulSchedulerSystem> BarrierCore for Barrier<S> where <S as PoolSystem>::Desc: StackfulTaskDesc {
-    type StackfulSchedulerSystem = S;
-    fn new_core(count: usize) -> Self where <S as PoolSystem>::Desc: StackfulTaskDesc { Barrier::new(count) }
-    fn n(&self) -> usize where <S as PoolSystem>::Desc: StackfulTaskDesc { self.n }
-    fn state(&self) -> &SpinLock<BarrierState<S>> where <S as PoolSystem>::Desc: StackfulTaskDesc { &self.state }
+impl<S: StackfulParking> BarrierCore for Barrier<S> {
+    type System = S;
+    fn new_core(count: usize) -> Self { Barrier::new(count) }
+    fn n(&self) -> usize { self.n }
+    fn state(&self) -> &SpinLock<BarrierState<S>> { &self.state }
 }
