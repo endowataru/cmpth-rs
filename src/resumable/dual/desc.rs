@@ -234,3 +234,32 @@ impl<S: PoolSystem> DualTaskDesc<S> {
         *self.waker_refs.get_mut() = 0;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::resumable::common::stack::StackMem;
+    use crate::resumable::common::worker::UltWorker;
+    use crate::{DefaultDualTaskSystem, DefaultNestedDualTaskSystem, JoinHandleLike, SpawnableStackfulTaskSystem, StackfulBuilder, StackfulInitSystem, WorkerOps};
+
+    /// `spawn`'s stacks overflow into a guard page, not into the heap:
+    /// only `spawn_async` frames may come from `MallocFrame`.
+    #[test]
+    fn spawned_stacks_are_guard_paged() {
+        fn running_stack_is_guarded<S>() -> bool
+        where
+            S: crate::resumable::common::system::WorkerSystem<Worker = UltWorker<S>>
+                + crate::resumable::common::system::PoolSystem<Desc = super::DualTaskDesc<S>>,
+        {
+            let wk = UltWorker::<S>::current().expect("not on a worker");
+            matches!(wk.cur_task_ref().stack, StackMem::Heap { .. })
+        }
+        DefaultDualTaskSystem::builder().workers(1).run(|| {
+            let h = DefaultDualTaskSystem::spawn(running_stack_is_guarded::<DefaultDualTaskSystem>);
+            assert!(JoinHandleLike::join(h), "DefaultDualTaskSystem");
+            DefaultNestedDualTaskSystem::builder().workers(1).run(|| {
+                let h = DefaultNestedDualTaskSystem::spawn(running_stack_is_guarded::<DefaultNestedDualTaskSystem>);
+                assert!(JoinHandleLike::join(h), "DefaultNestedDualTaskSystem");
+            });
+        });
+    }
+}
