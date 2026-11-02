@@ -11,12 +11,15 @@
 //! any extra boilerplate:
 //!
 //! ```ignore
-//! pub struct DefaultDualTaskSystem;
-//! impl cmpth::UltIdentity for DefaultDualTaskSystem { type Base = cmpth::OsSystem; ... }
+//! pub struct Outer;
+//! impl cmpth::UltIdentity for Outer { type Base = cmpth::OsSystem; ... }
 //!
-//! pub struct DefaultNestedDualTaskSystem;
-//! impl cmpth::UltIdentity for DefaultNestedDualTaskSystem { type Base = DefaultDualTaskSystem; ... }
+//! pub struct Inner;
+//! impl cmpth::UltIdentity for Inner { type Base = Outer; ... }
 //! ```
+//!
+//! [`DefaultNestedDualTaskSystem`](crate::DefaultNestedDualTaskSystem) is
+//! built the same way through [`UltDualIdentity`](crate::UltDualIdentity).
 
 use crate::traits::stackful::{
     BlockOnSystem, ContextPolicy, DelegationSystem, NestableSystem, StackfulSyncSystem,
