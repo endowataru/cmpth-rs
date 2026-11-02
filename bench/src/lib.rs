@@ -169,12 +169,8 @@ pub struct AsyncOnlyMarker;
 
 cmpth::worker_tls_anchor!(AsyncOnlyMarker);
 
-impl cmpth::UltAsyncIdentity for AsyncOnlyMarker {
-    type Base = cmpth::OsSystem;
-    type Desc = cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>;
-    type RunQueue = cmpth::HybridRunQueue<cmpth::SuspendedTaskToken<cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>>>;
-    type Lookup = cmpth::InlineTlsCurrent;
-    type Idle = cmpth::SpinIdle;
+cmpth::impl_with_defaults! {
+    impl cmpth::UltAsyncIdentity for AsyncOnlyMarker {}
 }
 
 pub type AsyncOnlySystem = cmpth::UltAsyncSystem<AsyncOnlyMarker>;

@@ -204,19 +204,35 @@ impl cmpth::UltIdentity for MySystem {
     type Alloc = cmpth::HeapStack;                         // stack allocator
     type Lookup = cmpth::TlsCurrent;                       // current-worker lookup
     type Idle = cmpth::SpinIdle;                           // what idle workers do (spin / park)
-
 }
 ```
 
 `UltIdentity` builds a stackful system this way (`DefaultStackfulOnlyTaskSystem`
-is wired up exactly like `MySystem` above, just with `HeapStack`/`TlsCurrent`);
-`UltDualIdentity` does the same for a dual system (`DefaultDualTaskSystem` and
-its variants) and `UltAsyncIdentity` for a stackless-only one. All three are
-config traits — implement one for your own marker type and a blanket impl
-(written inside `cmpth`) supplies `SchedulerSystem`/`StackfulSchedulerSystem`/`SpawnableStackfulTaskSystem`.
+is exactly `MySystem` above); `UltDualIdentity` does the same for a dual
+system (`DefaultDualTaskSystem` and its variants) and `UltAsyncIdentity` for a
+stackless-only one. All three are config traits — implement one for your own
+marker type and a blanket impl (written inside `cmpth`) supplies
+`SchedulerSystem`/`StackfulSchedulerSystem`/`SpawnableStackfulTaskSystem`.
 They are shorthand for hand-writing the underlying trait implementations
 yourself — the escape hatch for when their fixed shape doesn't fit, since
 every component they wire up is a public trait you can implement directly.
+
+Rust has no stable defaults for associated types yet, so
+`impl_with_defaults!` supplies them: wrap the impl and give only what
+differs. The body stays an ordinary impl block, so the wrapper can go once
+the language has the defaults.
+
+```rust
+pub struct MyParkingSystem;
+
+cmpth::worker_tls_anchor!(MyParkingSystem);
+
+cmpth::impl_with_defaults! {
+    impl cmpth::UltIdentity for MyParkingSystem {
+        type Idle = cmpth::SearchIdle;                     // everything else as above
+    }
+}
+```
 
 Every stackful system implements `SpawnableStackfulTaskSystem` directly, so schedulers
 **nest**: set `type Base = MySystem` in a second system and it runs ULTs
