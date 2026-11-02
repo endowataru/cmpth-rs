@@ -6,20 +6,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+mod common;
+
+use common::fib;
 use cmpth::duty::{DutyConfig, DutyDomain, DutyPlace, DutyRegistry, NoDuties};
 use cmpth::{
     DispatchPolicy, JoinHandleLike, SchedObserver, Site, SpawnableStackfulTaskSystem, StackfulBuilder,
     StackfulInitSystem, StandardDispatch, Steal, StealOutcome, TaskSources, UltDualSystem,
 };
-
-fn fib<S: SpawnableStackfulTaskSystem>(n: u64) -> u64 {
-    if n < 2 {
-        return n;
-    }
-    let h = S::spawn(move || fib::<S>(n - 1));
-    let b = fib::<S>(n - 2);
-    JoinHandleLike::join(h) + b
-}
 
 // --- observer ---------------------------------------------------------------
 

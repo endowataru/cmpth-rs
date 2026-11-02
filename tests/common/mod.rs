@@ -7,7 +7,11 @@
 
 #![allow(dead_code)]
 
-use cmpth::{BlockOnSystem, DefaultDualTaskSystem, StackfulBuilder, StackfulInitSystem, SpawnableStackfulTaskSystem};
+pub mod conformance;
+
+use cmpth::{
+    BlockOnSystem, DefaultDualTaskSystem, JoinHandleLike, SpawnableStackfulTaskSystem, StackfulBuilder, StackfulInitSystem,
+};
 
 pub fn run<F, R>(num_workers: usize, root: F) -> R
 where
@@ -51,3 +55,13 @@ pub fn yield_now() {
 pub type Mutex<T> = cmpth::McsMutex<DefaultDualTaskSystem, T>;
 pub type Condvar = cmpth::McsCondvar<DefaultDualTaskSystem>;
 pub type Barrier = cmpth::UltBarrier<DefaultDualTaskSystem>;
+
+/// A fork-join tree: `fib(n)` spawning one task per call.
+pub fn fib<S: SpawnableStackfulTaskSystem>(n: u64) -> u64 {
+    if n < 2 {
+        return n;
+    }
+    let h = S::spawn(move || fib::<S>(n - 1));
+    let b = fib::<S>(n - 2);
+    JoinHandleLike::join(h) + b
+}
