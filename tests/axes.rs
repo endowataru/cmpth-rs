@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 mod common;
 
 use common::fib;
-use cmpth::duty::{DutyConfig, DutyDomain, DutyPlace, DutyRegistry, NoDuties};
+use cmpth::{DutyConfig, DutyDomain, DutyPlace, DutyRegistry, NoDuties};
 use cmpth::{
     DispatchPolicy, JoinHandleLike, SchedObserver, Site, SpawnableStackfulTaskSystem, StackfulBuilder,
     StackfulInitSystem, StandardDispatch, Steal, StealOutcome, TaskSources, UltDualSystem,
@@ -128,8 +128,8 @@ static PRIVATE: DutyRegistry = DutyRegistry::new(DutyConfig::DEFAULT);
 
 pub struct PrivateDuties;
 impl DutyDomain for PrivateDuties {
-    fn registry() -> Option<&'static DutyRegistry> {
-        Some(&PRIVATE)
+    fn registry() -> &'static DutyRegistry {
+        &PRIVATE
     }
 }
 
@@ -150,7 +150,7 @@ cmpth::impl_with_defaults! {
 }
 
 /// Idle workers of `S` for 50 ms, then their share of `d`'s polls.
-fn idle_polls<S: StackfulInitSystem>(d: &cmpth::duty::Duty) -> u64 {
+fn idle_polls<S: StackfulInitSystem>(d: &cmpth::resumable::common::duty::Duty) -> u64 {
     let before = d.stats().worker_polls;
     S::builder().workers(3).run(|| {
         let t0 = Instant::now();

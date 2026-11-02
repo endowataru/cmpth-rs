@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering, fence};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::duty::DutyDomain;
+use crate::resumable::common::duty::DutyDomain;
 pub use crate::traits::component::idle::{IdleContext, IdleDuties, IdlePolicy};
 use crate::resumable::common::observe::SchedObserver;
 use crate::resumable::common::system::WorkerSystem;
@@ -63,28 +63,28 @@ impl<S: WorkerSystem> IdleContext for IdleCx<'_, S> {
     }
 }
 
-/// A domain's duties are its registry's, or none.
+/// A domain's idle workers serve [`DutyDomain::served`].
 impl<D: DutyDomain> IdleDuties for D {
     #[inline(always)]
     fn run_idle() {
-        if let Some(r) = D::registry() {
+        if let Some(r) = D::served() {
             r.run_idle();
         }
     }
 
     #[inline(always)]
     fn wait_spin_ns() -> u64 {
-        D::registry().map_or(0, |r| r.wait_spin_ns())
+        D::served().map_or(0, |r| r.wait_spin_ns())
     }
 
     #[inline(always)]
     fn park_timeout(timed: &mut bool) -> Option<Duration> {
-        D::registry().and_then(|r| r.park_timeout(timed))
+        D::served().and_then(|r| r.park_timeout(timed))
     }
 
     #[inline(always)]
     fn idle_done(timed: &mut bool) {
-        match D::registry() {
+        match D::served() {
             Some(r) => r.idle_done(timed),
             None => *timed = false,
         }
@@ -92,7 +92,7 @@ impl<D: DutyDomain> IdleDuties for D {
 
     #[inline(always)]
     fn release_timed() {
-        if let Some(r) = D::registry() {
+        if let Some(r) = D::served() {
             r.release_timed();
         }
     }

@@ -17,7 +17,7 @@ use crate::resumable::common::pool::{DescPool, DynamicPool};
 use crate::resumable::common::steal::StealPolicy;
 use crate::resumable::common::dispatch::DispatchPolicy;
 use crate::resumable::common::observe::SchedObserver;
-use crate::duty::DutyDomain;
+use crate::resumable::common::duty::DutyDomain;
 use crate::resumable::common::worker::{LocalQueue, WorkerOps};
 
 /// Storage-related subset of [`SchedulerSystem`]: the descriptor type and

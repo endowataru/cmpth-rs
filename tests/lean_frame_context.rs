@@ -32,7 +32,7 @@ impl UltIdentity for LeanContextSystem {
     type Idle = cmpth::SpinIdle;
     type Steal = cmpth::RandomSweepSteal;
     type Dispatch = cmpth::StandardDispatch;
-    type Duties = cmpth::duty::GlobalDuties;
+    type Duties = cmpth::GlobalDuties;
     type Observe = cmpth::NoObserver;
     type Hooks = cmpth::NoHooks;
     type ExternalQueue = cmpth::StealPathQueue<cmpth::resumable::stackful::desc::StackfulOnlyTaskDesc<Self>>;

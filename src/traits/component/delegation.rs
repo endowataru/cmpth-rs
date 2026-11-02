@@ -239,8 +239,8 @@ pub struct PostConfig {
     /// At most this long between a post and the serve covering it, while
     /// nobody calls `serve_now`.
     pub latency: std::time::Duration,
-    /// Where the consumer's `serve` may run (see [`crate::duty::DutyPlace`]).
-    pub place: crate::duty::DutyPlace,
+    /// Where the consumer's `serve` may run (see [`crate::traits::DutyPlace`]).
+    pub place: crate::traits::DutyPlace,
 }
 
 /// A delegator for posts: [`post`](Self::post) asks the consumer to catch

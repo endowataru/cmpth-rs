@@ -33,6 +33,8 @@ pub use component::stackful::{
     Context, ContextPolicy, HandoffTaskDesc, Poller, StackfulResumable, Transfer,
 };
 pub use system::block_on::BlockOnSystem;
+pub use component::duty::{DutyLike, DutyPlace, DutyService, DutyToucherLike};
+pub use system::duty::{DutyOf, DutySystem, DutyToucherOf, DutyWaiterOf};
 pub use system::bundle::StackfulTaskSystem;
 pub use system::delegation::{Delegator, DelegatorRun, DelegationSystem, FavorPosting, FavorServing, PostChoice, PostDelegatorOf, PostFavor, PostingSystem};
 pub use system::nesting::NestableSystem;
