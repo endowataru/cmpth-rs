@@ -1,6 +1,7 @@
 pub mod block_on;
 pub mod bundle;
 pub mod delegation;
+pub mod duty;
 pub mod nesting;
 pub mod scoped;
 pub mod stackful;

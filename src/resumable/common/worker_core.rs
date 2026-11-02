@@ -237,7 +237,7 @@ pub(crate) fn wait_round<S: WorkerSystem>(rounds: &mut u32) {
     std::hint::spin_loop();
     *rounds = rounds.wrapping_add(1);
     if *rounds & 0x3F == 0 {
-        if let Some(r) = <S::Duties as crate::duty::DutyDomain>::registry() {
+        if let Some(r) = <S::Duties as crate::resumable::common::duty::DutyDomain>::served() {
             r.run_idle();
         }
     }
