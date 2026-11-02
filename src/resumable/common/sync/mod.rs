@@ -9,6 +9,7 @@
 
 pub mod dual_barrier;
 pub mod dual_mutex;
+pub mod post;
 
 pub use dual_barrier::DualBarrier;
 pub use dual_mutex::{DualMutex, DualMutexGuard};

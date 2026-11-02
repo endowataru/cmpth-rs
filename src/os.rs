@@ -98,7 +98,7 @@ impl DelegationSystem for OsSystem {
 }
 
 impl crate::traits::PostingSystem for OsSystem {
-    type PostChoice = crate::post::DefaultPostChoice;
+    type PostChoice = crate::resumable::common::sync::post::DefaultPostChoice;
 }
 
 impl crate::traits::DutySystem for OsSystem {

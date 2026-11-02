@@ -29,14 +29,14 @@ fn with_watchdog(f: impl FnOnce()) {
 
 #[test]
 fn spinner_is_preempted_and_resumes_intact() {
-    cmpth::preempt::enable(Duration::from_micros(500));
+    cmpth::resumable::stackful::preempt::enable(Duration::from_micros(500));
     with_watchdog(|| {
         <U as StackfulInitSystem>::builder().workers(1).run(|| {
             let flag = Arc::new(AtomicBool::new(false));
             let probes = Arc::new(AtomicU64::new(0));
             let f2 = Arc::clone(&flag);
             let spinner = U::spawn(move || {
-                cmpth::preempt::preemptible::<U, _>(|| {
+                cmpth::resumable::stackful::preempt::preemptible::<U, _>(|| {
                     // Keeps live values in registers across preemptions.
                     let (mut a, mut b, mut x) = (1u64, 2u64, 0.5f64);
                     while !f2.load(Ordering::Relaxed) {
@@ -47,7 +47,7 @@ fn spinner_is_preempted_and_resumes_intact() {
                     }
                     std::hint::black_box((a, b, x));
                 });
-                cmpth::preempt::preemptions_here()
+                cmpth::resumable::stackful::preempt::preemptions_here()
             });
             let (p2, f3) = (Arc::clone(&probes), Arc::clone(&flag));
             let probe = U::spawn(move || {
