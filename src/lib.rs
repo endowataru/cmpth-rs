@@ -93,7 +93,7 @@ macro_rules! dual_task_system {
         impl resumable::common::system::PoolSystem for $name {
             type Desc  = resumable::dual::desc::DualTaskDesc<Self>;
             type ExternalQueue   = resumable::common::external_queue::StealPathQueue<resumable::dual::desc::DualTaskDesc<Self>>;
-            type Pool            = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc<Self>, resumable::common::stack::MallocFrame>;
+            type Pool            = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc<Self>, resumable::common::stack::HeapStack>;
             type AsyncPool       = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc<Self>, resumable::common::stack::MallocFrame>;
             const ASYNC_POOL_SIZE: usize = 512;
             type RecursionPool   = resumable::common::pool::ThresholdPool<resumable::common::pool::BlockPool>;
@@ -204,7 +204,7 @@ pub struct DefaultNestedDualTaskSystem;
 impl resumable::common::system::PoolSystem for DefaultNestedDualTaskSystem {
     type Desc  = resumable::dual::desc::DualTaskDesc<Self>;
     type ExternalQueue   = resumable::common::external_queue::StealPathQueue<resumable::dual::desc::DualTaskDesc<Self>>;
-    type Pool            = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc<Self>, resumable::common::stack::MallocFrame>;
+    type Pool            = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc<Self>, resumable::common::stack::HeapStack>;
     type AsyncPool       = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc<Self>, resumable::common::stack::MallocFrame>;
     const ASYNC_POOL_SIZE: usize = 512;
     type RecursionPool   = resumable::common::pool::ThresholdPool<resumable::common::pool::BlockPool>;
