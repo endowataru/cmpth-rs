@@ -17,7 +17,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::resumable::common::system::{PoolSystem, WorkerSystem};
-use crate::resumable::common::worker::{LocalQueue, WorkerOps};
+use crate::resumable::common::worker::WorkerOps;
 use crate::resumable::common::desc::{HasExternalQueue, SuspendedTaskToken};
 use crate::resumable::common::external_queue::ExternalWakeQueue;
 
@@ -166,6 +166,18 @@ pub(crate) fn try_wake_state(state: &AtomicUsize) -> WakeOutcome {
     }
 }
 
+/// Queue a task woken on worker `wk` where the system's
+/// [`PlacementPolicy`](crate::PlacementPolicy) says.
+#[inline(always)]
+pub(crate) fn place_woken<S: WorkerSystem>(wk: &S::Worker, c: S::SuspendedToken) {
+    use crate::resumable::common::placement::{PlacementPolicy, WakeTo};
+    use crate::resumable::common::worker::LocalQueue;
+    match <S::Placement as PlacementPolicy>::WAKE {
+        WakeTo::Front => wk.push(c),
+        WakeTo::Back => wk.defer(c),
+    }
+}
+
 /// Takes an already-constructed token (rather than a raw pointer it would
 /// have to re-validate) so the `ClaimedParked` callers that already hold
 /// exclusive ownership at their call site don't have to hand off a raw
@@ -177,7 +189,7 @@ where
     S::SuspendedToken: From<SuspendedTaskToken<S::Desc>>,
 {
     match S::Worker::current() {
-        Some(wk) => wk.push(token.into()),
+        Some(wk) => place_woken::<S>(wk, token.into()),
         None => {
             // Copy the pointer out before `push` below consumes `token`
             // (and with it, the borrow `external_queue()` would otherwise

@@ -9,6 +9,7 @@ use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use crate::traits::stackful::{ContextPolicy, HandoffTaskDesc, JoinHandleLike, Transfer};
+use crate::resumable::common::placement::{PlacementPolicy, SpawnOrder};
 use crate::resumable::common::system::PoolSystem;
 use crate::resumable::common::thread::{align_down, drop_stack_result, JoinHandle, StackResult};
 use crate::resumable::stackful::system::StackfulSchedulerSystem;
@@ -48,8 +49,11 @@ fn branch_layout<F, T>(stack_top: usize) -> (*mut F, *mut StackResult<T>) {
     (f_addr as *mut F, result_addr as *mut StackResult<T>)
 }
 
-/// Spawn a ULT.  Child-first: the child starts immediately on this worker and
-/// the parent's continuation is pushed to the deque for stealing.
+/// Spawn a ULT.  Child-first (the default
+/// [`PlacementPolicy`]): the child starts
+/// immediately on this worker and the parent's continuation is pushed to the
+/// deque for stealing.  Parent-first: the child is queued as a fresh context
+/// and the parent goes on.
 ///
 /// The closure `F` and the result slot `StackResult<T>` are placed directly on
 /// the child's stack, avoiding two heap allocations that the old Box-erasure
@@ -74,6 +78,18 @@ where
 
     // Write the closure onto the child's stack before switching.
     unsafe { f_ptr.write(f) };
+
+    if <S::Placement as PlacementPolicy>::SPAWN == SpawnOrder::ParentFirst {
+        // Queue the child as a context nobody has switched into yet (as
+        // `parallel_call` queues its second branch) and go on.
+        let ctx = unsafe { S::Ctx::make_context(exec_top, branch_entry::<S, F, T>, std::ptr::null_mut()) };
+        // SAFETY: `desc` was allocated above and released by `into_raw`;
+        // still exclusively owned here.
+        let mut token = unsafe { SuspendedTaskToken::<S::Desc>::from_raw(desc) };
+        token.set_ctx(ctx.0);
+        wk.push(token.into());
+        return JoinHandle { desc, result_ptr, result_drop: drop_stack_result::<T>, _marker: PhantomData };
+    }
 
     let child = move |wk: &S::Worker, prev: SuspendedTaskToken<S::Desc>| {
         // Running on the child's stack.  Publish the parent for stealing, run
