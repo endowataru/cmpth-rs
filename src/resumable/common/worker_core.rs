@@ -15,6 +15,7 @@ use crate::resumable::common::external_queue::WakeHook;
 use crate::resumable::common::dispatch::{DispatchPolicy, Site, TaskSources};
 use crate::resumable::common::idle::{IdleCx, IdlePolicy};
 use crate::resumable::common::observe::{SchedObserver, StealOutcome};
+use crate::resumable::common::worker_hooks::{HooksSlot, WorkerHooks};
 use crate::resumable::common::qos::{QosPolicy, QosSlot};
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::steal::StealPolicy;
@@ -34,6 +35,7 @@ pub struct PoolCore<S: WorkerSystem> {
     pub(crate) finished: AtomicBool,
     pub(crate) idle: S::Idle,
     pub(crate) qos: S::Qos,
+    pub(crate) hooks: S::Hooks,
 }
 
 impl<S: WorkerSystem> PoolCore<S> {
@@ -44,7 +46,7 @@ impl<S: WorkerSystem> PoolCore<S> {
         let stealers: Box<[_]> = cores.map(|c| c.deque.stealer()).collect();
         let idle = S::Idle::default();
         idle.set_workers(stealers.len());
-        PoolCore { stealers, finished: AtomicBool::new(false), idle, qos: S::Qos::default() }
+        PoolCore { stealers, finished: AtomicBool::new(false), idle, qos: S::Qos::default(), hooks: S::Hooks::default() }
     }
 
     /// Hook for an external queue to notify this pool's idle policy.
@@ -72,6 +74,7 @@ pub struct WorkerCore<S: WorkerSystem> {
     steal: <S::Steal as StealPolicy>::State,
     dispatch: <S::Dispatch as DispatchPolicy>::State,
     qos: QosSlot,
+    hooks: HooksSlot,
     pool: Cell<*const PoolCore<S>>,
 }
 
@@ -89,6 +92,7 @@ impl<S: WorkerSystem> WorkerCore<S> {
             steal: <S::Steal as StealPolicy>::new_state(num),
             dispatch: Default::default(),
             qos: QosSlot::default(),
+            hooks: HooksSlot::default(),
             pool: Cell::new(std::ptr::null()),
         }
     }
@@ -128,6 +132,11 @@ impl<S: WorkerSystem> LocalQueue<S> for WorkerCore<S> {
     #[inline]
     fn qos_slot(&self) -> &QosSlot {
         &self.qos
+    }
+
+    #[inline]
+    fn hooks_slot(&self) -> &HooksSlot {
+        &self.hooks
     }
 
     fn try_steal(&self) -> Steal<S::SuspendedToken> {
@@ -263,6 +272,7 @@ where
     let mut ep = <S::Idle as IdlePolicy>::Episode::default();
     let qos = wk.qos_slot();
     if !qos.started.replace(true) {
+        pool.hooks.start(me, pool.stealers.len(), &wk.hooks_slot().state);
         pool.qos.start(me, pool.stealers.len(), &qos.state);
     }
     // Consecutive empty rounds, for the QoS policy's `idle`.
@@ -293,5 +303,6 @@ where
     }
     if qos.started.replace(false) {
         pool.qos.stop(&qos.state);
+        pool.hooks.stop(&wk.hooks_slot().state);
     }
 }

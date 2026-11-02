@@ -204,6 +204,7 @@ mod tests {
         type Observe = crate::resumable::common::observe::NoObserver;
         type Qos = crate::resumable::common::qos::OsQos;
         type Placement = crate::resumable::common::placement::StandardPlacement;
+        type Hooks = crate::resumable::common::worker_hooks::NoHooks;
     }
     struct ParkMarker;
     impl ScopedIdentity for ParkMarker {
@@ -214,6 +215,7 @@ mod tests {
         type Observe = crate::resumable::common::observe::NoObserver;
         type Qos = crate::resumable::common::qos::OsQos;
         type Placement = crate::resumable::common::placement::StandardPlacement;
+        type Hooks = crate::resumable::common::worker_hooks::NoHooks;
     }
 
     fn fib<M: ScopedIdentity>(n: u64) -> u64 {

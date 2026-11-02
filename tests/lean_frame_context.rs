@@ -36,6 +36,7 @@ impl UltIdentity for LeanContextSystem {
     type Observe = cmpth::NoObserver;
     type Qos = cmpth::OsQos;
     type Placement = cmpth::StandardPlacement;
+    type Hooks = cmpth::NoHooks;
     type ExternalQueue = cmpth::StealPathQueue<cmpth::resumable::stackful::desc::StackfulOnlyTaskDesc<Self>>;
     type PostChoice = cmpth::DefaultPostChoice;
 }
