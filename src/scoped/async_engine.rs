@@ -368,7 +368,7 @@ mod tests {
         type Idle = SpinIdle;
         type Steal = crate::resumable::common::steal::RandomSweepSteal;
         type Dispatch = crate::resumable::common::dispatch::StandardDispatch;
-        type Duties = crate::duty::GlobalDuties;
+        type Duties = crate::resumable::common::duty::GlobalDuties;
         type Observe = crate::resumable::common::observe::NoObserver;
         type Hooks = crate::resumable::common::worker_hooks::NoHooks;
     }
@@ -377,7 +377,7 @@ mod tests {
         type Idle = ParkIdle;
         type Steal = crate::resumable::common::steal::RandomSweepSteal;
         type Dispatch = crate::resumable::common::dispatch::StandardDispatch;
-        type Duties = crate::duty::GlobalDuties;
+        type Duties = crate::resumable::common::duty::GlobalDuties;
         type Observe = crate::resumable::common::observe::NoObserver;
         type Hooks = crate::resumable::common::worker_hooks::NoHooks;
     }

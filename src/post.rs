@@ -25,7 +25,8 @@ use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use crate::duty::Duty;
+use crate::resumable::common::duty::{Duty, GlobalDuties};
+use crate::traits::{DutyLike, DutyService};
 use crate::traits::{PostChoice, PostConfig, PostConsumer, PostDelegator, Ticket};
 
 // ---------------------------------------------------------------------------
@@ -220,7 +221,7 @@ impl<C: PostConsumer> PostDelegator<C> for SlotPostDelegator<C> {
         let d = Box::pin(SlotPostDelegator { producers: Producers::new(), server: Server::new(consumer), duty: OnceLock::new() });
         let p = SendPtr(&*d as *const Self);
         // A post seen late still waits up to the backed-off period.
-        let duty = Duty::new(cfg.latency, cfg.latency * SLOT_BACKOFF, cfg.place, move || {
+        let duty = GlobalDuties::duty(cfg.latency, cfg.latency * SLOT_BACKOFF, cfg.place, move || {
             let p = &p;
             unsafe { (*p.0).serve_now() }
         });
@@ -304,7 +305,7 @@ impl<C: PostConsumer> PostDelegator<C> for QueuePostDelegator<C> {
             duty: OnceLock::new(),
         });
         let p = SendPtr(&*d as *const Self);
-        let duty = Duty::on_demand(cfg.latency, cfg.place, move || {
+        let duty = GlobalDuties::on_demand(cfg.latency, cfg.place, move || {
             let p = &p;
             let d = unsafe { &*p.0 };
             let did = d.serve_now();
@@ -395,7 +396,7 @@ impl PostChoice for DefaultPostChoice {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::duty::DutyPlace;
+    use crate::traits::DutyPlace;
     use crate::traits::{FavorPosting, FavorServing, PostDelegatorOf, PostingSystem};
     use std::sync::Arc;
     use std::time::Duration;

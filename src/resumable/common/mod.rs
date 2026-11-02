@@ -4,6 +4,7 @@
 pub mod deque;
 pub mod desc;
 pub mod dispatch;
+pub mod duty;
 pub mod external_queue;
 pub mod idle;
 pub mod worker_hooks;

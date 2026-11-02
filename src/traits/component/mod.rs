@@ -1,6 +1,7 @@
 pub mod delegation;
-pub mod idle;
 pub mod dispatch;
+pub mod duty;
+pub mod idle;
 pub mod observe;
 pub mod run_queue;
 pub mod stackful;
