@@ -30,7 +30,12 @@ impl UltIdentity for LeanContextSystem {
     type Alloc = cmpth::resumable::common::stack::HeapStack;
     type Lookup = cmpth::resumable::common::lookup::TlsCurrent;
     type Idle = cmpth::SpinIdle;
-    type Steal = cmpth::SweepSteal;
+    type Steal = cmpth::RandomSweepSteal;
+    type Dispatch = cmpth::StandardDispatch;
+    type Duties = cmpth::duty::GlobalDuties;
+    type Observe = cmpth::NoObserver;
+    type ExternalQueue = cmpth::StealPathQueue<cmpth::resumable::stackful::desc::StackfulOnlyTaskDesc<Self>>;
+    type PostChoice = cmpth::DefaultPostChoice;
 }
 
 #[test]

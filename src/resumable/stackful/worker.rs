@@ -1,6 +1,6 @@
 //! Stackful worker extension traits ([`ContextSwitcher`]/
 //! [`StackfulLocalQueue`]/[`StackfulWorker`]),
-//! `StackfulSchedulerSystem::pop_or_root`'s stackful-only body, the
+//! `StackfulWorkerSystem::next_or_root`'s stackful-only body, the
 //! [`RunnableItem`]/[`ReclaimableDesc`] impls for [`StackfulOnlyTaskDesc`],
 //! and the `extern "C"` context-switch shims. See
 //! [`common::worker`](crate::resumable::common::worker) for the base
@@ -10,7 +10,9 @@ use std::mem::ManuallyDrop;
 use std::ptr;
 
 use crate::traits::stackful::{CondSwitchFnLike, Context, ContextPolicy, RestoreFnLike, SwapFnLike, SwitchFnLike, Transfer};
-use crate::resumable::common::deque::WorkerRunQueue;
+use crate::resumable::common::deque::{Steal, WorkerRunQueue};
+use crate::resumable::common::dispatch::{DispatchPolicy, Site, TaskSources};
+use crate::resumable::common::observe::SchedObserver;
 use crate::resumable::common::worker::{LocalQueue, TaskPool, UltWorker, WorkerOps};
 use crate::resumable::common::system::{PoolSystem, ReclaimableDesc, RunnableItem, WorkerSystem};
 use crate::resumable::stackful::system::StackfulWorkerSystem;
@@ -83,11 +85,12 @@ pub trait StackfulLocalQueue<S: StackfulWorkerSystem + PoolSystem>: LocalQueue<S
 where
     S::Desc: StackfulTaskDesc,
 {
-    /// Pop the next runnable continuation: local deque first, then the root
-    /// (scheduler-loop) continuation. Forwards to
-    /// [`StackfulWorkerSystem::pop_or_root`] — see that method for why the
-    /// dispatch body lives on the system trait, not here.
-    fn pop_or_root(&self) -> SuspendedTaskToken<S::Desc>;
+    /// The task a suspending or exiting task switches to: the dispatch
+    /// policy's pick at [`Site::Switch`], else the root (scheduler-loop)
+    /// continuation. Forwards to [`StackfulWorkerSystem::next_or_root`] —
+    /// see that method for why the body lives on the system trait, not
+    /// here.
+    fn next_or_root(&self) -> SuspendedTaskToken<S::Desc>;
 
     /// Store the scheduler-loop context as the root continuation.
     fn set_root_cont(&self, c: SuspendedTaskToken<S::Desc>);
@@ -110,7 +113,7 @@ where
     where
         F: FnOnce(&Self, SuspendedTaskToken<S::Desc>),
     {
-        let next = self.pop_or_root();
+        let next = self.next_or_root();
         self.suspend_to_cont(next, f)
     }
 
@@ -120,7 +123,7 @@ where
     where
         F: FnOnce(&Self, &mut Option<SuspendedTaskToken<S::Desc>>),
     {
-        let mut next = Some(self.pop_or_root());
+        let mut next = Some(self.next_or_root());
         let wk = self.cond_suspend_to_cont(&mut next, f);
         if let Some(c) = next.take() {
             if c.is_root() {
@@ -137,7 +140,7 @@ where
     where
         F: FnOnce(&Self),
     {
-        let next = self.pop_or_root();
+        let next = self.next_or_root();
         self.exit_to_cont(next, f)
     }
 
@@ -148,35 +151,76 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// StackfulWorkerSystem::pop_or_root's stackful-only body
+// StackfulWorkerSystem::next_or_root's stackful-only body
 // ---------------------------------------------------------------------------
 
-/// `pop_or_root` body for stackful-only systems: every popped item is a
-/// real, switchable continuation, so no requeue check is needed.
-///
-/// Lowest rung: plain [`WorkerSystem`] — `wk.core.deque.try_pop()` returns
-/// `S::SuspendedToken`, converted to this function's
-/// `SuspendedTaskToken<S::Desc>` return type via the `Into` bound on
-/// [`WorkerSystem::SuspendedToken`] rather than an equality pin;
-/// `wk.take_root_cont()` is a plain `WorkerSystem`-level accessor, already
-/// implied. Does *not* need `StackfulWorkerSystem` (no context switch
-/// happens here, so `S::Ctx` is never named) or `S::Desc: StackfulTaskDesc`.
-pub fn pop_or_root_stackful<S>(wk: &UltWorker<S>) -> SuspendedTaskToken<S::Desc>
+/// A suspending task's view of its worker's task sources ([`Site::Switch`]).
+struct SwitchSources<'a, S: WorkerSystem + PoolSystem> {
+    wk: &'a UltWorker<S>,
+}
+
+impl<S> TaskSources for SwitchSources<'_, S>
 where
     S: WorkerSystem + PoolSystem,
     SuspendedTaskToken<S::Desc>: From<S::SuspendedToken>,
 {
-    // A task woken from outside the pool (by an OS thread) waits in the
-    // external queue, which the idle path drains; a worker whose tasks only
-    // yield to each other never idles, so take it here first (an atomic load
-    // when the queue is empty).
-    if let Some(c) = crate::resumable::common::external_queue::ExternalQueue::try_pop(wk.external_queue()) {
-        return c;
+    type Item = SuspendedTaskToken<S::Desc>;
+
+    #[inline(always)]
+    fn local(&self) -> Option<Self::Item> {
+        self.wk.core.deque.try_pop().map(Into::into)
     }
-    if let Some(c) = wk.core.deque.try_pop() {
-        return c.into();
+
+    #[inline(always)]
+    fn steal(&self) -> Steal<Self::Item> {
+        match LocalQueue::try_steal(self.wk) {
+            Steal::Success(c) => Steal::Success(c.into()),
+            Steal::Empty => Steal::Empty,
+            Steal::Retry => Steal::Retry,
+        }
     }
-    wk.take_root_cont()
+
+    #[inline(always)]
+    fn external(&self) -> Option<Self::Item> {
+        crate::resumable::common::external_queue::ExternalQueue::try_pop(self.wk.external_queue())
+    }
+}
+
+/// The next task at [`Site::Switch`], through the system's
+/// [`DispatchPolicy`](crate::DispatchPolicy); `None`: switch to the root.
+#[inline(always)]
+pub(crate) fn switch_next<S>(wk: &UltWorker<S>) -> Option<SuspendedTaskToken<S::Desc>>
+where
+    S: WorkerSystem + PoolSystem,
+    SuspendedTaskToken<S::Desc>: From<S::SuspendedToken>,
+{
+    let src = SwitchSources { wk };
+    match <S::Dispatch as DispatchPolicy>::next(wk.core.dispatch_state(), &src, Site::Switch) {
+        Steal::Success(c) => Some(c),
+        _ => None,
+    }
+}
+
+/// `next_or_root` body for stackful-only systems: every task is a real,
+/// switchable continuation, so the policy's pick is switched to as is.
+///
+/// Lowest rung: plain [`WorkerSystem`] — the run queue's
+/// `S::SuspendedToken` is converted via the `Into` bound on
+/// [`WorkerSystem::SuspendedToken`] rather than an equality pin. Does *not*
+/// need `StackfulWorkerSystem` (no context switch happens here, so `S::Ctx`
+/// is never named) or `S::Desc: StackfulTaskDesc`.
+pub fn next_or_root_stackful<S>(wk: &UltWorker<S>) -> SuspendedTaskToken<S::Desc>
+where
+    S: WorkerSystem + PoolSystem,
+    SuspendedTaskToken<S::Desc>: From<S::SuspendedToken>,
+{
+    match switch_next(wk) {
+        Some(c) => {
+            <S::Observe as SchedObserver>::dispatch(LocalQueue::num(&wk.core), Site::Switch);
+            c
+        }
+        None => wk.take_root_cont(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -235,7 +279,7 @@ where
 // --- StackfulLocalQueue ---
 
 // `S: StackfulSchedulerSystem` was the old bound here; relaxed further to
-// plain `StackfulWorkerSystem`: `pop_or_root` below calls `S::pop_or_root`,
+// plain `StackfulWorkerSystem`: `next_or_root` below calls `S::next_or_root`,
 // whose default body needs no `Worker`/`SuspendedToken` identity pin (see
 // that method's doc comment — it converts via `Into` now), and
 // `set_root_cont` only ever touches the concrete `root_cont` field, never
@@ -246,8 +290,8 @@ where
     S::SuspendedToken: From<SuspendedTaskToken<S::Desc>>,
     SuspendedTaskToken<S::Desc>: From<S::SuspendedToken>,
 {
-    fn pop_or_root(&self) -> SuspendedTaskToken<S::Desc> {
-        S::pop_or_root(self)
+    fn next_or_root(&self) -> SuspendedTaskToken<S::Desc> {
+        S::next_or_root(self)
     }
 
     fn set_root_cont(&self, cont: SuspendedTaskToken<S::Desc>) {

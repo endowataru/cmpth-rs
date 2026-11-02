@@ -281,7 +281,11 @@ where
 ///     type RunQueue = cmpth::HybridRunQueue<cmpth::SuspendedTaskToken<cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>>>;
 ///     type Lookup = cmpth::InlineTlsCurrent;
 ///     type Idle = cmpth::SpinIdle;
-///     type Steal = cmpth::SweepSteal;
+///     type Steal = cmpth::RandomSweepSteal;
+///     type Dispatch = cmpth::StandardDispatch;
+///     type Duties = cmpth::duty::GlobalDuties;
+///     type Observe = cmpth::NoObserver;
+///     type ExternalQueue = cmpth::StealPathQueue<cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>>;
 /// }
 ///
 /// type MyAsyncSystem = cmpth::UltAsyncSystem<MyAsyncMarker>;
@@ -333,6 +337,21 @@ pub trait UltAsyncIdentity: crate::traits::WorkerTlsAnchor + Sized + Send + Sync
     /// Steal policy; see [`crate::WorkerSystem::Steal`].
     type Steal: crate::resumable::common::steal::StealPolicy;
 
+    /// Dispatch policy; see [`crate::WorkerSystem::Dispatch`].
+    type Dispatch: crate::resumable::common::dispatch::DispatchPolicy;
+
+    /// Duties the idle workers run; see [`crate::WorkerSystem::Duties`].
+    type Duties: crate::duty::DutyDomain;
+
+    /// Scheduler observer; see [`crate::WorkerSystem::Observe`].
+    type Observe: crate::resumable::common::observe::SchedObserver;
+
+    /// Where tasks woken from outside the pool wait; see
+    /// [`PoolSystem::ExternalQueue`].
+    type ExternalQueue: crate::resumable::common::external_queue::ExternalQueue<UltAsyncSystem<Self>>
+    where
+        UltAsyncSystem<Self>: PoolSystem;
+
     /// Fixed slot size for the `spawn_async` descriptor pool.
     const ASYNC_POOL_SIZE: usize = 512;
 
@@ -356,7 +375,7 @@ pub struct UltAsyncSystem<M: UltAsyncIdentity> {
 
 impl<M: UltAsyncIdentity> PoolSystem for UltAsyncSystem<M> {
     type Desc  = M::Desc;
-    type ExternalQueue = crate::resumable::common::external_queue::StealPathQueue<M::Desc>;
+    type ExternalQueue = <M as UltAsyncIdentity>::ExternalQueue;
     // Never actually allocated through: this flavor has no `spawn`, only
     // `spawn_async` (which goes through AsyncPool below). SimplePool is the
     // cheapest DescPool to instantiate for a type that's never used.
@@ -374,6 +393,9 @@ impl<M: UltAsyncIdentity> WorkerSystem for UltAsyncSystem<M> {
     type Lookup = <M as UltAsyncIdentity>::Lookup;
     type Idle = <M as UltAsyncIdentity>::Idle;
     type Steal = <M as UltAsyncIdentity>::Steal;
+    type Dispatch = <M as UltAsyncIdentity>::Dispatch;
+    type Duties = <M as UltAsyncIdentity>::Duties;
+    type Observe = <M as UltAsyncIdentity>::Observe;
 
     fn worker_tls() -> &'static <M::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         crate::traits::TlsSlot::from_anchor(<M as crate::traits::WorkerTlsAnchor>::anchor())

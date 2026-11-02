@@ -141,6 +141,9 @@ impl<M: ScopedIdentity> WorkerSystem for ScopedSystem<M> {
     type Lookup = ScopedLookup<M>;
     type Idle = M::Idle;
     type Steal = M::Steal;
+    type Dispatch = M::Dispatch;
+    type Duties = M::Duties;
+    type Observe = M::Observe;
     type Worker = ScopedWorker<M>;
 
     // Dead code for every `M`: nothing in `scoped` ever calls

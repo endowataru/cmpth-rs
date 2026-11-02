@@ -39,7 +39,7 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 
 use crate::resumable::common::worker::{LocalQueue, WorkerOps};
-use crate::resumable::common::worker_core::try_run_one;
+use crate::resumable::common::worker_core::{try_run_one, wait_round};
 
 use super::system::{ScopedIdentity, ScopedSystem};
 use super::task::TaskRef;
@@ -204,6 +204,7 @@ fn drive<M: ScopedIdentity, Fut: Future + ?Sized>(mut fut: Pin<&mut Fut>) -> Fut
     let woken = Arc::new(WakeFlag(AtomicBool::new(true)));
     let waker = Waker::from(Arc::clone(&woken));
     let mut cx = Context::from_waker(&waker);
+    let mut rounds = 0;
     loop {
         if woken.0.swap(false, Ordering::AcqRel) {
             if let Poll::Ready(v) = fut.as_mut().poll(&mut cx) {
@@ -211,7 +212,7 @@ fn drive<M: ScopedIdentity, Fut: Future + ?Sized>(mut fut: Pin<&mut Fut>) -> Fut
             }
         }
         if !try_execute_one::<M>(wk) {
-            std::hint::spin_loop();
+            wait_round::<ScopedSystem<M>>(&mut rounds);
         }
     }
 }
@@ -365,12 +366,18 @@ mod tests {
     struct SpinMarker;
     impl ScopedIdentity for SpinMarker {
         type Idle = SpinIdle;
-        type Steal = crate::resumable::common::steal::SweepSteal;
+        type Steal = crate::resumable::common::steal::RandomSweepSteal;
+        type Dispatch = crate::resumable::common::dispatch::StandardDispatch;
+        type Duties = crate::duty::GlobalDuties;
+        type Observe = crate::resumable::common::observe::NoObserver;
     }
     struct ParkMarker;
     impl ScopedIdentity for ParkMarker {
         type Idle = ParkIdle;
-        type Steal = crate::resumable::common::steal::SweepSteal;
+        type Steal = crate::resumable::common::steal::RandomSweepSteal;
+        type Dispatch = crate::resumable::common::dispatch::StandardDispatch;
+        type Duties = crate::duty::GlobalDuties;
+        type Observe = crate::resumable::common::observe::NoObserver;
     }
 
     // Recursive `async fn`s can't pass their own opaque return type as a

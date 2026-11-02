@@ -47,7 +47,12 @@ use crate::traits::{TlsSlot, WorkerTlsAnchor};
 ///     type Alloc = cmpth::HeapStack;
 ///     type Lookup = cmpth::TlsCurrent;
 ///     type Idle = cmpth::SearchIdle;
-///     type Steal = cmpth::SweepSteal;
+///     type Steal = cmpth::RandomSweepSteal;
+///     type Dispatch = cmpth::StandardDispatch;
+///     type Duties = cmpth::duty::GlobalDuties;
+///     type Observe = cmpth::NoObserver;
+///     type ExternalQueue = cmpth::StealPathQueue<cmpth::DualTaskDesc<cmpth::UltDualSystem<Self>>>;
+///     type PostChoice = cmpth::DefaultPostChoice;
 /// }
 ///
 /// type MyDualSystem = cmpth::UltDualSystem<MyDualMarker>;
@@ -82,6 +87,25 @@ pub trait UltDualIdentity: WorkerTlsAnchor + Sized + Send + Sync + 'static {
     /// Steal policy; see [`crate::WorkerSystem::Steal`].
     type Steal: crate::resumable::common::steal::StealPolicy;
 
+    /// Dispatch policy; see [`crate::WorkerSystem::Dispatch`].
+    type Dispatch: crate::resumable::common::dispatch::DispatchPolicy;
+
+    /// Duties the idle workers run; see [`crate::WorkerSystem::Duties`].
+    type Duties: crate::duty::DutyDomain;
+
+    /// Scheduler observer; see [`crate::WorkerSystem::Observe`].
+    type Observe: crate::resumable::common::observe::SchedObserver;
+
+    /// Where tasks woken from outside the pool wait; see
+    /// [`PoolSystem::ExternalQueue`].
+    type ExternalQueue: crate::resumable::common::external_queue::ExternalQueue<UltDualSystem<Self>>
+    where
+        UltDualSystem<Self>: PoolSystem;
+
+    /// How `post` chooses a delegator; see
+    /// [`PostingSystem::PostChoice`](crate::traits::PostingSystem::PostChoice).
+    type PostChoice: crate::traits::PostChoice;
+
     /// Current-worker lookup policy.  `where UltDualSystem<Self>:
     /// WorkerSystem`, as for [`UltAsyncIdentity`](crate::UltAsyncIdentity)'s
     /// `Lookup`.
@@ -104,7 +128,7 @@ pub struct UltDualSystem<M: UltDualIdentity> {
 
 impl<M: UltDualIdentity> PoolSystem for UltDualSystem<M> {
     type Desc = DualTaskDesc<Self>;
-    type ExternalQueue = crate::resumable::common::external_queue::StealPathQueue<DualTaskDesc<Self>>;
+    type ExternalQueue = <M as UltDualIdentity>::ExternalQueue;
     type Pool = crate::resumable::common::pool::ReturnPool<DualTaskDesc<Self>, M::Alloc>;
     type AsyncPool = crate::resumable::common::pool::ReturnPool<DualTaskDesc<Self>, crate::resumable::common::stack::MallocFrame>;
     const ASYNC_POOL_SIZE: usize = <M as UltDualIdentity>::ASYNC_POOL_SIZE;
@@ -119,6 +143,9 @@ impl<M: UltDualIdentity> WorkerSystem for UltDualSystem<M> {
     type Lookup = <M as UltDualIdentity>::Lookup;
     type Idle = <M as UltDualIdentity>::Idle;
     type Steal = <M as UltDualIdentity>::Steal;
+    type Dispatch = <M as UltDualIdentity>::Dispatch;
+    type Duties = <M as UltDualIdentity>::Duties;
+    type Observe = <M as UltDualIdentity>::Observe;
 
     fn worker_tls() -> &'static <M::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         TlsSlot::from_anchor(<M as WorkerTlsAnchor>::anchor())
@@ -136,11 +163,11 @@ impl<M: UltDualIdentity> crate::resumable::stackful::system::StackfulWorkerSyste
 
     type SuspendedThread = crate::resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>;
 
-    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedTaskToken<<Self as PoolSystem>::Desc>
+    fn next_or_root(wk: &UltWorker<Self>) -> SuspendedTaskToken<<Self as PoolSystem>::Desc>
     where
         SuspendedTaskToken<<Self as PoolSystem>::Desc>: From<<Self as WorkerSystem>::SuspendedToken>,
     {
-        crate::resumable::dual::worker::pop_or_root_dual(wk)
+        crate::resumable::dual::worker::next_or_root_dual(wk)
     }
 }
 
@@ -186,7 +213,7 @@ impl<M: UltDualIdentity> DelegationSystem for UltDualSystem<M> {
 }
 
 impl<M: UltDualIdentity> crate::traits::PostingSystem for UltDualSystem<M> {
-    type PostChoice = crate::post::DefaultPostChoice;
+    type PostChoice = <M as UltDualIdentity>::PostChoice;
 }
 
 impl<M: UltDualIdentity> NestableSystem for UltDualSystem<M> {

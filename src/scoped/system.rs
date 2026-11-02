@@ -52,7 +52,10 @@ use super::{async_engine, sync_engine};
 ///
 /// impl cmpth::ScopedIdentity for MyScopedMarker {
 ///     type Idle = cmpth::ParkIdle;
-///     type Steal = cmpth::SweepSteal;
+///     type Steal = cmpth::RandomSweepSteal;
+///     type Dispatch = cmpth::StandardDispatch;
+///     type Duties = cmpth::duty::GlobalDuties;
+///     type Observe = cmpth::NoObserver;
 /// }
 ///
 /// type MyScopedSystem = cmpth::ScopedSystem<MyScopedMarker>;
@@ -72,6 +75,15 @@ pub trait ScopedIdentity: Sized + Send + Sync + 'static {
 
     /// Steal policy — see [`crate::StealPolicy`].
     type Steal: crate::resumable::common::steal::StealPolicy;
+
+    /// Dispatch policy; see [`crate::WorkerSystem::Dispatch`].
+    type Dispatch: crate::resumable::common::dispatch::DispatchPolicy;
+
+    /// Duties the idle workers run; see [`crate::WorkerSystem::Duties`].
+    type Duties: crate::duty::DutyDomain;
+
+    /// Scheduler observer; see [`crate::WorkerSystem::Observe`].
+    type Observe: crate::resumable::common::observe::SchedObserver;
 }
 
 /// The default [`ScopedIdentity`]: [`SpinIdle`], same as every other
@@ -82,7 +94,10 @@ pub struct DefaultScopedMarker;
 
 impl ScopedIdentity for DefaultScopedMarker {
     type Idle = SpinIdle;
-    type Steal = crate::resumable::common::steal::SweepSteal;
+    type Steal = crate::resumable::common::steal::RandomSweepSteal;
+    type Dispatch = crate::resumable::common::dispatch::StandardDispatch;
+    type Duties = crate::duty::GlobalDuties;
+    type Observe = crate::resumable::common::observe::NoObserver;
 }
 
 /// The generic `scoped` system — `M`'s [`ScopedIdentity::Idle`] is this
