@@ -108,6 +108,7 @@ pub trait StackfulWorkerSystem: WorkerSystem
     /// continuation. Dual systems override with
     /// [`crate::resumable::dual::worker::next_or_root_dual`], which puts a
     /// stackless task back instead of trying to switch into it.
+    #[inline]
     fn next_or_root(wk: &UltWorker<Self>) -> SuspendedTaskToken<Self::Desc>
     where
         Self: PoolSystem,

@@ -81,6 +81,7 @@ where
 /// `AsyncTaskDesc` for `is_poll_fn_dispatch`. No context switch happens
 /// here, so — unlike `execute_dual` — this needs neither
 /// `StackfulWorkerSystem` nor `StackfulTaskDesc`.
+#[inline]
 pub fn next_or_root_dual<S>(wk: &UltWorker<S>) -> SuspendedTaskToken<S::Desc>
 where
     S: WorkerSystem + PoolSystem,
