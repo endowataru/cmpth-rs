@@ -23,6 +23,8 @@
 //! nest: set `type Base = DefaultDualTaskSystem` in a second `SpawnableStackfulTaskSystem`
 //! implementation to run ULTs on top of ULTs.
 
+#[macro_use]
+mod macros;
 pub mod traits;
 mod os;
 mod spin;
@@ -32,7 +34,7 @@ pub mod scoped;
 pub mod duty;
 pub mod post;
 
-pub use traits::{BarrierWaitResult, BlockOnSystem, Context, ContextPolicy, CallCx, CallSlot, Completion, DelegationSystem, DelegatorConsumer, Delegator, DelegatorRun, DualBarrier, FavorPosting, FavorServing, FnConsumer, PostChoice, PostConfig, PostConsumer, PostDelegator, PostDelegatorOf, PostFavor, PostingSystem, Ready, Ticket, DualMutex, HandoffTaskDesc, JoinHandleLike, NestableSystem, Poller, Resumable, ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, StackfulBuilder, StackfulInitSystem, StackfulResumable, StackfulSyncSystem, StacklessBuilder, StacklessInitSystem, StacklessSyncSystem, SuspendableSystem, TaskDesc, TaskExitSink, TaskSystem, TlsAnchor, TlsSlot, SpawnableStackfulTaskSystem, Transfer, WakerTaskDesc};
+pub use traits::{BarrierWaitResult, BlockOnSystem, Context, ContextPolicy, CallCx, CallSlot, Completion, DelegationSystem, DelegatorConsumer, Delegator, DelegatorRun, DualBarrier, FavorPosting, FavorServing, FnConsumer, PostChoice, PostConfig, PostConsumer, PostDelegator, PostDelegatorOf, PostFavor, PostingSystem, Ready, Ticket, DualMutex, HandoffTaskDesc, JoinHandleLike, NestableSystem, Poller, Resumable, ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, StackfulBuilder, StackfulInitSystem, StackfulResumable, StackfulSyncSystem, StacklessBuilder, StacklessInitSystem, StacklessSyncSystem, SuspendableSystem, TaskDesc, TaskExitSink, TaskSystem, TlsAnchor, TlsSlot, SpawnableStackfulTaskSystem, Transfer, WakerTaskDesc, WorkerTlsAnchor};
 pub use scoped::{DefaultScopedMarker, ScopedIdentity, ScopedSystem, ScopedTaskSystem};
 pub use os::{available_parallelism, OsBarrier, OsCondvar, OsMutex, OsPoller, OsSystem, OsTls};
 pub use resumable::stackful::context::{LeanFrameContext, NativeContext};
@@ -301,6 +303,8 @@ impl NestableSystem for DefaultNestedDualTaskSystem {
 /// `UltIdentity`'s blanket `impl<M: UltIdentity> SchedulerSystem for M`).
 pub struct DefaultStackfulOnlyTaskSystem;
 
+worker_tls_anchor!(DefaultStackfulOnlyTaskSystem);
+
 impl UltIdentity for DefaultStackfulOnlyTaskSystem {
     type Base = OsSystem;
     type Ctx = NativeContext;
@@ -309,11 +313,6 @@ impl UltIdentity for DefaultStackfulOnlyTaskSystem {
     type Alloc = HeapStack;
     type Lookup = TlsCurrent;
     type Idle = resumable::common::idle::SpinIdle;
-
-    fn worker_tls_anchor() -> &'static <OsSystem as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
-        static A: TlsAnchor = TlsAnchor::new();
-        TlsSlot::from_anchor(&A)
-    }
 }
 
 // `DefaultStacklessOnlyTaskSystem`'s marker: implements `UltAsyncIdentity`
@@ -323,19 +322,14 @@ impl UltIdentity for DefaultStackfulOnlyTaskSystem {
 #[doc(hidden)]
 pub struct DefaultStacklessOnlyMarker;
 
+worker_tls_anchor!(DefaultStacklessOnlyMarker);
+
 impl resumable::stackless::system::UltAsyncIdentity for DefaultStacklessOnlyMarker {
     type Base = OsSystem;
     type Desc = resumable::stackless::desc::StacklessOnlyTaskDesc<UltAsyncSystem<Self>>;
     type RunQueue = HybridRunQueue<SuspendedTaskToken<resumable::stackless::desc::StacklessOnlyTaskDesc<UltAsyncSystem<Self>>>>;
     type Lookup = InlineTlsCurrent;
     type Idle = resumable::common::idle::SpinIdle;
-
-    fn worker_tls_anchor()
-    -> &'static <OsSystem as NestableSystem>::ThreadSpecific<UltWorker<UltAsyncSystem<Self>>>
-    {
-        static A: TlsAnchor = TlsAnchor::new();
-        TlsSlot::from_anchor(&A)
-    }
 }
 
 /// The default stackless-*only* ULT system: runs on top of [`OsSystem`],

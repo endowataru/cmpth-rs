@@ -4,8 +4,8 @@ use std::sync::atomic::AtomicUsize;
 ///
 /// Statics inside associated functions cannot mention `Self` or generic
 /// parameters, which is what forces per-system TLS slots to be spelled out
-/// concretely (by hand, or in each concrete `UltIdentity`/`UltAsyncIdentity`
-/// implementor's own `worker_tls_anchor`).  `TlsAnchor` breaks
+/// concretely (by hand, or through each config-trait implementor's
+/// [`WorkerTlsAnchor`]).  `TlsAnchor` breaks
 /// that constraint: the static is untyped, and [`TlsSlot::from_anchor`]
 /// views it as the typed slot.  `worker_tls` then becomes the same two
 /// lines for every system:
@@ -33,6 +33,25 @@ impl Default for TlsAnchor {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// A type's own [`TlsAnchor`]: where a system built from that type keeps
+/// its current-worker pointer.
+///
+/// Kept apart from the config traits ([`UltIdentity`](crate::UltIdentity),
+/// [`UltAsyncIdentity`](crate::UltAsyncIdentity)) because it is the one
+/// member that can never have a default: a `static` in a default method
+/// body or a generic impl is a single instance shared by every
+/// implementor.  Implement it with [`worker_tls_anchor!`](crate::worker_tls_anchor),
+/// one line per type.
+///
+/// # Safety
+///
+/// [`anchor`](Self::anchor) must return a static that no other type's
+/// `anchor` returns.  Two systems sharing one anchor share one slot, so a
+/// worker of one would be read as a worker of the other.
+pub unsafe trait WorkerTlsAnchor: 'static {
+    fn anchor() -> &'static TlsAnchor;
 }
 
 /// A thread-specific `*mut T` slot.

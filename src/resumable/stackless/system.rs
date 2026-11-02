@@ -269,9 +269,11 @@ where
 ///
 /// ```
 /// use cmpth::SuspendedTaskToken;
-/// use cmpth::{NestableSystem, StacklessBuilder, StacklessInitSystem, StacklessTaskSystem, SpawnableStackfulTaskSystem};
+/// use cmpth::{StacklessBuilder, StacklessInitSystem, StacklessTaskSystem, SpawnableStackfulTaskSystem};
 ///
 /// pub struct MyAsyncMarker;
+///
+/// cmpth::worker_tls_anchor!(MyAsyncMarker);
 ///
 /// impl cmpth::UltAsyncIdentity for MyAsyncMarker {
 ///     type Base = cmpth::OsSystem;
@@ -279,11 +281,6 @@ where
 ///     type RunQueue = cmpth::HybridRunQueue<cmpth::SuspendedTaskToken<cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>>>;
 ///     type Lookup = cmpth::InlineTlsCurrent;
 ///     type Idle = cmpth::SpinIdle;
-///
-///     fn worker_tls_anchor() -> &'static <cmpth::OsSystem as NestableSystem>::ThreadSpecific<cmpth::UltWorker<cmpth::UltAsyncSystem<Self>>> {
-///         static A: cmpth::TlsAnchor = cmpth::TlsAnchor::new();
-///         cmpth::TlsSlot::from_anchor(&A)
-///     }
 /// }
 ///
 /// type MyAsyncSystem = cmpth::UltAsyncSystem<MyAsyncMarker>;
@@ -293,7 +290,7 @@ where
 ///     assert_eq!(h.await, 42);
 /// });
 /// ```
-pub trait UltAsyncIdentity: Sized + Send + Sync + 'static {
+pub trait UltAsyncIdentity: crate::traits::WorkerTlsAnchor + Sized + Send + Sync + 'static {
     /// The threading system this scheduler runs on.
     type Base: SpawnableStackfulTaskSystem + NestableSystem;
 
@@ -344,17 +341,6 @@ pub trait UltAsyncIdentity: Sized + Send + Sync + 'static {
     type Lookup: CurrentLookup<UltAsyncSystem<Self>>
     where
         UltAsyncSystem<Self>: WorkerSystem;
-
-    /// The per-system TLS anchor backing [`WorkerSystem::worker_tls`].
-    /// Named in terms of [`UltAsyncSystem<Self>`] — the actual final
-    /// system type — not bare `Self`, since `Self` here is just the config
-    /// marker; see this trait's own doc comment for why. `where
-    /// UltAsyncSystem<Self>: WorkerSystem` — `UltWorker<_>` itself requires
-    /// it structurally (`UltWorker<S: WorkerSystem>`); same
-    /// not-`SchedulerSystem` reasoning as [`Desc`](Self::Desc).
-    fn worker_tls_anchor() -> &'static <<Self as UltAsyncIdentity>::Base as NestableSystem>::ThreadSpecific<UltWorker<UltAsyncSystem<Self>>>
-    where
-        UltAsyncSystem<Self>: WorkerSystem;
 }
 
 /// The actual stackless-only system type: call `run_async`/`spawn` on
@@ -385,7 +371,7 @@ impl<M: UltAsyncIdentity> WorkerSystem for UltAsyncSystem<M> {
     type Idle = <M as UltAsyncIdentity>::Idle;
 
     fn worker_tls() -> &'static <M::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
-        <M as UltAsyncIdentity>::worker_tls_anchor()
+        crate::traits::TlsSlot::from_anchor(<M as crate::traits::WorkerTlsAnchor>::anchor())
     }
 }
 
