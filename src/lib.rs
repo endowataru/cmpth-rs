@@ -53,6 +53,7 @@ pub use resumable::common::steal::{RandomSteal, RandomSweepSteal, StealPolicy, S
 pub use resumable::common::dispatch::{DispatchPolicy, Site, StandardDispatch, TaskSources};
 pub use resumable::common::observe::{NoObserver, SchedObserver, StealOutcome};
 pub use resumable::common::idle::{IdleContext, IdleCx, IdleDuties};
+pub use resumable::common::yield_policy::{GlobalYield, LocalYield, YieldPolicy};
 pub use resumable::stackless::lookup::InlineTlsCurrent;
 pub use resumable::common::pool::{DescPool, ReturnPool, SimplePool};
 pub use resumable::common::stack::{HeapStack, MallocFrame, StackAlloc};

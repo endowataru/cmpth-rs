@@ -122,6 +122,14 @@ pub trait StackfulResumable<S>: Resumable<S> {
     /// Symmetric handoff: park the current ULT here and switch to `next`.
     /// Same async-target fallback as [`enter`](Self::enter).
     fn swap(&self, next: &Self);
+
+    /// A turn-taking point: the caller finished an operation without
+    /// suspending (it found a lock or delegator free).  A system whose
+    /// yield policy has a budget yields here once the budget is spent, so a
+    /// task that never waits still lets the others on its worker run.
+    /// Default: nothing.
+    #[inline(always)]
+    fn consume_budget() {}
 }
 
 // ---------------------------------------------------------------------------

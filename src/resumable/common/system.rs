@@ -138,6 +138,11 @@ pub trait WorkerSystem: Sized + Send + Sync + 'static {
     /// Receives the scheduler's events.
     type Observe: SchedObserver;
 
+    /// Where a yielding task waits for its next turn, and the turn budget.
+    /// Use [`LocalYield`](crate::resumable::common::yield_policy::LocalYield)
+    /// unless yielding tasks must share all workers fairly.
+    type Yield: crate::traits::component::yield_policy::YieldPolicy<Self::SuspendedToken>;
+
     /// The concrete worker type driving this scheduler. Every system today
     /// sets this to [`UltWorker<Self>`](crate::resumable::common::worker::UltWorker) — kept as its own associated type
     /// (rather than [`worker_tls`](Self::worker_tls)/[`CurrentLookup`]
