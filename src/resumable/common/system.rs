@@ -152,6 +152,10 @@ pub trait WorkerSystem: Sized + Send + Sync + 'static {
     /// them (spawn order, front or back of the queue).
     type Placement: crate::resumable::common::placement::PlacementPolicy;
 
+    /// What each worker does on its thread when it starts and stops (pin
+    /// itself to a CPU, say).
+    type Lifecycle: crate::resumable::common::lifecycle::LifecyclePolicy;
+
     /// The concrete worker type driving this scheduler. Every system today
     /// sets this to [`UltWorker<Self>`](crate::resumable::common::worker::UltWorker) — kept as its own associated type
     /// (rather than [`worker_tls`](Self::worker_tls)/[`CurrentLookup`]

@@ -81,6 +81,7 @@ macro_rules! worker_tls_anchor {
 /// | `Yield` | [`LocalYield`](crate::LocalYield) | [`LocalYield`](crate::LocalYield) | [`LocalYield`](crate::LocalYield) | [`LocalYield`](crate::LocalYield) |
 /// | `Qos` | [`OsQos`](crate::OsQos) | [`OsQos`](crate::OsQos) | [`OsQos`](crate::OsQos) | [`OsQos`](crate::OsQos) |
 /// | `Placement` | [`StandardPlacement`](crate::StandardPlacement) | [`StandardPlacement`](crate::StandardPlacement) | [`StandardPlacement`](crate::StandardPlacement) | [`StandardPlacement`](crate::StandardPlacement) |
+/// | `Lifecycle` | [`NoLifecycle`](crate::NoLifecycle) | [`NoLifecycle`](crate::NoLifecycle) | [`NoLifecycle`](crate::NoLifecycle) | [`NoLifecycle`](crate::NoLifecycle) |
 /// | `ExternalQueue` | [`StealPathQueue`](crate::StealPathQueue) of `Desc` | [`StealPathQueue`](crate::StealPathQueue) of [`DualTaskDesc`](crate::DualTaskDesc) | [`StealPathQueue`](crate::StealPathQueue) of `Desc` | |
 /// | `PostChoice` | [`DefaultPostChoice`](crate::DefaultPostChoice) | [`DefaultPostChoice`](crate::DefaultPostChoice) | | |
 ///
@@ -142,6 +143,7 @@ macro_rules! impl_with_defaults {
             $crate::impl_with_defaults!(@or Yield [$($b)*] type Yield = $crate::LocalYield;);
             $crate::impl_with_defaults!(@or Qos [$($b)*] type Qos = $crate::OsQos;);
             $crate::impl_with_defaults!(@or Placement [$($b)*] type Placement = $crate::StandardPlacement;);
+            $crate::impl_with_defaults!(@or Lifecycle [$($b)*] type Lifecycle = $crate::NoLifecycle;);
             $crate::impl_with_defaults!(@or ExternalQueue [$($b)*] type ExternalQueue = $crate::StealPathQueue<<Self as $crate::UltIdentity>::Desc>;);
             $crate::impl_with_defaults!(@or PostChoice [$($b)*] type PostChoice = $crate::DefaultPostChoice;);
         }
@@ -163,6 +165,7 @@ macro_rules! impl_with_defaults {
             $crate::impl_with_defaults!(@or Yield [$($b)*] type Yield = $crate::LocalYield;);
             $crate::impl_with_defaults!(@or Qos [$($b)*] type Qos = $crate::OsQos;);
             $crate::impl_with_defaults!(@or Placement [$($b)*] type Placement = $crate::StandardPlacement;);
+            $crate::impl_with_defaults!(@or Lifecycle [$($b)*] type Lifecycle = $crate::NoLifecycle;);
             $crate::impl_with_defaults!(@or ExternalQueue [$($b)*] type ExternalQueue = $crate::StealPathQueue<$crate::DualTaskDesc<$crate::UltDualSystem<Self>>>;);
             $crate::impl_with_defaults!(@or PostChoice [$($b)*] type PostChoice = $crate::DefaultPostChoice;);
         }
@@ -183,6 +186,7 @@ macro_rules! impl_with_defaults {
             $crate::impl_with_defaults!(@or Yield [$($b)*] type Yield = $crate::LocalYield;);
             $crate::impl_with_defaults!(@or Qos [$($b)*] type Qos = $crate::OsQos;);
             $crate::impl_with_defaults!(@or Placement [$($b)*] type Placement = $crate::StandardPlacement;);
+            $crate::impl_with_defaults!(@or Lifecycle [$($b)*] type Lifecycle = $crate::NoLifecycle;);
             $crate::impl_with_defaults!(@or ExternalQueue [$($b)*] type ExternalQueue = $crate::StealPathQueue<<Self as $crate::UltAsyncIdentity>::Desc>;);
         }
     };
@@ -198,6 +202,7 @@ macro_rules! impl_with_defaults {
             $crate::impl_with_defaults!(@or Yield [$($b)*] type Yield = $crate::LocalYield;);
             $crate::impl_with_defaults!(@or Qos [$($b)*] type Qos = $crate::OsQos;);
             $crate::impl_with_defaults!(@or Placement [$($b)*] type Placement = $crate::StandardPlacement;);
+            $crate::impl_with_defaults!(@or Lifecycle [$($b)*] type Lifecycle = $crate::NoLifecycle;);
         }
     };
 
@@ -217,6 +222,7 @@ macro_rules! impl_with_defaults {
     (@has UltIdentity Yield) => {};
     (@has UltIdentity Qos) => {};
     (@has UltIdentity Placement) => {};
+    (@has UltIdentity Lifecycle) => {};
     (@has UltIdentity ExternalQueue) => {};
     (@has UltIdentity PostChoice) => {};
     (@has UltDualIdentity Base) => {};
@@ -232,6 +238,7 @@ macro_rules! impl_with_defaults {
     (@has UltDualIdentity Yield) => {};
     (@has UltDualIdentity Qos) => {};
     (@has UltDualIdentity Placement) => {};
+    (@has UltDualIdentity Lifecycle) => {};
     (@has UltDualIdentity ExternalQueue) => {};
     (@has UltDualIdentity PostChoice) => {};
     (@has UltAsyncIdentity Base) => {};
@@ -246,6 +253,7 @@ macro_rules! impl_with_defaults {
     (@has UltAsyncIdentity Yield) => {};
     (@has UltAsyncIdentity Qos) => {};
     (@has UltAsyncIdentity Placement) => {};
+    (@has UltAsyncIdentity Lifecycle) => {};
     (@has UltAsyncIdentity ExternalQueue) => {};
     (@has ScopedIdentity Idle) => {};
     (@has ScopedIdentity Steal) => {};
@@ -255,6 +263,7 @@ macro_rules! impl_with_defaults {
     (@has ScopedIdentity Yield) => {};
     (@has ScopedIdentity Qos) => {};
     (@has ScopedIdentity Placement) => {};
+    (@has ScopedIdentity Lifecycle) => {};
     (@has $tr:ident $k:ident) => {
         compile_error!(concat!("impl_with_defaults!: `", stringify!($tr), "` has no associated type `", stringify!($k), "`"));
     };
@@ -293,6 +302,7 @@ macro_rules! impl_with_defaults {
     (@or Yield [type Yield = $v:ty; $($r:tt)*] $($d:tt)*) => {};
     (@or Qos [type Qos = $v:ty; $($r:tt)*] $($d:tt)*) => {};
     (@or Placement [type Placement = $v:ty; $($r:tt)*] $($d:tt)*) => {};
+    (@or Lifecycle [type Lifecycle = $v:ty; $($r:tt)*] $($d:tt)*) => {};
     (@or ExternalQueue [type ExternalQueue = $v:ty; $($r:tt)*] $($d:tt)*) => {};
     (@or PostChoice [type PostChoice = $v:ty; $($r:tt)*] $($d:tt)*) => {};
     (@or $k:ident [type $o:ident = $v:ty; $($r:tt)*] $($d:tt)*) => {

@@ -37,6 +37,7 @@ impl UltIdentity for LeanContextSystem {
     type Yield = cmpth::LocalYield;
     type Qos = cmpth::OsQos;
     type Placement = cmpth::StandardPlacement;
+    type Lifecycle = cmpth::NoLifecycle;
     type ExternalQueue = cmpth::StealPathQueue<cmpth::resumable::stackful::desc::StackfulOnlyTaskDesc<Self>>;
     type PostChoice = cmpth::DefaultPostChoice;
 }

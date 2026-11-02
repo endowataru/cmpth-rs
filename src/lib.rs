@@ -53,6 +53,7 @@ pub use resumable::common::steal::{RandomSteal, RandomSweepSteal, StealPolicy, S
 pub use resumable::common::dispatch::{DispatchPolicy, Site, StandardDispatch, TaskSources};
 pub use resumable::common::observe::{NoObserver, SchedObserver, StealOutcome};
 pub use resumable::common::idle::IdleCx;
+pub use resumable::common::lifecycle::{LifecyclePolicy, NoLifecycle, PinWorkers};
 pub use resumable::common::placement::{ParentFirst, ParentFirstWakeBack, PlacementPolicy, SpawnOrder, StandardPlacement, WakeBack, WakeTo};
 pub use resumable::common::qos::{BackgroundQos, DemoteIdleQos, OsQos, QosClass, QosPolicy, SplitQos};
 pub use resumable::common::yield_policy::{GlobalYield, LocalYield, YieldPolicy};

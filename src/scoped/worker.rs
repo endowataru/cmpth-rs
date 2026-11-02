@@ -147,6 +147,7 @@ impl<M: ScopedIdentity> WorkerSystem for ScopedSystem<M> {
     type Yield = <M as ScopedIdentity>::Yield;
     type Qos = M::Qos;
     type Placement = M::Placement;
+    type Lifecycle = M::Lifecycle;
     type Worker = ScopedWorker<M>;
 
     // Dead code for every `M`: nothing in `scoped` ever calls

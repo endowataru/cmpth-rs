@@ -142,6 +142,10 @@ pub trait LocalQueue<S: WorkerSystem> {
     /// [`QosPolicy`](crate::resumable::common::qos::QosPolicy).
     fn qos_slot(&self) -> &crate::resumable::common::qos::QosSlot;
 
+    /// This worker's state for the pool's
+    /// [`LifecyclePolicy`](crate::resumable::common::lifecycle::LifecyclePolicy).
+    fn lifecycle_slot(&self) -> &crate::resumable::common::lifecycle::LifecycleSlot;
+
     /// This worker's [`DispatchPolicy`](crate::DispatchPolicy) state.
     fn dispatch_state(&self) -> &<S::Dispatch as crate::resumable::common::dispatch::DispatchPolicy>::State;
 
@@ -547,6 +551,11 @@ impl<S: WorkerSystem + PoolSystem> LocalQueue<S> for UltWorker<S> {
     #[inline]
     fn qos_slot(&self) -> &crate::resumable::common::qos::QosSlot {
         self.core.qos_slot()
+    }
+
+    #[inline]
+    fn lifecycle_slot(&self) -> &crate::resumable::common::lifecycle::LifecycleSlot {
+        self.core.lifecycle_slot()
     }
 
     #[inline]

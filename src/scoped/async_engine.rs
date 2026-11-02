@@ -373,6 +373,7 @@ mod tests {
         type Yield = crate::resumable::common::yield_policy::LocalYield;
         type Qos = crate::resumable::common::qos::OsQos;
         type Placement = crate::resumable::common::placement::StandardPlacement;
+        type Lifecycle = crate::resumable::common::lifecycle::NoLifecycle;
     }
     struct ParkMarker;
     impl ScopedIdentity for ParkMarker {
@@ -384,6 +385,7 @@ mod tests {
         type Yield = crate::resumable::common::yield_policy::LocalYield;
         type Qos = crate::resumable::common::qos::OsQos;
         type Placement = crate::resumable::common::placement::StandardPlacement;
+        type Lifecycle = crate::resumable::common::lifecycle::NoLifecycle;
     }
 
     // Recursive `async fn`s can't pass their own opaque return type as a
