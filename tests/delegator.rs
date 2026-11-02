@@ -228,6 +228,29 @@ fn combining_on_ults() {
     });
 }
 
+/// A bound of 1 or 2 hands the lock over on almost every request.
+#[test]
+fn bounded_combining_on_ults() {
+    with_watchdog(|| {
+        run(4, || {
+            counter_case::<U, CombiningDelegator<U, Counter, 1>>();
+            gate_case::<U, CombiningDelegator<U, Gate<U>, 1>>();
+            fn_case::<U, CombiningDelegator<U, FnConsumer, 2>>();
+            lock_case::<U, CombiningDelegator<U, Counter, 1>>();
+        })
+    });
+}
+
+#[test]
+fn bounded_combining_on_os_threads() {
+    with_watchdog(|| {
+        counter_case::<OsSystem, CombiningDelegator<OsSystem, Counter, 1>>();
+        gate_case::<OsSystem, CombiningDelegator<OsSystem, Gate<OsSystem>, 1>>();
+        fn_case::<OsSystem, CombiningDelegator<OsSystem, FnConsumer, 2>>();
+        lock_case::<OsSystem, CombiningDelegator<OsSystem, Counter, 1>>();
+    });
+}
+
 #[test]
 fn os_on_os_threads() {
     with_watchdog(|| {
