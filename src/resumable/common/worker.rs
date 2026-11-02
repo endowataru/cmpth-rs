@@ -126,6 +126,22 @@ pub trait LocalQueue<S: WorkerSystem> {
     /// don't mistake contention for idleness.
     fn try_steal(&self) -> Steal<S::SuspendedToken>;
 
+    /// Requeue a task that yielded, where the pool's
+    /// [`YieldPolicy`](crate::resumable::common::yield_policy::YieldPolicy)
+    /// says (by default: [`defer`](Self::defer) it here).
+    fn requeue_yield(&self, c: S::SuspendedToken);
+
+    /// Take a task that yielded and waits outside this worker's queue.
+    fn take_yielded(&self) -> Option<S::SuspendedToken>;
+
+    /// Count one operation that did not suspend; whether the turn budget
+    /// is spent and the running task should yield.
+    fn spend_budget(&self) -> bool;
+
+    /// This worker's state for the pool's
+    /// [`QosPolicy`](crate::resumable::common::qos::QosPolicy).
+    fn qos_slot(&self) -> &crate::resumable::common::qos::QosSlot;
+
     /// This worker's [`DispatchPolicy`](crate::DispatchPolicy) state.
     fn dispatch_state(&self) -> &<S::Dispatch as crate::resumable::common::dispatch::DispatchPolicy>::State;
 
@@ -511,6 +527,26 @@ impl<S: WorkerSystem + PoolSystem> LocalQueue<S> for UltWorker<S> {
     #[inline]
     fn try_steal(&self) -> Steal<S::SuspendedToken> {
         self.core.try_steal()
+    }
+
+    #[inline]
+    fn requeue_yield(&self, c: S::SuspendedToken) {
+        self.core.requeue_yield(c);
+    }
+
+    #[inline]
+    fn take_yielded(&self) -> Option<S::SuspendedToken> {
+        self.core.take_yielded()
+    }
+
+    #[inline]
+    fn spend_budget(&self) -> bool {
+        self.core.spend_budget()
+    }
+
+    #[inline]
+    fn qos_slot(&self) -> &crate::resumable::common::qos::QosSlot {
+        self.core.qos_slot()
     }
 
     #[inline]

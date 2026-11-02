@@ -285,6 +285,8 @@ where
 ///     type Dispatch = cmpth::StandardDispatch;
 ///     type Duties = cmpth::duty::GlobalDuties;
 ///     type Observe = cmpth::NoObserver;
+///     type Yield = cmpth::LocalYield;
+///     type Qos = cmpth::OsQos;
 ///     type ExternalQueue = cmpth::StealPathQueue<cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>>;
 /// }
 ///
@@ -346,6 +348,15 @@ pub trait UltAsyncIdentity: crate::traits::WorkerTlsAnchor + Sized + Send + Sync
     /// Scheduler observer; see [`crate::WorkerSystem::Observe`].
     type Observe: crate::resumable::common::observe::SchedObserver;
 
+    /// Where a yielding task waits, and the turn budget; see
+    /// [`crate::WorkerSystem::Yield`].
+    type Yield: crate::resumable::common::yield_policy::YieldPolicy<<UltAsyncSystem<Self> as WorkerSystem>::SuspendedToken>
+    where
+        UltAsyncSystem<Self>: WorkerSystem;
+
+    /// What the workers tell the OS; see [`crate::WorkerSystem::Qos`].
+    type Qos: crate::resumable::common::qos::QosPolicy;
+
     /// Where tasks woken from outside the pool wait; see
     /// [`PoolSystem::ExternalQueue`].
     type ExternalQueue: crate::resumable::common::external_queue::ExternalQueue<UltAsyncSystem<Self>>
@@ -396,6 +407,8 @@ impl<M: UltAsyncIdentity> WorkerSystem for UltAsyncSystem<M> {
     type Dispatch = <M as UltAsyncIdentity>::Dispatch;
     type Duties = <M as UltAsyncIdentity>::Duties;
     type Observe = <M as UltAsyncIdentity>::Observe;
+    type Yield = <M as UltAsyncIdentity>::Yield;
+    type Qos = <M as UltAsyncIdentity>::Qos;
 
     fn worker_tls() -> &'static <M::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         crate::traits::TlsSlot::from_anchor(<M as crate::traits::WorkerTlsAnchor>::anchor())

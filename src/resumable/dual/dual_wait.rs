@@ -165,6 +165,15 @@ where
     S::Desc: StackfulTaskDesc + AsyncTaskDesc,
     S::Worker: StackfulWorker<S> + DescWorkerOps<S>,
 {
+    #[inline]
+    fn consume_budget() {
+        if <S::Yield as crate::resumable::common::yield_policy::YieldPolicy<S::SuspendedToken>>::BUDGET != 0 {
+            if let Some(wk) = S::Worker::current() {
+                wk.consume_budget();
+            }
+        }
+    }
+
     fn wait_with<F: FnOnce()>(&self, f: F) {
         let Some(wk) = S::Worker::current() else { return self.os_wait_with(f) };
         assert_on_real_ult::<S>(wk);

@@ -26,6 +26,11 @@ pub trait TaskSources {
     /// [`StealPolicy`](crate::StealPolicy).
     fn steal(&self) -> Steal<Self::Item>;
 
+    /// Tasks that yielded and wait outside the worker's own queue (the
+    /// pool's [`YieldPolicy`](crate::YieldPolicy)); always `None` with
+    /// [`LocalYield`](crate::LocalYield).
+    fn yielded(&self) -> Option<Self::Item>;
+
     /// Tasks woken from outside the pool (`ExternalQueue`); always `None`
     /// on a system without one.
     fn external(&self) -> Option<Self::Item>;
@@ -51,12 +56,12 @@ pub trait DispatchPolicy: Send + Sync + 'static {
 
 /// The standard order:
 ///
-/// * [`Site::Loop`] and [`Site::Wait`]: own queue, then a steal round, then
-///   the external queue;
-/// * [`Site::Switch`]: the external queue, then the own queue, never a
-///   steal (the worker steals from its loop).  The external queue comes
-///   first because tasks that only yield to each other never let the
-///   worker reach its loop.
+/// * [`Site::Loop`] and [`Site::Wait`]: own queue, then the pool's yielded
+///   tasks, then a steal round, then the external queue;
+/// * [`Site::Switch`]: the external queue, then the own queue, then the
+///   yielded tasks, never a steal (the worker steals from its loop).  The
+///   external queue comes first because tasks that only yield to each
+///   other never let the worker reach its loop.
 #[derive(Default)]
 pub struct StandardDispatch;
 
@@ -68,6 +73,9 @@ impl DispatchPolicy for StandardDispatch {
         match site {
             Site::Loop | Site::Wait => {
                 if let Some(c) = q.local() {
+                    return Steal::Success(c);
+                }
+                if let Some(c) = q.yielded() {
                     return Steal::Success(c);
                 }
                 let s = q.steal();
@@ -83,7 +91,10 @@ impl DispatchPolicy for StandardDispatch {
                 if let Some(c) = q.external() {
                     return Steal::Success(c);
                 }
-                match q.local() {
+                if let Some(c) = q.local() {
+                    return Steal::Success(c);
+                }
+                match q.yielded() {
                     Some(c) => Steal::Success(c),
                     None => Steal::Empty,
                 }

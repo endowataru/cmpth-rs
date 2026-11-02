@@ -144,9 +144,18 @@ where
         self.exit_to_cont(next, f)
     }
 
-    /// Cooperative yield: defer so other tasks already queued run first.
+    /// Spend one unit of the turn budget; yield once it is gone.
+    #[inline]
+    fn consume_budget(&self) {
+        if self.spend_budget() {
+            self.yield_now();
+        }
+    }
+
+    /// Cooperative yield: requeue where the pool's yield policy says (by
+    /// default deferred here, so other tasks already queued run first).
     fn yield_now(&self) -> &Self {
-        self.suspend_to_sched(|wk, prev| wk.defer(prev.into()))
+        self.suspend_to_sched(|wk, prev| wk.requeue_yield(prev.into()))
     }
 }
 
@@ -178,6 +187,11 @@ where
             Steal::Empty => Steal::Empty,
             Steal::Retry => Steal::Retry,
         }
+    }
+
+    #[inline(always)]
+    fn yielded(&self) -> Option<Self::Item> {
+        LocalQueue::take_yielded(self.wk).map(Into::into)
     }
 
     #[inline(always)]

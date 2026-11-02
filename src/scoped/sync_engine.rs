@@ -202,6 +202,8 @@ mod tests {
         type Dispatch = crate::resumable::common::dispatch::StandardDispatch;
         type Duties = crate::duty::GlobalDuties;
         type Observe = crate::resumable::common::observe::NoObserver;
+        type Yield = crate::resumable::common::yield_policy::LocalYield;
+        type Qos = crate::resumable::common::qos::OsQos;
     }
     struct ParkMarker;
     impl ScopedIdentity for ParkMarker {
@@ -210,6 +212,8 @@ mod tests {
         type Dispatch = crate::resumable::common::dispatch::StandardDispatch;
         type Duties = crate::duty::GlobalDuties;
         type Observe = crate::resumable::common::observe::NoObserver;
+        type Yield = crate::resumable::common::yield_policy::LocalYield;
+        type Qos = crate::resumable::common::qos::OsQos;
     }
 
     fn fib<M: ScopedIdentity>(n: u64) -> u64 {
