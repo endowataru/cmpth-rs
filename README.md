@@ -210,10 +210,11 @@ impl cmpth::UltIdentity for MySystem {
 
 `UltIdentity` builds a stackful system this way (`DefaultStackfulOnlyTaskSystem`
 is wired up exactly like `MySystem` above, just with `HeapStack`/`TlsCurrent`);
-`UltAsyncIdentity` does the same for a stackless-only system. Both are config
-traits — implement one for your own marker type and a blanket impl (written
-inside `cmpth`) supplies `SchedulerSystem`/`StackfulSchedulerSystem`/`SpawnableStackfulTaskSystem`.
-Both are shorthand for hand-writing the underlying trait implementations
+`UltDualIdentity` does the same for a dual system (`DefaultDualTaskSystem` and
+its variants) and `UltAsyncIdentity` for a stackless-only one. All three are
+config traits — implement one for your own marker type and a blanket impl
+(written inside `cmpth`) supplies `SchedulerSystem`/`StackfulSchedulerSystem`/`SpawnableStackfulTaskSystem`.
+They are shorthand for hand-writing the underlying trait implementations
 yourself — the escape hatch for when their fixed shape doesn't fit, since
 every component they wire up is a public trait you can implement directly.
 

@@ -54,6 +54,7 @@ pub use resumable::common::pool::{DescPool, ReturnPool, SimplePool};
 pub use resumable::common::stack::{HeapStack, MallocFrame, StackAlloc};
 pub use resumable::stackless::async_wait::SuspendedFuture;
 pub use resumable::dual::dual_wait::DualResumable;
+pub use resumable::dual::system::{UltDualIdentity, UltDualSystem};
 pub use resumable::stackful::suspended::{BasicStackfulOnlyResumable, StackfulOnlyResumableCore};
 pub use resumable::stackful::sync::{Barrier as UltBarrier, CombiningDelegator, McsDelegator, McsMutex, McsMutexGuard, McsCondvar, BarrierCore, MutexCore};
 pub use resumable::common::sync::{DualBarrier as UltDualBarrier, DualMutex as UltDualMutex, DualMutexGuard as UltDualMutexGuard};
@@ -69,223 +70,82 @@ pub use post::{DefaultPostChoice, QueuePostDelegator, SlotPostDelegator};
 // Default instantiations
 // ---------------------------------------------------------------------------
 
-// Both default systems host stackless spawn_async-style tasks (the
-// blanket `StacklessTaskSystem` impl, automatic for any async-capable
-// `SchedulerSystem`) as well as stackful ULTs (`SpawnableStackfulTaskSystem`), and their
-// `Mutex`/`Barrier` are meant to be contended-together from either
-// calling convention -- so `UltIdentity` (whose blanket-derived `Mutex`/
-// `Barrier` use the stackful-only `BasicStackfulOnlyResumable`, with no
-// async-wait capability) isn't used here. Everything it would have
-// generated is written out by hand instead, with `SpawnableStackfulTaskSystem::Mutex`/
-// `Barrier` bound to a `DualResumable`-parameterized `DualMutex`/
-// `DualBarrier`: since `DualResumable<S>` implements both
-// `StackfulResumable` and `StacklessResumable` (unlike `UltIdentity`'s
-// default `BasicStackfulOnlyResumable`, stackful-only), one type satisfies
-// both `StackfulMutex` and `StacklessMutex`, so a single instance is
-// genuinely shared and contended between stackful and stackless callers
-// -- not two separate locks that happen to have the same name.
+// The dual systems host stackless `spawn_async` tasks as well as stackful
+// ULTs, and their `Mutex`/`Barrier` are contended together from either
+// calling convention; see `UltDualIdentity`.  Each is a marker type plus
+// its config, named through `UltDualSystem<_>`; the markers stay hidden,
+// as for `DefaultStacklessOnlyTaskSystem`.
 
-/// Defines a ULT system like [`DefaultDualTaskSystem`] with another idle
-/// policy (the only difference between the systems it generates).
-macro_rules! dual_task_system {
-    ($(#[$meta:meta])* $name:ident, $idle:ty) => {
-        $(#[$meta])*
-        pub struct $name;
+#[doc(hidden)]
+pub struct DefaultDualMarker;
 
-        impl resumable::common::system::PoolSystem for $name {
-            type Desc  = resumable::dual::desc::DualTaskDesc<Self>;
-            type ExternalQueue   = resumable::common::external_queue::StealPathQueue<resumable::dual::desc::DualTaskDesc<Self>>;
-            type Pool            = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc<Self>, resumable::common::stack::HeapStack>;
-            type AsyncPool       = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc<Self>, resumable::common::stack::MallocFrame>;
-            const ASYNC_POOL_SIZE: usize = 512;
-            type RecursionPool   = resumable::common::pool::ThresholdPool<resumable::common::pool::BlockPool>;
-        }
+worker_tls_anchor!(DefaultDualMarker);
 
-        impl resumable::common::system::WorkerSystem for $name {
-            type Base  = OsSystem;
-            type SuspendedToken  = SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>;
-            type Worker = UltWorker<Self>;
-            type RunQueue = HybridRunQueue<SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>>;
-            type Lookup          = resumable::common::lookup::TlsCurrent;
-            type Idle = $idle;
-
-            fn worker_tls() -> &'static <OsSystem as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
-                static A: TlsAnchor = TlsAnchor::new();
-                TlsSlot::from_anchor(&A)
-            }
-        }
-
-        // `SchedulerSystem for $name` is no longer hand-written:
-        // it is blanket-derived (`resumable::common::system`) from the
-        // `RunnableItem`/`ReclaimableDesc` impls for `DualTaskDesc<Self>`
-        // (`resumable::dual::worker`).
-
-        impl resumable::stackful::system::StackfulWorkerSystem for $name {
-            type Ctx   = NativeContext;
-            type StackAlloc = resumable::common::stack::HeapStack;
-            const STACK_SIZE: usize = 64 * 1024;
-
-            type SuspendedThread = resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>;
-
-            fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>> {
-                resumable::dual::worker::pop_or_root_dual(wk)
-            }
-        }
-
-        impl SpawnableStackfulTaskSystem for $name {
-            fn yield_now() {
-                use resumable::stackful::worker::StackfulWorker;
-                match UltWorker::<Self>::current() {
-                    Some(wk) => { wk.yield_now(); }
-                    None => <<Self as WorkerSystem>::Base as SpawnableStackfulTaskSystem>::yield_now(),
-                }
-            }
-
-            type JoinHandle<T: Send + 'static> = resumable::common::thread::JoinHandle<Self, T>;
-
-            fn spawn<T, F>(f: F) -> resumable::common::thread::JoinHandle<Self, T>
-            where
-                F: FnOnce() -> T + Send + 'static,
-                T: Send + 'static,
-            {
-                resumable::stackful::thread::spawn::<Self, T, F>(f)
-            }
-        }
-
-        impl BlockOnSystem for $name {
-            type Poller = resumable::stackful::waker::UltPoller<Self>;
-        }
-
-        impl StackfulSyncSystem for $name {
-            type Mutex<T: Send> = UltDualMutex<Self, T, DualResumable<Self>>;
-            type Barrier         = UltDualBarrier<Self, DualResumable<Self>>;
-        }
-
-        impl SuspendableSystem for $name {
-            /// Dual, so that OS threads that are not workers can park on it too
-            /// (a delegator or lock shared with them).
-            type SuspendedThread = DualResumable<Self>;
-        }
-
-        impl DelegationSystem for $name {
-            type Delegator<C: DelegatorConsumer<Self>> = McsDelegator<Self, C>;
-        }
-
-        impl PostingSystem for $name {
-            type PostChoice = post::DefaultPostChoice;
-        }
-
-        impl NestableSystem for $name {
-            type ThreadSpecific<T: 'static> = resumable::stackful::tls::UltTls<Self, T>;
-        }
-
-    };
+impl UltDualIdentity for DefaultDualMarker {
+    type Base = OsSystem;
+    type Ctx = NativeContext;
+    type RunQueue = HybridRunQueue<SuspendedTaskToken<DualTaskDesc<UltDualSystem<Self>>>>;
+    type Alloc = HeapStack;
+    type Lookup = TlsCurrent;
+    type Idle = SpinIdle;
 }
 
-dual_task_system!(
-    /// The default ULT system: runs on top of [`OsSystem`].
-    DefaultDualTaskSystem, resumable::common::idle::SpinIdle
-);
+/// The default ULT system: runs on top of [`OsSystem`].
+pub type DefaultDualTaskSystem = UltDualSystem<DefaultDualMarker>;
 
-dual_task_system!(
-    /// [`DefaultDualTaskSystem`] whose idle workers block their OS thread
-    /// instead of spinning: a few search, the others park ([`SearchIdle`]).
-    ParkDualTaskSystem, resumable::common::idle::SearchIdle
-);
+#[doc(hidden)]
+pub struct ParkDualMarker;
 
-dual_task_system!(
-    /// [`ParkDualTaskSystem`] letting half the workers search
-    /// ([`HalfCap`], Tokio's limit): faster to pick up work when
-    /// parallelism is low, at more energy.
-    ParkHalfDualTaskSystem, resumable::common::idle::SearchIdle<resumable::common::idle::HalfCap>
-);
+worker_tls_anchor!(ParkDualMarker);
+
+impl UltDualIdentity for ParkDualMarker {
+    type Base = OsSystem;
+    type Ctx = NativeContext;
+    type RunQueue = HybridRunQueue<SuspendedTaskToken<DualTaskDesc<UltDualSystem<Self>>>>;
+    type Alloc = HeapStack;
+    type Lookup = TlsCurrent;
+    type Idle = SearchIdle;
+}
+
+/// [`DefaultDualTaskSystem`] whose idle workers block their OS thread
+/// instead of spinning: a few search, the others park ([`SearchIdle`]).
+pub type ParkDualTaskSystem = UltDualSystem<ParkDualMarker>;
+
+#[doc(hidden)]
+pub struct ParkHalfDualMarker;
+
+worker_tls_anchor!(ParkHalfDualMarker);
+
+impl UltDualIdentity for ParkHalfDualMarker {
+    type Base = OsSystem;
+    type Ctx = NativeContext;
+    type RunQueue = HybridRunQueue<SuspendedTaskToken<DualTaskDesc<UltDualSystem<Self>>>>;
+    type Alloc = HeapStack;
+    type Lookup = TlsCurrent;
+    type Idle = SearchIdle<HalfCap>;
+}
+
+/// [`ParkDualTaskSystem`] letting half the workers search
+/// ([`HalfCap`], Tokio's limit): faster to pick up work when
+/// parallelism is low, at more energy.
+pub type ParkHalfDualTaskSystem = UltDualSystem<ParkHalfDualMarker>;
+
+#[doc(hidden)]
+pub struct DefaultNestedDualMarker;
+
+worker_tls_anchor!(DefaultNestedDualMarker);
+
+impl UltDualIdentity for DefaultNestedDualMarker {
+    type Base = DefaultDualTaskSystem;
+    type Ctx = NativeContext;
+    type RunQueue = HybridRunQueue<SuspendedTaskToken<DualTaskDesc<UltDualSystem<Self>>>>;
+    type Alloc = HeapStack;
+    type Lookup = TlsCurrent;
+    type Idle = SpinIdle;
+}
 
 /// A second-level ULT system: runs on top of [`DefaultDualTaskSystem`]'s ULTs.
-pub struct DefaultNestedDualTaskSystem;
-
-impl resumable::common::system::PoolSystem for DefaultNestedDualTaskSystem {
-    type Desc  = resumable::dual::desc::DualTaskDesc<Self>;
-    type ExternalQueue   = resumable::common::external_queue::StealPathQueue<resumable::dual::desc::DualTaskDesc<Self>>;
-    type Pool            = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc<Self>, resumable::common::stack::HeapStack>;
-    type AsyncPool       = resumable::common::pool::ReturnPool<resumable::dual::desc::DualTaskDesc<Self>, resumable::common::stack::MallocFrame>;
-    const ASYNC_POOL_SIZE: usize = 512;
-    type RecursionPool   = resumable::common::pool::ThresholdPool<resumable::common::pool::BlockPool>;
-}
-
-impl resumable::common::system::WorkerSystem for DefaultNestedDualTaskSystem {
-    type Base  = DefaultDualTaskSystem;
-    type SuspendedToken  = SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>;
-    type Worker = UltWorker<Self>;
-    type RunQueue = HybridRunQueue<SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>>>;
-    type Lookup          = resumable::common::lookup::TlsCurrent;
-    type Idle = resumable::common::idle::SpinIdle;
-
-    fn worker_tls() -> &'static <DefaultDualTaskSystem as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
-        static A: TlsAnchor = TlsAnchor::new();
-        TlsSlot::from_anchor(&A)
-    }
-}
-
-// `SchedulerSystem for DefaultNestedDualTaskSystem` is likewise blanket-derived.
-
-impl resumable::stackful::system::StackfulWorkerSystem for DefaultNestedDualTaskSystem {
-    type Ctx   = NativeContext;
-    type StackAlloc = resumable::common::stack::HeapStack;
-    const STACK_SIZE: usize = 64 * 1024;
-
-    type SuspendedThread = resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>;
-
-    fn pop_or_root(wk: &UltWorker<Self>) -> SuspendedTaskToken<resumable::dual::desc::DualTaskDesc<Self>> {
-        resumable::dual::worker::pop_or_root_dual(wk)
-    }
-}
-
-impl SpawnableStackfulTaskSystem for DefaultNestedDualTaskSystem {
-    fn yield_now() {
-        use resumable::stackful::worker::StackfulWorker;
-        match UltWorker::<Self>::current() {
-            Some(wk) => { wk.yield_now(); }
-            None => <<Self as WorkerSystem>::Base as SpawnableStackfulTaskSystem>::yield_now(),
-        }
-    }
-
-    type JoinHandle<T: Send + 'static> = resumable::common::thread::JoinHandle<Self, T>;
-
-    fn spawn<T, F>(f: F) -> resumable::common::thread::JoinHandle<Self, T>
-    where
-        F: FnOnce() -> T + Send + 'static,
-        T: Send + 'static,
-    {
-        resumable::stackful::thread::spawn::<Self, T, F>(f)
-    }
-}
-
-impl BlockOnSystem for DefaultNestedDualTaskSystem {
-    type Poller = resumable::stackful::waker::UltPoller<Self>;
-}
-
-impl StackfulSyncSystem for DefaultNestedDualTaskSystem {
-    type Mutex<T: Send> = UltDualMutex<Self, T, DualResumable<Self>>;
-    type Barrier         = UltDualBarrier<Self, DualResumable<Self>>;
-}
-
-impl SuspendableSystem for DefaultNestedDualTaskSystem {
-    /// Dual, so that OS threads that are not workers can park on it too
-    /// (a delegator or lock shared with them).
-    type SuspendedThread = DualResumable<Self>;
-}
-
-impl DelegationSystem for DefaultNestedDualTaskSystem {
-    type Delegator<C: DelegatorConsumer<Self>> = McsDelegator<Self, C>;
-}
-
-impl PostingSystem for DefaultNestedDualTaskSystem {
-    type PostChoice = post::DefaultPostChoice;
-}
-
-impl NestableSystem for DefaultNestedDualTaskSystem {
-    type ThreadSpecific<T: 'static> = resumable::stackful::tls::UltTls<Self, T>;
-}
+pub type DefaultNestedDualTaskSystem = UltDualSystem<DefaultNestedDualMarker>;
 
 /// The default stackful-*only* ULT system: runs on top of [`OsSystem`],
 /// genuinely no stackless capability exercised (`spawn_async`'s blanket
