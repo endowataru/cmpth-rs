@@ -51,6 +51,7 @@ use crate::traits::{TlsSlot, WorkerTlsAnchor};
 ///     type Dispatch = cmpth::StandardDispatch;
 ///     type Duties = cmpth::duty::GlobalDuties;
 ///     type Observe = cmpth::NoObserver;
+///     type Hooks = cmpth::NoHooks;
 ///     type ExternalQueue = cmpth::StealPathQueue<cmpth::DualTaskDesc<cmpth::UltDualSystem<Self>>>;
 ///     type PostChoice = cmpth::DefaultPostChoice;
 /// }
@@ -95,6 +96,9 @@ pub trait UltDualIdentity: WorkerTlsAnchor + Sized + Send + Sync + 'static {
 
     /// Scheduler observer; see [`crate::WorkerSystem::Observe`].
     type Observe: crate::resumable::common::observe::SchedObserver;
+
+    /// Per-worker start/stop hooks; see [`crate::WorkerSystem::Hooks`].
+    type Hooks: crate::traits::component::worker_hooks::WorkerHooks;
 
     /// Where tasks woken from outside the pool wait; see
     /// [`PoolSystem::ExternalQueue`].
@@ -146,6 +150,7 @@ impl<M: UltDualIdentity> WorkerSystem for UltDualSystem<M> {
     type Dispatch = <M as UltDualIdentity>::Dispatch;
     type Duties = <M as UltDualIdentity>::Duties;
     type Observe = <M as UltDualIdentity>::Observe;
+    type Hooks = <M as UltDualIdentity>::Hooks;
 
     fn worker_tls() -> &'static <M::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         TlsSlot::from_anchor(<M as WorkerTlsAnchor>::anchor())
