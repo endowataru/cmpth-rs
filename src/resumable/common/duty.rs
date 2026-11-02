@@ -1,20 +1,20 @@
-//! Duties: work that someone must check every so often because nothing
-//! will announce its result.  Three kinds share one mechanism:
+//! The standard [`DutyService`]: duties in a [`DutyRegistry`], run by idle
+//! workers and a keeper thread.  Three kinds share one mechanism:
 //!
 //! - an obligation: a transport whose progress engine serves other
 //!   processes' requests must run at least every `period`, whether or not a
-//!   task waits for it ([`Duty::new`]);
+//!   task waits for it ([`DutyService::duty`]);
 //! - waits: tasks suspended until a completion only a poll can detect (a
-//!   transport's requests) register as waiters ([`Duty::waiter`]), and
+//!   transport's requests) register as waiters ([`DutyLike::waiter`]), and
 //!   while there is one the duty runs every `wait_period`
-//!   ([`Duty::on_demand`] has no obligation at all, only waits);
+//!   ([`DutyService::on_demand`] has no obligation at all, only waits);
 //! - deadlines: a duty may ask to run at a given time
-//!   ([`Duty::set_deadline`]); [`sleep`] is built on that.
+//!   ([`DutyLike::set_deadline`]); [`DutyService::sleep`] is built on that.
 //!
 //! A duty is run, cheapest first, by:
 //!
 //! 1. whoever makes the progress anyway, reporting it with
-//!    [`Duty::touch`] (the duty's `poll` does not run then);
+//!    [`DutyLike::touch`] (the duty's `poll` does not run then);
 //! 2. an idle worker, once the duty is half due (a deadline: once due), at
 //!    the points where its idle policy already does something slow (yields
 //!    its thread, or goes to sleep);
@@ -34,11 +34,11 @@
 //! a touch resets it.  All polls run under one lock, so a dropped [`Duty`]
 //! is never polled again.
 //!
-//! Duties live in a [`DutyRegistry`], with its own keeper.  [`Duty::new`]
-//! and [`Duty::on_demand`] use the process-wide one
-//! ([`DutyRegistry::global`]); a system's idle workers serve the registry
-//! its [`DutyDomain`] names (`WorkerSystem::Duties`), so a pool can serve a
-//! registry of its own ([`DutyRegistry::duty`]), or none ([`NoDuties`]).
+//! Every [`DutyDomain`] is a [`DutyService`]: it registers duties in its
+//! registry, and the idle workers of a system whose `Duties` it is serve
+//! that registry.  [`GlobalDuties`] (the default) uses the process-wide
+//! one, a domain of one's own a `static` registry, and [`NoDuties`] the
+//! process-wide one without serving it.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
@@ -49,6 +49,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
+use crate::traits::{DutyLike, DutyPlace, DutyService, DutyToucherLike};
+
 /// Polls in a row that did nothing before a duty's period doubles.
 pub const IDLE_POLLS: u32 = 50;
 
@@ -57,16 +59,6 @@ const NEVER: u64 = u64::MAX;
 
 /// How often an idle worker runs a duty that has waiters.
 const EAGER_NS: u64 = 1000;
-
-/// Where a duty's `poll` may run.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DutyPlace {
-    /// Any thread, including a worker's idle loop: `poll` must not block
-    /// or suspend.
-    Anywhere,
-    /// The keeper thread only: `poll` may block it (briefly).
-    Keeper,
-}
 
 struct Inner {
     home: &'static DutyRegistry,
@@ -117,23 +109,24 @@ impl Inner {
 /// A registered duty; dropping it unregisters it.
 pub struct Duty(Arc<Inner>);
 
-/// See [`Duty::toucher`].
+/// See [`DutyLike::toucher`].
 #[derive(Clone)]
 pub struct DutyToucher(Arc<Inner>);
 
-impl DutyToucher {
+impl DutyToucherLike for DutyToucher {
+    type Waiter = DutyWaiter;
+
     #[inline]
-    pub fn touch(&self) {
+    fn touch(&self) {
         touch(&self.0);
     }
 
-    /// See [`Duty::waiter`].
-    pub fn waiter(&self) -> DutyWaiter {
+    fn waiter(&self) -> DutyWaiter {
         DutyWaiter::new(&self.0)
     }
 }
 
-/// A registered waiter of a duty (see [`Duty::waiter`]); dropping it
+/// A registered waiter of a duty (see [`DutyLike::waiter`]); dropping it
 /// unregisters it.
 pub struct DutyWaiter(Arc<Inner>);
 
@@ -207,14 +200,23 @@ impl DutyConfig {
 }
 
 /// A set of duties with one keeper thread, served by the idle workers of
-/// the systems whose [`DutyDomain`] names it.  Make one a `static`:
+/// the systems whose [`DutyDomain`] names it.  Make one a `static`, and a
+/// domain that names it:
 ///
 /// ```
 /// use std::time::Duration;
-/// use cmpth::duty::{DutyConfig, DutyPlace, DutyRegistry};
+/// use cmpth::{DutyConfig, DutyDomain, DutyPlace, DutyRegistry, DutyService};
 ///
 /// static MINE: DutyRegistry = DutyRegistry::new(DutyConfig::DEFAULT);
-/// let d = MINE.duty(Duration::from_millis(1), Duration::from_millis(8), DutyPlace::Keeper, || false);
+///
+/// pub struct MyDuties;
+/// impl DutyDomain for MyDuties {
+///     fn registry() -> &'static DutyRegistry {
+///         &MINE
+///     }
+/// }
+///
+/// let d = MyDuties::duty(Duration::from_millis(1), Duration::from_millis(8), DutyPlace::Keeper, || false);
 /// drop(d);
 /// ```
 pub struct DutyRegistry {
@@ -262,9 +264,9 @@ impl DutyRegistry {
         }
     }
 
-    /// The process-wide registry: [`Duty::new`], [`Duty::on_demand`] and
-    /// [`sleep`] use it, and so do systems whose `Duties` is
-    /// [`GlobalDuties`].  Configured by [`DutyConfig::from_env`].
+    /// The process-wide registry: [`GlobalDuties`] and [`NoDuties`] register
+    /// in it, and the timers behind [`DutyService::sleep`] are a duty of
+    /// it.  Configured by [`DutyConfig::from_env`].
     pub fn global() -> &'static DutyRegistry {
         &GLOBAL
     }
@@ -273,7 +275,7 @@ impl DutyRegistry {
         self.config.get_or_init(|| self.init.unwrap_or_else(DutyConfig::from_env))
     }
 
-    /// [`Duty::new`] in this registry.
+    /// [`DutyService::duty`] in this registry.
     pub fn duty(
         &'static self,
         period: Duration,
@@ -285,18 +287,43 @@ impl DutyRegistry {
         self.register(min, ns(max_period).max(min), min, place, Box::new(poll))
     }
 
-    /// [`Duty::on_demand`] in this registry.
+    /// [`DutyService::on_demand`] in this registry.
     pub fn on_demand(&'static self, wait_period: Duration, place: DutyPlace, poll: impl Fn() -> bool + Send + Sync + 'static) -> Duty {
         self.register(NEVER, NEVER, ns(wait_period).max(1000), place, Box::new(poll))
     }
 }
 
-/// Which [`DutyRegistry`] a system's idle workers serve
-/// (`WorkerSystem::Duties`).
+/// A [`DutyService`] backed by a [`DutyRegistry`]: duties go to
+/// [`registry`](Self::registry), and the idle workers of a system whose
+/// `Duties` this is serve [`served`](Self::served).
 pub trait DutyDomain: Send + Sync + 'static {
-    /// `None`: the workers serve no duties, and the idle policies' duty
-    /// calls compile away.
-    fn registry() -> Option<&'static DutyRegistry>;
+    fn registry() -> &'static DutyRegistry;
+
+    /// The registry the workers serve; `None`: none, and the idle
+    /// policies' duty calls compile away.
+    #[inline(always)]
+    fn served() -> Option<&'static DutyRegistry> {
+        Some(Self::registry())
+    }
+}
+
+impl<D: DutyDomain> DutyService for D {
+    type Duty = Duty;
+    type Sleep = Sleep;
+
+    fn duty(period: Duration, max_period: Duration, place: DutyPlace, poll: impl Fn() -> bool + Send + Sync + 'static) -> Duty {
+        D::registry().duty(period, max_period, place, poll)
+    }
+
+    fn on_demand(wait_period: Duration, place: DutyPlace, poll: impl Fn() -> bool + Send + Sync + 'static) -> Duty {
+        D::registry().on_demand(wait_period, place, poll)
+    }
+
+    /// The timers are a duty of the process-wide registry, whichever the
+    /// domain: its keeper and the workers that serve it fire them.
+    fn sleep(d: Duration) -> Sleep {
+        sleep(d)
+    }
 }
 
 /// The process-wide registry ([`DutyRegistry::global`]).  The default.
@@ -304,18 +331,25 @@ pub struct GlobalDuties;
 
 impl DutyDomain for GlobalDuties {
     #[inline(always)]
-    fn registry() -> Option<&'static DutyRegistry> {
-        Some(DutyRegistry::global())
+    fn registry() -> &'static DutyRegistry {
+        DutyRegistry::global()
     }
 }
 
-/// No duties: for a pool that must not run anyone's polls (one nested in
-/// another that serves them, or a benchmark).
+/// Duties go to the process-wide registry, but the workers serve none: for
+/// a pool that must not run anyone's polls (one nested in another that
+/// serves them, or a benchmark).  The keeper and other pools still run
+/// them.
 pub struct NoDuties;
 
 impl DutyDomain for NoDuties {
     #[inline(always)]
-    fn registry() -> Option<&'static DutyRegistry> {
+    fn registry() -> &'static DutyRegistry {
+        DutyRegistry::global()
+    }
+
+    #[inline(always)]
+    fn served() -> Option<&'static DutyRegistry> {
         None
     }
 }
@@ -374,28 +408,11 @@ impl DutyRegistry {
     }
 }
 
-impl Duty {
-    /// Register `poll` in the process-wide registry, to run at least every
-    /// `period` (backing off up to `max_period` while it finds nothing to
-    /// do), and every `period` while it has waiters.
-    pub fn new(
-        period: Duration,
-        max_period: Duration,
-        place: DutyPlace,
-        poll: impl Fn() -> bool + Send + Sync + 'static,
-    ) -> Duty {
-        DutyRegistry::global().duty(period, max_period, place, poll)
-    }
+impl DutyLike for Duty {
+    type Toucher = DutyToucher;
+    type Waiter = DutyWaiter;
 
-    /// Register `poll` in the process-wide registry, to run only while it
-    /// has waiters, every `wait_period`, or at its deadline.
-    pub fn on_demand(wait_period: Duration, place: DutyPlace, poll: impl Fn() -> bool + Send + Sync + 'static) -> Duty {
-        DutyRegistry::global().on_demand(wait_period, place, poll)
-    }
-
-    /// Change the obligation: at least every `period`, backing off up to
-    /// `max_period`; `None`: only while there are waiters.
-    pub fn set_period(&self, period: Option<(Duration, Duration)>) {
+    fn set_period(&self, period: Option<(Duration, Duration)>) {
         let (min, max) = match period {
             Some((p, m)) => {
                 let min = ns(p).max(1000);
@@ -411,38 +428,30 @@ impl Duty {
         replan(i);
     }
 
-    /// Change the period while there are waiters.
-    pub fn set_wait_period(&self, period: Duration) {
+    fn set_wait_period(&self, period: Duration) {
         self.0.wait_period.store(ns(period).max(1000), Ordering::Relaxed);
         replan(&self.0);
     }
 
-    /// Ask for a poll at `at` (or none); the poll clears it, so a duty that
-    /// wants the next one sets it again from its `poll`.
-    pub fn set_deadline(&self, at: Option<Instant>) {
+    fn set_deadline(&self, at: Option<Instant>) {
         set_deadline(&self.0, at);
     }
 
-    /// Report that the progress this duty stands for just happened anyway.
     #[inline]
-    pub fn touch(&self) {
+    fn touch(&self) {
         touch(&self.0);
     }
 
-    /// Register a waiter: until it is dropped, the duty runs every
-    /// `wait_period`.  Whoever detects the completion wakes the waiting
-    /// task; the duty only makes sure someone looks.
-    pub fn waiter(&self) -> DutyWaiter {
+    fn waiter(&self) -> DutyWaiter {
         DutyWaiter::new(&self.0)
     }
 
-    /// A handle that only touches and registers waiters, for code that
-    /// makes the progress but does not own the duty.  Touching an
-    /// unregistered duty does nothing.
-    pub fn toucher(&self) -> DutyToucher {
+    fn toucher(&self) -> DutyToucher {
         DutyToucher(Arc::clone(&self.0))
     }
+}
 
+impl Duty {
     pub fn stats(&self) -> DutyStats {
         DutyStats {
             keeper_polls: self.0.keeper_polls.load(Ordering::Relaxed),
@@ -699,7 +708,7 @@ fn timers() -> &'static Timers {
         seq: AtomicU64::new(0),
         duty: OnceLock::new(),
     });
-    t.duty.get_or_init(|| Duty::on_demand(Duration::from_secs(3600), DutyPlace::Anywhere, fire_timers));
+    t.duty.get_or_init(|| DutyRegistry::global().on_demand(Duration::from_secs(3600), DutyPlace::Anywhere, fire_timers));
     t
 }
 
@@ -735,7 +744,7 @@ fn fire_timers() -> bool {
     did
 }
 
-/// A future that resolves at `at` (see [`sleep`]).
+/// A future that resolves at a given time (see [`DutyService::sleep`]).
 pub struct Sleep {
     at: u64,
     slot: Option<(u64, Arc<TimerSlot>)>,
@@ -745,7 +754,7 @@ pub struct Sleep {
 /// the task suspends and its worker may run others or park; an idle worker
 /// or the keeper wakes it.  Precision is the keeper's (tens of
 /// microseconds), not better.
-pub fn sleep(d: Duration) -> Sleep {
+fn sleep(d: Duration) -> Sleep {
     Sleep { at: now_ns().saturating_add(ns(d)), slot: None }
 }
 

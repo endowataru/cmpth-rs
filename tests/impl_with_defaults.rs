@@ -51,7 +51,7 @@ pub struct Scoped;
 cmpth::impl_with_defaults! {
     impl cmpth::ScopedIdentity for Scoped {
         type Idle = cmpth::ParkIdle;
-        type Duties = cmpth::duty::NoDuties;
+        type Duties = cmpth::NoDuties;
     }
 }
 
@@ -65,7 +65,7 @@ fn defaults_and_overrides() {
     same::<<Stackful as UltIdentity>::Idle, cmpth::SearchIdle>();
     same::<<Stackful as UltIdentity>::Steal, cmpth::RandomSweepSteal>();
     same::<<Stackful as UltIdentity>::Dispatch, cmpth::StandardDispatch>();
-    same::<<Stackful as UltIdentity>::Duties, cmpth::duty::GlobalDuties>();
+    same::<<Stackful as UltIdentity>::Duties, cmpth::GlobalDuties>();
     same::<<Stackful as UltIdentity>::Observe, cmpth::NoObserver>();
     same::<<Stackful as UltIdentity>::ExternalQueue, cmpth::StealPathQueue<StackfulOnlyTaskDesc<Stackful>>>();
     same::<<Stackful as UltIdentity>::PostChoice, cmpth::DefaultPostChoice>();
@@ -85,7 +85,7 @@ fn defaults_and_overrides() {
 
     same::<<Scoped as cmpth::ScopedIdentity>::Idle, cmpth::ParkIdle>();
     same::<<Scoped as cmpth::ScopedIdentity>::Steal, cmpth::RandomSweepSteal>();
-    same::<<Scoped as cmpth::ScopedIdentity>::Duties, cmpth::duty::NoDuties>();
+    same::<<Scoped as cmpth::ScopedIdentity>::Duties, cmpth::NoDuties>();
 
     // `Lookup` carries a `where` clause, so it is checked through the system.
     same::<<Stackful as cmpth::WorkerSystem>::Lookup, TlsCurrent>();

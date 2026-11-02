@@ -101,6 +101,10 @@ impl crate::traits::PostingSystem for OsSystem {
     type PostChoice = crate::post::DefaultPostChoice;
 }
 
+impl crate::traits::DutySystem for OsSystem {
+    type Duties = crate::resumable::common::duty::GlobalDuties;
+}
+
 impl NestableSystem for OsSystem {
     type ThreadSpecific<T: 'static> = OsTls<T>;
 }

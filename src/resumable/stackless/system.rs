@@ -283,7 +283,7 @@ where
 ///     type Idle = cmpth::SpinIdle;
 ///     type Steal = cmpth::RandomSweepSteal;
 ///     type Dispatch = cmpth::StandardDispatch;
-///     type Duties = cmpth::duty::GlobalDuties;
+///     type Duties = cmpth::GlobalDuties;
 ///     type Observe = cmpth::NoObserver;
 ///     type Qos = cmpth::OsQos;
 ///     type Placement = cmpth::StandardPlacement;
@@ -344,7 +344,7 @@ pub trait UltAsyncIdentity: crate::traits::WorkerTlsAnchor + Sized + Send + Sync
     type Dispatch: crate::resumable::common::dispatch::DispatchPolicy;
 
     /// Duties the idle workers run; see [`crate::WorkerSystem::Duties`].
-    type Duties: crate::duty::DutyDomain;
+    type Duties: crate::resumable::common::duty::DutyDomain;
 
     /// Scheduler observer; see [`crate::WorkerSystem::Observe`].
     type Observe: crate::resumable::common::observe::SchedObserver;
@@ -384,6 +384,10 @@ pub trait UltAsyncIdentity: crate::traits::WorkerTlsAnchor + Sized + Send + Sync
 /// comment for why `M` alone can't directly implement `SchedulerSystem`.
 pub struct UltAsyncSystem<M: UltAsyncIdentity> {
     _marker: PhantomData<fn() -> M>,
+}
+
+impl<M: UltAsyncIdentity> crate::traits::DutySystem for UltAsyncSystem<M> {
+    type Duties = <M as UltAsyncIdentity>::Duties;
 }
 
 impl<M: UltAsyncIdentity> PoolSystem for UltAsyncSystem<M> {

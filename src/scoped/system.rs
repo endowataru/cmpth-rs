@@ -54,7 +54,7 @@ use super::{async_engine, sync_engine};
 ///     type Idle = cmpth::ParkIdle;
 ///     type Steal = cmpth::RandomSweepSteal;
 ///     type Dispatch = cmpth::StandardDispatch;
-///     type Duties = cmpth::duty::GlobalDuties;
+///     type Duties = cmpth::GlobalDuties;
 ///     type Observe = cmpth::NoObserver;
 ///     type Qos = cmpth::OsQos;
 ///     type Placement = cmpth::StandardPlacement;
@@ -83,7 +83,7 @@ pub trait ScopedIdentity: Sized + Send + Sync + 'static {
     type Dispatch: crate::resumable::common::dispatch::DispatchPolicy;
 
     /// Duties the idle workers run; see [`crate::WorkerSystem::Duties`].
-    type Duties: crate::duty::DutyDomain;
+    type Duties: crate::resumable::common::duty::DutyDomain;
 
     /// Scheduler observer; see [`crate::WorkerSystem::Observe`].
     type Observe: crate::resumable::common::observe::SchedObserver;
@@ -109,7 +109,7 @@ impl ScopedIdentity for DefaultScopedMarker {
     type Idle = SpinIdle;
     type Steal = crate::resumable::common::steal::RandomSweepSteal;
     type Dispatch = crate::resumable::common::dispatch::StandardDispatch;
-    type Duties = crate::duty::GlobalDuties;
+    type Duties = crate::resumable::common::duty::GlobalDuties;
     type Observe = crate::resumable::common::observe::NoObserver;
     type Qos = crate::resumable::common::qos::OsQos;
     type Placement = crate::resumable::common::placement::StandardPlacement;
@@ -139,6 +139,10 @@ pub type ScopedTaskSystem = ScopedSystem<DefaultScopedMarker>;
 // OS thread at once — `run`/`run_async` never overlap in the same call
 // tree), so this needs no special-casing to check two separate
 // thread-locals the way the old hand-written impl did.
+
+impl<M: ScopedIdentity> crate::traits::DutySystem for ScopedSystem<M> {
+    type Duties = <M as ScopedIdentity>::Duties;
+}
 
 impl<M: ScopedIdentity> ScopedStackfulTaskSystem for ScopedSystem<M> {
     fn parallel_call<Fa, Fb, Ra, Rb>(a: Fa, b: Fb) -> (Ra, Rb)

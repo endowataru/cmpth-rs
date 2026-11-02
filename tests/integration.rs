@@ -743,7 +743,7 @@ impl cmpth::WorkerSystem for ManualSystem {
     type Idle = cmpth::SpinIdle;
     type Steal = cmpth::RandomSweepSteal;
     type Dispatch = cmpth::StandardDispatch;
-    type Duties = cmpth::duty::GlobalDuties;
+    type Duties = cmpth::GlobalDuties;
     type Observe = cmpth::NoObserver;
     type Qos = cmpth::OsQos;
     type Placement = cmpth::StandardPlacement;
@@ -852,7 +852,7 @@ impl cmpth::WorkerSystem for PollerSystem {
     type Idle = cmpth::SpinIdle;
     type Steal = cmpth::RandomSweepSteal;
     type Dispatch = cmpth::StandardDispatch;
-    type Duties = cmpth::duty::GlobalDuties;
+    type Duties = cmpth::GlobalDuties;
     type Observe = cmpth::NoObserver;
     type Qos = cmpth::OsQos;
     type Placement = cmpth::StandardPlacement;

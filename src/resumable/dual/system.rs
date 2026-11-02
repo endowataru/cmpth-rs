@@ -49,7 +49,7 @@ use crate::traits::{TlsSlot, WorkerTlsAnchor};
 ///     type Idle = cmpth::SearchIdle;
 ///     type Steal = cmpth::RandomSweepSteal;
 ///     type Dispatch = cmpth::StandardDispatch;
-///     type Duties = cmpth::duty::GlobalDuties;
+///     type Duties = cmpth::GlobalDuties;
 ///     type Observe = cmpth::NoObserver;
 ///     type Qos = cmpth::OsQos;
 ///     type Placement = cmpth::StandardPlacement;
@@ -94,7 +94,7 @@ pub trait UltDualIdentity: WorkerTlsAnchor + Sized + Send + Sync + 'static {
     type Dispatch: crate::resumable::common::dispatch::DispatchPolicy;
 
     /// Duties the idle workers run; see [`crate::WorkerSystem::Duties`].
-    type Duties: crate::duty::DutyDomain;
+    type Duties: crate::resumable::common::duty::DutyDomain;
 
     /// Scheduler observer; see [`crate::WorkerSystem::Observe`].
     type Observe: crate::resumable::common::observe::SchedObserver;
@@ -240,6 +240,10 @@ impl<M: UltDualIdentity> DelegationSystem for UltDualSystem<M> {
 
 impl<M: UltDualIdentity> crate::traits::PostingSystem for UltDualSystem<M> {
     type PostChoice = <M as UltDualIdentity>::PostChoice;
+}
+
+impl<M: UltDualIdentity> crate::traits::DutySystem for UltDualSystem<M> {
+    type Duties = <M as UltDualIdentity>::Duties;
 }
 
 impl<M: UltDualIdentity> NestableSystem for UltDualSystem<M> {
