@@ -209,6 +209,7 @@ where
 /// [`WorkerSystem::SuspendedToken`] rather than an equality pin. Does *not*
 /// need `StackfulWorkerSystem` (no context switch happens here, so `S::Ctx`
 /// is never named) or `S::Desc: StackfulTaskDesc`.
+#[inline]
 pub fn next_or_root_stackful<S>(wk: &UltWorker<S>) -> SuspendedTaskToken<S::Desc>
 where
     S: WorkerSystem + PoolSystem,
@@ -290,6 +291,7 @@ where
     S::SuspendedToken: From<SuspendedTaskToken<S::Desc>>,
     SuspendedTaskToken<S::Desc>: From<S::SuspendedToken>,
 {
+    #[inline]
     fn next_or_root(&self) -> SuspendedTaskToken<S::Desc> {
         S::next_or_root(self)
     }
