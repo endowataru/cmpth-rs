@@ -46,7 +46,7 @@ pub trait SchedObserver: Send + Sync + 'static {
     fn idle(_me: usize) {}
 
     /// Worker `me` is about to block its thread (reported by the idle
-    /// policy; see [`IdleCx::parking`](crate::IdleCx::parking)).
+    /// policy; see [`IdleContext::parking`](super::idle::IdleContext::parking)).
     #[inline(always)]
     fn park(_me: usize) {}
 

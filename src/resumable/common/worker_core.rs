@@ -59,7 +59,7 @@ impl<S: WorkerSystem> PoolCore<S> {
     /// parked.
     pub(crate) fn finish(&self) {
         self.finished.store(true, Ordering::Release);
-        self.idle.shutdown::<S>();
+        self.idle.shutdown::<S::Duties>();
     }
 }
 
