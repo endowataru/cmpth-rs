@@ -1,7 +1,10 @@
 pub mod delegation;
+pub mod dispatch;
+pub mod observe;
 pub mod run_queue;
 pub mod stackful;
 pub mod stackless;
+pub mod steal;
 pub mod task;
 pub mod tls;
 pub mod wait;
