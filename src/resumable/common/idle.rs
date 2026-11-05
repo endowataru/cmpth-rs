@@ -1,15 +1,5 @@
-//! Idle policy: what a worker does when it has looked everywhere and found
-//! nothing, and how a producer tells it that has changed.
-//!
-//! The two halves are one protocol, which is why they are one trait:
-//! [`no_work_found`](IdlePolicy::no_work_found) (consumer side, called from
-//! the shared idle loop) and [`new_work`](IdlePolicy::new_work) (producer
-//! side, called after every publication of stealable work) must agree on how
-//! a sleeping worker is woken without a lost wakeup. A policy that never
-//! sleeps ([`SpinIdle`]) has nothing to agree on, and `new_work` compiles
-//! away entirely.
-//!
-//! Swap the implementation via [`crate::WorkerSystem::Idle`].
+//! Idle policies ([`IdlePolicy`]) and the context the worker loop gives
+//! them ([`IdleCx`]).
 
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering, fence};
@@ -17,15 +7,14 @@ use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::duty::DutyDomain;
+pub use crate::traits::component::idle::{IdleContext, IdleDuties, IdlePolicy};
 use crate::resumable::common::observe::SchedObserver;
 use crate::resumable::common::system::WorkerSystem;
 use crate::traits::stackful::SpawnableStackfulTaskSystem;
 
-/// What an idle policy may use from the worker that calls it: whether the
-/// last round saw work it could not take, the pool's `finished` flag, a
-/// yield of the base thread, the system's duties
-/// ([`WorkerSystem::Duties`]) and its observer
-/// ([`WorkerSystem::Observe`]).
+/// The context the worker loop gives its idle policy: the system's duties
+/// ([`WorkerSystem::Duties`]) and observer ([`WorkerSystem::Observe`]),
+/// and its base system's yield.
 pub struct IdleCx<'a, S: WorkerSystem> {
     me: usize,
     retry: bool,
@@ -38,117 +27,115 @@ impl<'a, S: WorkerSystem> IdleCx<'a, S> {
     pub(crate) fn new(me: usize, retry: bool, finished: &'a AtomicBool) -> Self {
         IdleCx { me, retry, finished, _s: PhantomData }
     }
+}
 
-    /// The calling worker's index in its pool.
+impl<S: WorkerSystem> IdleContext for IdleCx<'_, S> {
+    type Duties = S::Duties;
+
     #[inline(always)]
-    pub fn worker(&self) -> usize {
+    fn worker(&self) -> usize {
         self.me
     }
 
-    /// The round saw a victim that had work but could not be robbed right
-    /// now ([`Steal::Retry`](crate::Steal::Retry)): not evidence of
-    /// idleness.
     #[inline(always)]
-    pub fn retry(&self) -> bool {
+    fn retry(&self) -> bool {
         self.retry
     }
 
-    /// Set once the pool stops; a policy that blocks must return promptly
-    /// once it is (and [`IdlePolicy::shutdown`] wakes it).
     #[inline(always)]
-    pub fn finished(&self) -> &'a AtomicBool {
+    fn finished(&self) -> &AtomicBool {
         self.finished
     }
 
-    /// Yield the *base* thread (`S::Base::yield_now`): the base need not be
-    /// an OS thread, so never `std::thread::yield_now`.
     #[inline(always)]
-    pub fn yield_now(&self) {
+    fn yield_now(&self) {
         <S::Base as SpawnableStackfulTaskSystem>::yield_now();
     }
 
-    /// Run the half-due duties (see [`DutyRegistry::run_idle`](crate::duty::DutyRegistry::run_idle)).
     #[inline(always)]
-    pub fn run_duties(&self) {
-        if let Some(r) = <S::Duties as DutyDomain>::registry() {
-            r.run_idle();
-        }
-    }
-
-    /// See [`DutyRegistry::wait_spin_ns`](crate::duty::DutyRegistry::wait_spin_ns); 0 without duties.
-    #[inline(always)]
-    pub fn duty_wait_spin_ns(&self) -> u64 {
-        <S::Duties as DutyDomain>::registry().map_or(0, |r| r.wait_spin_ns())
-    }
-
-    /// Before parking: see [`DutyRegistry::park_timeout`](crate::duty::DutyRegistry::park_timeout).
-    #[inline(always)]
-    pub fn duty_park_timeout(&self, timed: &mut bool) -> Option<Duration> {
-        <S::Duties as DutyDomain>::registry().and_then(|r| r.park_timeout(timed))
-    }
-
-    /// Found work while keeping the duties' due times: see
-    /// [`DutyRegistry::idle_done`](crate::duty::DutyRegistry::idle_done).
-    #[inline(always)]
-    pub fn duty_idle_done(&self, timed: &mut bool) {
-        if let Some(r) = <S::Duties as DutyDomain>::registry() {
-            r.idle_done(timed);
-        } else {
-            *timed = false;
-        }
-    }
-
-    /// Report that this worker is about to block its thread...
-    #[inline(always)]
-    pub fn parking(&self) {
+    fn parking(&self) {
         <S::Observe as SchedObserver>::park(self.me);
     }
 
-    /// ... and that it woke up.
     #[inline(always)]
-    pub fn woke(&self) {
+    fn woke(&self) {
         <S::Observe as SchedObserver>::unpark(self.me);
     }
 }
 
-/// Idle/wakeup protocol of one worker pool. One value is shared by all
-/// workers of a pool (it lives in `PoolCore`).
-///
-/// # Contract
-///
-/// * `new_work` is called by *any* thread after it made an item visible to
-///   thieves (local `push`/`defer`, external-queue push). It must be cheap
-///   when nobody is idle.
-/// * `no_work_found` is called by an idle worker after each search round
-///   that found nothing. The caller re-searches after it returns, so a policy
-///   may use consecutive calls as "announce intent to sleep", then "re-check",
-///   then "sleep" (see [`ParkIdle`]).  The re-check is a full search only if
-///   the system's [`StealPolicy`](crate::StealPolicy) tries every victim in
-///   a round (the standard ones but [`RandomSteal`](crate::RandomSteal) do);
-///   otherwise a sleeper may miss work that another worker will run itself.
-/// * `work_found` is called when a search succeeds, ending the idle episode.
-/// * `shutdown` is called once after `finished` has been set; every blocked
-///   worker must return from `no_work_found` promptly.
-///
-/// The calls get an [`IdleCx`]: the system's duties, its observer and the
-/// base thread's yield.  A policy should run the duties
-/// ([`IdleCx::run_duties`]) where it already does something slow, as the
-/// standard ones do; a policy that never does leaves them to the keeper.
-pub trait IdlePolicy: Default + Send + Sync + 'static {
-    /// Per-worker state for one idle episode (round counters, a sleep ticket).
-    type Episode: Default;
+/// A domain's duties are its registry's, or none.
+impl<D: DutyDomain> IdleDuties for D {
+    #[inline(always)]
+    fn run_idle() {
+        if let Some(r) = D::registry() {
+            r.run_idle();
+        }
+    }
 
-    fn new_work(&self);
+    #[inline(always)]
+    fn wait_spin_ns() -> u64 {
+        D::registry().map_or(0, |r| r.wait_spin_ns())
+    }
 
-    fn work_found<S: WorkerSystem>(&self, ep: &mut Self::Episode, cx: &IdleCx<'_, S>);
+    #[inline(always)]
+    fn park_timeout(timed: &mut bool) -> Option<Duration> {
+        D::registry().and_then(|r| r.park_timeout(timed))
+    }
 
-    fn no_work_found<S: WorkerSystem>(&self, ep: &mut Self::Episode, cx: &IdleCx<'_, S>);
+    #[inline(always)]
+    fn idle_done(timed: &mut bool) {
+        match D::registry() {
+            Some(r) => r.idle_done(timed),
+            None => *timed = false,
+        }
+    }
 
-    fn shutdown<S: WorkerSystem>(&self);
-
-    /// Told the pool's worker count once, when the pool is built.
-    fn set_workers(&self, _n: usize) {}
+    #[inline(always)]
+    fn release_timed() {
+        if let Some(r) = D::registry() {
+            r.release_timed();
+        }
+    }
 }
+
+/// `cx` with [`retry`](IdleContext::retry) false, for a policy built on
+/// another.
+struct NoRetry<'a, C>(&'a C);
+
+impl<C: IdleContext> IdleContext for NoRetry<'_, C> {
+    type Duties = C::Duties;
+
+    #[inline(always)]
+    fn worker(&self) -> usize {
+        self.0.worker()
+    }
+
+    #[inline(always)]
+    fn retry(&self) -> bool {
+        false
+    }
+
+    #[inline(always)]
+    fn finished(&self) -> &AtomicBool {
+        self.0.finished()
+    }
+
+    #[inline(always)]
+    fn yield_now(&self) {
+        self.0.yield_now();
+    }
+
+    #[inline(always)]
+    fn parking(&self) {
+        self.0.parking();
+    }
+
+    #[inline(always)]
+    fn woke(&self) {
+        self.0.woke();
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // SpinIdle
@@ -167,12 +154,12 @@ impl IdlePolicy for SpinIdle {
     fn new_work(&self) {}
 
     #[inline(always)]
-    fn work_found<S: WorkerSystem>(&self, ep: &mut u32, _cx: &IdleCx<'_, S>) {
+    fn work_found<C: IdleContext>(&self, ep: &mut u32, _cx: &C) {
         *ep = 0;
     }
 
     #[inline(always)]
-    fn no_work_found<S: WorkerSystem>(&self, ep: &mut u32, cx: &IdleCx<'_, S>) {
+    fn no_work_found<C: IdleContext>(&self, ep: &mut u32, cx: &C) {
         std::hint::spin_loop();
         if !cx.retry() {
             *ep += 1;
@@ -184,7 +171,7 @@ impl IdlePolicy for SpinIdle {
     }
 
     #[inline(always)]
-    fn shutdown<S: WorkerSystem>(&self) {}
+    fn shutdown<D: IdleDuties>(&self) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -428,7 +415,7 @@ impl<W: ParkWait> IdlePolicy for ParkIdle<W> {
     }
 
     #[inline]
-    fn work_found<S: WorkerSystem>(&self, ep: &mut ParkEpisode, cx: &IdleCx<'_, S>) {
+    fn work_found<C: IdleContext>(&self, ep: &mut ParkEpisode, cx: &C) {
         if ep.ticket.is_some() || ep.rounds != 0 || ep.timed {
             self.unregister(ep);
             if ep.timed {
@@ -437,7 +424,7 @@ impl<W: ParkWait> IdlePolicy for ParkIdle<W> {
         }
     }
 
-    fn no_work_found<S: WorkerSystem>(&self, ep: &mut ParkEpisode, cx: &IdleCx<'_, S>) {
+    fn no_work_found<C: IdleContext>(&self, ep: &mut ParkEpisode, cx: &C) {
         if cx.retry() {
             std::hint::spin_loop();
             return;
@@ -473,13 +460,11 @@ impl<W: ParkWait> IdlePolicy for ParkIdle<W> {
         }
     }
 
-    fn shutdown<S: WorkerSystem>(&self) {
+    fn shutdown<D: IdleDuties>(&self) {
         fence(Ordering::SeqCst);
         self.epoch.fetch_add(1, Ordering::SeqCst);
         self.wait.wake_all(&self.epoch);
-        if let Some(r) = <S::Duties as DutyDomain>::registry() {
-            r.release_timed();
-        }
+        D::release_timed();
     }
 }
 
@@ -633,7 +618,7 @@ impl<C: SearchCap, W: ParkWait> IdlePolicy for SearchIdle<C, W> {
     }
 
     #[inline]
-    fn work_found<S: WorkerSystem>(&self, ep: &mut SearchEpisode, cx: &IdleCx<'_, S>) {
+    fn work_found<X: IdleContext>(&self, ep: &mut SearchEpisode, cx: &X) {
         if let Some(t) = ep.since.take() {
             let d = t.elapsed().as_nanos() as u64;
             ep.avg_ns = ep.avg_ns - ep.avg_ns / 4 + d / 4;
@@ -649,7 +634,7 @@ impl<C: SearchCap, W: ParkWait> IdlePolicy for SearchIdle<C, W> {
         }
     }
 
-    fn no_work_found<S: WorkerSystem>(&self, ep: &mut SearchEpisode, cx: &IdleCx<'_, S>) {
+    fn no_work_found<X: IdleContext>(&self, ep: &mut SearchEpisode, cx: &X) {
         if cx.retry() {
             // Work nearby, or a poll hook waiting: stay awake, as a searcher
             // if the cap allows.
@@ -693,14 +678,14 @@ impl<C: SearchCap, W: ParkWait> IdlePolicy for SearchIdle<C, W> {
                 }
             }
         }
-        self.park.no_work_found(&mut ep.park, &IdleCx::<S>::new(cx.worker(), false, cx.finished()));
+        self.park.no_work_found(&mut ep.park, &NoRetry(cx));
         if ep.park.ticket.is_none() && ep.park.rounds == 0 {
             // Woken from the park: start over if nothing turns up.
             ep.parking = false;
         }
     }
 
-    fn shutdown<S: WorkerSystem>(&self) {
-        self.park.shutdown::<S>();
+    fn shutdown<D: IdleDuties>(&self) {
+        self.park.shutdown::<D>();
     }
 }
