@@ -79,6 +79,7 @@ macro_rules! worker_tls_anchor {
 /// | `Duties` | [`GlobalDuties`](crate::duty::GlobalDuties) | [`GlobalDuties`](crate::duty::GlobalDuties) | [`GlobalDuties`](crate::duty::GlobalDuties) | [`GlobalDuties`](crate::duty::GlobalDuties) |
 /// | `Observe` | [`NoObserver`](crate::NoObserver) | [`NoObserver`](crate::NoObserver) | [`NoObserver`](crate::NoObserver) | [`NoObserver`](crate::NoObserver) |
 /// | `Qos` | [`OsQos`](crate::OsQos) | [`OsQos`](crate::OsQos) | [`OsQos`](crate::OsQos) | [`OsQos`](crate::OsQos) |
+/// | `Placement` | [`StandardPlacement`](crate::StandardPlacement) | [`StandardPlacement`](crate::StandardPlacement) | [`StandardPlacement`](crate::StandardPlacement) | [`StandardPlacement`](crate::StandardPlacement) |
 /// | `ExternalQueue` | [`StealPathQueue`](crate::StealPathQueue) of `Desc` | [`StealPathQueue`](crate::StealPathQueue) of [`DualTaskDesc`](crate::DualTaskDesc) | [`StealPathQueue`](crate::StealPathQueue) of `Desc` | |
 /// | `PostChoice` | [`DefaultPostChoice`](crate::DefaultPostChoice) | [`DefaultPostChoice`](crate::DefaultPostChoice) | | |
 ///
@@ -138,6 +139,7 @@ macro_rules! impl_with_defaults {
             $crate::impl_with_defaults!(@or Duties [$($b)*] type Duties = $crate::duty::GlobalDuties;);
             $crate::impl_with_defaults!(@or Observe [$($b)*] type Observe = $crate::NoObserver;);
             $crate::impl_with_defaults!(@or Qos [$($b)*] type Qos = $crate::OsQos;);
+            $crate::impl_with_defaults!(@or Placement [$($b)*] type Placement = $crate::StandardPlacement;);
             $crate::impl_with_defaults!(@or ExternalQueue [$($b)*] type ExternalQueue = $crate::StealPathQueue<<Self as $crate::UltIdentity>::Desc>;);
             $crate::impl_with_defaults!(@or PostChoice [$($b)*] type PostChoice = $crate::DefaultPostChoice;);
         }
@@ -157,6 +159,7 @@ macro_rules! impl_with_defaults {
             $crate::impl_with_defaults!(@or Duties [$($b)*] type Duties = $crate::duty::GlobalDuties;);
             $crate::impl_with_defaults!(@or Observe [$($b)*] type Observe = $crate::NoObserver;);
             $crate::impl_with_defaults!(@or Qos [$($b)*] type Qos = $crate::OsQos;);
+            $crate::impl_with_defaults!(@or Placement [$($b)*] type Placement = $crate::StandardPlacement;);
             $crate::impl_with_defaults!(@or ExternalQueue [$($b)*] type ExternalQueue = $crate::StealPathQueue<$crate::DualTaskDesc<$crate::UltDualSystem<Self>>>;);
             $crate::impl_with_defaults!(@or PostChoice [$($b)*] type PostChoice = $crate::DefaultPostChoice;);
         }
@@ -175,6 +178,7 @@ macro_rules! impl_with_defaults {
             $crate::impl_with_defaults!(@or Duties [$($b)*] type Duties = $crate::duty::GlobalDuties;);
             $crate::impl_with_defaults!(@or Observe [$($b)*] type Observe = $crate::NoObserver;);
             $crate::impl_with_defaults!(@or Qos [$($b)*] type Qos = $crate::OsQos;);
+            $crate::impl_with_defaults!(@or Placement [$($b)*] type Placement = $crate::StandardPlacement;);
             $crate::impl_with_defaults!(@or ExternalQueue [$($b)*] type ExternalQueue = $crate::StealPathQueue<<Self as $crate::UltAsyncIdentity>::Desc>;);
         }
     };
@@ -188,6 +192,7 @@ macro_rules! impl_with_defaults {
             $crate::impl_with_defaults!(@or Duties [$($b)*] type Duties = $crate::duty::GlobalDuties;);
             $crate::impl_with_defaults!(@or Observe [$($b)*] type Observe = $crate::NoObserver;);
             $crate::impl_with_defaults!(@or Qos [$($b)*] type Qos = $crate::OsQos;);
+            $crate::impl_with_defaults!(@or Placement [$($b)*] type Placement = $crate::StandardPlacement;);
         }
     };
 
@@ -205,6 +210,7 @@ macro_rules! impl_with_defaults {
     (@has UltIdentity Duties) => {};
     (@has UltIdentity Observe) => {};
     (@has UltIdentity Qos) => {};
+    (@has UltIdentity Placement) => {};
     (@has UltIdentity ExternalQueue) => {};
     (@has UltIdentity PostChoice) => {};
     (@has UltDualIdentity Base) => {};
@@ -218,6 +224,7 @@ macro_rules! impl_with_defaults {
     (@has UltDualIdentity Duties) => {};
     (@has UltDualIdentity Observe) => {};
     (@has UltDualIdentity Qos) => {};
+    (@has UltDualIdentity Placement) => {};
     (@has UltDualIdentity ExternalQueue) => {};
     (@has UltDualIdentity PostChoice) => {};
     (@has UltAsyncIdentity Base) => {};
@@ -230,6 +237,7 @@ macro_rules! impl_with_defaults {
     (@has UltAsyncIdentity Duties) => {};
     (@has UltAsyncIdentity Observe) => {};
     (@has UltAsyncIdentity Qos) => {};
+    (@has UltAsyncIdentity Placement) => {};
     (@has UltAsyncIdentity ExternalQueue) => {};
     (@has ScopedIdentity Idle) => {};
     (@has ScopedIdentity Steal) => {};
@@ -237,6 +245,7 @@ macro_rules! impl_with_defaults {
     (@has ScopedIdentity Duties) => {};
     (@has ScopedIdentity Observe) => {};
     (@has ScopedIdentity Qos) => {};
+    (@has ScopedIdentity Placement) => {};
     (@has $tr:ident $k:ident) => {
         compile_error!(concat!("impl_with_defaults!: `", stringify!($tr), "` has no associated type `", stringify!($k), "`"));
     };
@@ -273,6 +282,7 @@ macro_rules! impl_with_defaults {
     (@or Duties [type Duties = $v:ty; $($r:tt)*] $($d:tt)*) => {};
     (@or Observe [type Observe = $v:ty; $($r:tt)*] $($d:tt)*) => {};
     (@or Qos [type Qos = $v:ty; $($r:tt)*] $($d:tt)*) => {};
+    (@or Placement [type Placement = $v:ty; $($r:tt)*] $($d:tt)*) => {};
     (@or ExternalQueue [type ExternalQueue = $v:ty; $($r:tt)*] $($d:tt)*) => {};
     (@or PostChoice [type PostChoice = $v:ty; $($r:tt)*] $($d:tt)*) => {};
     (@or $k:ident [type $o:ident = $v:ty; $($r:tt)*] $($d:tt)*) => {

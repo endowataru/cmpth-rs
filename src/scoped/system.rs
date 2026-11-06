@@ -57,6 +57,7 @@ use super::{async_engine, sync_engine};
 ///     type Duties = cmpth::duty::GlobalDuties;
 ///     type Observe = cmpth::NoObserver;
 ///     type Qos = cmpth::OsQos;
+///     type Placement = cmpth::StandardPlacement;
 /// }
 ///
 /// type MyScopedSystem = cmpth::ScopedSystem<MyScopedMarker>;
@@ -88,6 +89,10 @@ pub trait ScopedIdentity: Sized + Send + Sync + 'static {
 
     /// What the workers tell the OS; see [`crate::WorkerSystem::Qos`].
     type Qos: crate::traits::component::qos::QosPolicy;
+
+    /// Spawn order and where woken tasks go; see
+    /// [`crate::WorkerSystem::Placement`].
+    type Placement: crate::traits::component::placement::PlacementPolicy;
 }
 
 /// The default [`ScopedIdentity`]: [`SpinIdle`], same as every other
@@ -103,6 +108,7 @@ impl ScopedIdentity for DefaultScopedMarker {
     type Duties = crate::duty::GlobalDuties;
     type Observe = crate::resumable::common::observe::NoObserver;
     type Qos = crate::resumable::common::qos::OsQos;
+    type Placement = crate::resumable::common::placement::StandardPlacement;
 }
 
 /// The generic `scoped` system — `M`'s [`ScopedIdentity::Idle`] is this

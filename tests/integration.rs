@@ -746,6 +746,7 @@ impl cmpth::WorkerSystem for ManualSystem {
     type Duties = cmpth::duty::GlobalDuties;
     type Observe = cmpth::NoObserver;
     type Qos = cmpth::OsQos;
+    type Placement = cmpth::StandardPlacement;
 
     fn worker_tls() -> &'static <OsSystem as cmpth::NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         // The one thing a macro (or the user, as here) must write:
@@ -853,6 +854,7 @@ impl cmpth::WorkerSystem for PollerSystem {
     type Duties = cmpth::duty::GlobalDuties;
     type Observe = cmpth::NoObserver;
     type Qos = cmpth::OsQos;
+    type Placement = cmpth::StandardPlacement;
 
     fn worker_tls() -> &'static <OsSystem as cmpth::NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         static TLS: OsTls<UltWorker<PollerSystem>> =
