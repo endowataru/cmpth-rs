@@ -67,6 +67,12 @@ pub trait WorkerRunQueue<T: Send>: Send + Sync + 'static {
 
     /// A cloneable handle other workers steal through.
     fn stealer(&self) -> Self::Stealer;
+
+    /// About how many items are queued (owner side; may be slow, called
+    /// rarely).  Default: unknown, 0.
+    fn len_hint(&self) -> usize {
+        0
+    }
 }
 
 pub trait RunQueueStealer<T: Send>: Clone + Send + Sync + 'static {

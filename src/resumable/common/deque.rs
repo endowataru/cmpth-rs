@@ -110,6 +110,10 @@ impl<T: Send + 'static> WorkerRunQueue<T> for HybridRunQueue<T> {
     fn stealer(&self) -> Self::Stealer {
         HybridStealer { main: self.main_stealer.clone(), deferred: Arc::clone(&self.deferred) }
     }
+
+    fn len_hint(&self) -> usize {
+        unsafe { &*self.main.get() }.len() + self.deferred.q.lock().len()
+    }
 }
 
 /// Cloneable stealer handle for [`HybridRunQueue`]. Holds an `Arc`-shared
@@ -184,6 +188,10 @@ impl<T: Send + 'static> WorkerRunQueue<T> for SpinRunQueue<T> {
 
     fn stealer(&self) -> Self::Stealer {
         SpinStealer { q: Arc::clone(&self.q) }
+    }
+
+    fn len_hint(&self) -> usize {
+        self.q.lock().len()
     }
 }
 

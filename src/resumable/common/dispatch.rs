@@ -4,7 +4,7 @@ use crate::resumable::common::deque::Steal;
 
 pub use crate::traits::component::dispatch::{DispatchPolicy, Site, TaskSources};
 
-/// The standard order:
+/// The standard order, after the pinned tasks at every site:
 ///
 /// * [`Site::Loop`] and [`Site::Wait`]: own queue, then a steal round, then
 ///   the external queue;
@@ -22,6 +22,9 @@ impl DispatchPolicy for StandardDispatch {
     fn next<Q: TaskSources>(_state: &(), q: &Q, site: Site) -> Steal<Q::Item> {
         match site {
             Site::Loop | Site::Wait => {
+                if let Some(c) = q.pinned() {
+                    return Steal::Success(c);
+                }
                 if let Some(c) = q.local() {
                     return Steal::Success(c);
                 }
@@ -35,6 +38,9 @@ impl DispatchPolicy for StandardDispatch {
                 s
             }
             Site::Switch => {
+                if let Some(c) = q.pinned() {
+                    return Steal::Success(c);
+                }
                 if let Some(c) = q.external() {
                     return Steal::Success(c);
                 }

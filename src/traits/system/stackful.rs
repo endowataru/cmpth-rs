@@ -16,6 +16,15 @@ pub trait SpawnableStackfulTaskSystem: TaskSystem {
 
     /// Yield the current thread/ULT so other tasks can run.
     fn yield_now();
+
+    /// Like [`yield_now`](Self::yield_now), but the caller resumes on the
+    /// same OS thread, after the work queued at this moment and before
+    /// anything else: for a task preempted at a point that may hold
+    /// thread-specific state (see `cmpth::preempt`).  Default: `yield_now`.
+    #[inline]
+    fn yield_pinned() {
+        Self::yield_now()
+    }
 }
 
 /// Common interface for join handles returned by [`SpawnableStackfulTaskSystem::spawn`].
