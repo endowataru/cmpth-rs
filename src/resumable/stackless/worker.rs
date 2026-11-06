@@ -109,9 +109,9 @@ pub(crate) fn run_async_poll<S>(
                     let token = unsafe { SuspendedTaskToken::from_raw(desc) };
                     if yield_requested {
                         // Fair yield: behind whatever this worker already
-                        // had queued, not ahead of it -- see
-                        // `StacklessTaskSystem::yield_now`.
-                        wk.defer(token.into());
+                        // had queued, not ahead of it (or where the yield
+                        // policy says) -- see `StacklessTaskSystem::yield_now`.
+                        wk.requeue_yield(token.into());
                     } else {
                         wk.push(token.into());
                     }

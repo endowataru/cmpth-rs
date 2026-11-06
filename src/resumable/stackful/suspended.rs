@@ -89,6 +89,19 @@ impl<T: StackfulOnlyResumableCore> StackfulResumable<T::StackfulWorkerSystem> fo
 where
     T::StackfulWorkerSystem: StackfulSchedulerSystem,
 {
+    #[inline]
+    fn consume_budget() {
+        if <<T::StackfulWorkerSystem as WorkerSystem>::Yield as crate::traits::component::yield_policy::YieldPolicy<
+            <T::StackfulWorkerSystem as WorkerSystem>::SuspendedToken,
+        >>::BUDGET
+            != 0
+        {
+            if let Some(wk) = <T::StackfulWorkerSystem as WorkerSystem>::Worker::current() {
+                wk.consume_budget();
+            }
+        }
+    }
+
     fn wait_with<F: FnOnce()>(&self, f: F) {
         type D<T> = <<T as StackfulOnlyResumableCore>::StackfulWorkerSystem as PoolSystem>::Desc;
         let slot = self.cont() as *const AtomicSlot<SuspendedTaskToken<D<Self>>>;

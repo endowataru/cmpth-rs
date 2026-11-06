@@ -51,6 +51,7 @@ use crate::traits::{TlsSlot, WorkerTlsAnchor};
 ///     type Dispatch = cmpth::StandardDispatch;
 ///     type Duties = cmpth::duty::GlobalDuties;
 ///     type Observe = cmpth::NoObserver;
+///     type Yield = cmpth::LocalYield;
 ///     type ExternalQueue = cmpth::StealPathQueue<cmpth::DualTaskDesc<cmpth::UltDualSystem<Self>>>;
 ///     type PostChoice = cmpth::DefaultPostChoice;
 /// }
@@ -95,6 +96,12 @@ pub trait UltDualIdentity: WorkerTlsAnchor + Sized + Send + Sync + 'static {
 
     /// Scheduler observer; see [`crate::WorkerSystem::Observe`].
     type Observe: crate::resumable::common::observe::SchedObserver;
+
+    /// Where a yielding task waits, and the turn budget; see
+    /// [`crate::WorkerSystem::Yield`].
+    type Yield: crate::traits::component::yield_policy::YieldPolicy<<UltDualSystem<Self> as WorkerSystem>::SuspendedToken>
+    where
+        UltDualSystem<Self>: WorkerSystem;
 
     /// Where tasks woken from outside the pool wait; see
     /// [`PoolSystem::ExternalQueue`].
@@ -146,6 +153,7 @@ impl<M: UltDualIdentity> WorkerSystem for UltDualSystem<M> {
     type Dispatch = <M as UltDualIdentity>::Dispatch;
     type Duties = <M as UltDualIdentity>::Duties;
     type Observe = <M as UltDualIdentity>::Observe;
+    type Yield = <M as UltDualIdentity>::Yield;
 
     fn worker_tls() -> &'static <M::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         TlsSlot::from_anchor(<M as WorkerTlsAnchor>::anchor())

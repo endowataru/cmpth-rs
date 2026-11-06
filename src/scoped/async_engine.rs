@@ -370,6 +370,7 @@ mod tests {
         type Dispatch = crate::resumable::common::dispatch::StandardDispatch;
         type Duties = crate::duty::GlobalDuties;
         type Observe = crate::resumable::common::observe::NoObserver;
+        type Yield = crate::resumable::common::yield_policy::LocalYield;
     }
     struct ParkMarker;
     impl ScopedIdentity for ParkMarker {
@@ -378,6 +379,7 @@ mod tests {
         type Dispatch = crate::resumable::common::dispatch::StandardDispatch;
         type Duties = crate::duty::GlobalDuties;
         type Observe = crate::resumable::common::observe::NoObserver;
+        type Yield = crate::resumable::common::yield_policy::LocalYield;
     }
 
     // Recursive `async fn`s can't pass their own opaque return type as a

@@ -209,6 +209,8 @@ where
             match self.consumer().execute(req, &mut cx) {
                 Poll::Ready(v) => {
                     self.hold(me, None);
+                    // Found the delegator free: a turn-taking point.
+                    S::SuspendedThread::consume_budget();
                     return v;
                 }
                 Poll::Pending => self.hold(me, Some(slot)),

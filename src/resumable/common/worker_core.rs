@@ -15,6 +15,7 @@ use crate::resumable::common::external_queue::WakeHook;
 use crate::resumable::common::dispatch::{DispatchPolicy, Site, TaskSources};
 use crate::resumable::common::idle::{IdleCx, IdlePolicy};
 use crate::resumable::common::observe::{SchedObserver, StealOutcome};
+use crate::traits::component::yield_policy::YieldPolicy;
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::steal::StealPolicy;
 use crate::resumable::common::system::{RunnableItem, WorkerSystem};
@@ -32,6 +33,7 @@ pub struct PoolCore<S: WorkerSystem> {
     pub(crate) stealers: Box<[<S::RunQueue as WorkerRunQueue<S::SuspendedToken>>::Stealer]>,
     pub(crate) finished: AtomicBool,
     pub(crate) idle: S::Idle,
+    pub(crate) yields: S::Yield,
 }
 
 impl<S: WorkerSystem> PoolCore<S> {
@@ -42,7 +44,7 @@ impl<S: WorkerSystem> PoolCore<S> {
         let stealers: Box<[_]> = cores.map(|c| c.deque.stealer()).collect();
         let idle = S::Idle::default();
         idle.set_workers(stealers.len());
-        PoolCore { stealers, finished: AtomicBool::new(false), idle }
+        PoolCore { stealers, finished: AtomicBool::new(false), idle, yields: S::Yield::default() }
     }
 
     /// Hook for an external queue to notify this pool's idle policy.
@@ -69,6 +71,8 @@ pub struct WorkerCore<S: WorkerSystem> {
     pub(crate) deque: S::RunQueue,
     steal: <S::Steal as StealPolicy>::State,
     dispatch: <S::Dispatch as DispatchPolicy>::State,
+    yield_tick: Cell<u32>,
+    budget_used: Cell<u32>,
     pool: Cell<*const PoolCore<S>>,
 }
 
@@ -85,6 +89,8 @@ impl<S: WorkerSystem> WorkerCore<S> {
             deque: S::RunQueue::default(),
             steal: <S::Steal as StealPolicy>::new_state(num),
             dispatch: Default::default(),
+            yield_tick: Cell::new((num as u32).wrapping_mul(0x9E37_79B9) | 1),
+            budget_used: Cell::new(0),
             pool: Cell::new(std::ptr::null()),
         }
     }
@@ -119,6 +125,45 @@ impl<S: WorkerSystem> LocalQueue<S> for WorkerCore<S> {
     #[inline]
     fn try_pop(&self) -> Option<S::SuspendedToken> {
         self.deque.try_pop()
+    }
+
+    #[inline]
+    fn requeue_yield(&self, c: S::SuspendedToken) {
+        if <S::Yield as YieldPolicy<S::SuspendedToken>>::LOCAL {
+            return self.defer(c);
+        }
+        // xorshift32: a count would alias with the number of tasks queued
+        // here (with two tasks and an even period the same one always
+        // leaves, and the other never does).
+        let mut tick = self.yield_tick.get();
+        tick ^= tick << 13;
+        tick ^= tick >> 17;
+        tick ^= tick << 5;
+        self.yield_tick.set(tick);
+        match self.pool().yields.requeue(tick, c) {
+            Some(c) => self.defer(c),
+            None => self.pool().idle.new_work(),
+        }
+    }
+
+    #[inline]
+    fn take_yielded(&self) -> Option<S::SuspendedToken> {
+        self.pool().yields.take()
+    }
+
+    #[inline]
+    fn spend_budget(&self) -> bool {
+        let budget = <S::Yield as YieldPolicy<S::SuspendedToken>>::BUDGET;
+        if budget == 0 {
+            return false;
+        }
+        let used = self.budget_used.get() + 1;
+        if used < budget {
+            self.budget_used.set(used);
+            return false;
+        }
+        self.budget_used.set(0);
+        true
     }
 
     fn try_steal(&self) -> Steal<S::SuspendedToken> {
@@ -180,6 +225,11 @@ impl<S: WorkerSystem, X: Fn() -> Option<S::SuspendedToken>> TaskSources for Sour
     #[inline(always)]
     fn steal(&self) -> Steal<S::SuspendedToken> {
         self.wk.try_steal()
+    }
+
+    #[inline(always)]
+    fn yielded(&self) -> Option<S::SuspendedToken> {
+        self.wk.take_yielded()
     }
 
     #[inline(always)]

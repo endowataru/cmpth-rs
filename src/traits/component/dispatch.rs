@@ -39,6 +39,11 @@ pub trait TaskSources {
     /// [`StealPolicy`](crate::StealPolicy).
     fn steal(&self) -> Steal<Self::Item>;
 
+    /// Tasks that yielded and wait outside the worker's own queue (the
+    /// pool's [`YieldPolicy`](super::yield_policy::YieldPolicy)); always
+    /// `None` with `LocalYield`.
+    fn yielded(&self) -> Option<Self::Item>;
+
     /// Tasks woken from outside the pool (`ExternalQueue`); always `None`
     /// on a system without one.
     fn external(&self) -> Option<Self::Item>;
