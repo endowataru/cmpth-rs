@@ -15,6 +15,7 @@ use crate::resumable::common::external_queue::WakeHook;
 use crate::resumable::common::dispatch::{DispatchPolicy, Site, TaskSources};
 use crate::resumable::common::idle::{IdleCx, IdlePolicy};
 use crate::resumable::common::observe::{SchedObserver, StealOutcome};
+use crate::resumable::common::qos::{QosPolicy, QosSlot};
 use crate::resumable::common::lookup::CurrentLookup;
 use crate::resumable::common::steal::StealPolicy;
 use crate::resumable::common::system::{RunnableItem, WorkerSystem};
@@ -32,6 +33,7 @@ pub struct PoolCore<S: WorkerSystem> {
     pub(crate) stealers: Box<[<S::RunQueue as WorkerRunQueue<S::SuspendedToken>>::Stealer]>,
     pub(crate) finished: AtomicBool,
     pub(crate) idle: S::Idle,
+    pub(crate) qos: S::Qos,
 }
 
 impl<S: WorkerSystem> PoolCore<S> {
@@ -42,7 +44,7 @@ impl<S: WorkerSystem> PoolCore<S> {
         let stealers: Box<[_]> = cores.map(|c| c.deque.stealer()).collect();
         let idle = S::Idle::default();
         idle.set_workers(stealers.len());
-        PoolCore { stealers, finished: AtomicBool::new(false), idle }
+        PoolCore { stealers, finished: AtomicBool::new(false), idle, qos: S::Qos::default() }
     }
 
     /// Hook for an external queue to notify this pool's idle policy.
@@ -69,11 +71,12 @@ pub struct WorkerCore<S: WorkerSystem> {
     pub(crate) deque: S::RunQueue,
     steal: <S::Steal as StealPolicy>::State,
     dispatch: <S::Dispatch as DispatchPolicy>::State,
+    qos: QosSlot,
     pool: Cell<*const PoolCore<S>>,
 }
 
-// SAFETY: `Cell` fields, `steal` and `dispatch` are only ever touched by the
-// owning base thread (a worker struct is pinned to one thread for its lifetime); `deque`
+// SAFETY: `Cell` fields, `steal`, `dispatch` and `qos` are only ever touched
+// by the owning base thread (a worker struct is pinned to one thread for its lifetime); `deque`
 // is internally synchronized; `pool` is read-only after `bind`.
 unsafe impl<S: WorkerSystem> Send for WorkerCore<S> {}
 unsafe impl<S: WorkerSystem> Sync for WorkerCore<S> {}
@@ -85,6 +88,7 @@ impl<S: WorkerSystem> WorkerCore<S> {
             deque: S::RunQueue::default(),
             steal: <S::Steal as StealPolicy>::new_state(num),
             dispatch: Default::default(),
+            qos: QosSlot::default(),
             pool: Cell::new(std::ptr::null()),
         }
     }
@@ -119,6 +123,11 @@ impl<S: WorkerSystem> LocalQueue<S> for WorkerCore<S> {
     #[inline]
     fn try_pop(&self) -> Option<S::SuspendedToken> {
         self.deque.try_pop()
+    }
+
+    #[inline]
+    fn qos_slot(&self) -> &QosSlot {
+        &self.qos
     }
 
     fn try_steal(&self) -> Steal<S::SuspendedToken> {
@@ -252,16 +261,37 @@ where
 {
     let me = wk.num();
     let mut ep = <S::Idle as IdlePolicy>::Episode::default();
+    let qos = wk.qos_slot();
+    if !qos.started.replace(true) {
+        pool.qos.start(me, pool.stealers.len(), &qos.state);
+    }
+    // Consecutive empty rounds, for the QoS policy's `idle`.
+    let mut empty = 0u32;
     while !pool.finished.load(Ordering::Acquire) {
         match next_task::<S, _>(wk, &external, Site::Loop) {
             Steal::Success(c) => {
                 pool.idle.work_found(&mut ep, &IdleCx::<S>::new(me, false, &pool.finished));
+                if <S::Qos as QosPolicy>::IDLE_ROUNDS != 0 {
+                    if empty >= <S::Qos as QosPolicy>::IDLE_ROUNDS {
+                        pool.qos.busy(&qos.state);
+                    }
+                    empty = 0;
+                }
                 c.run_on(wk);
             }
             s => {
                 <S::Observe as SchedObserver>::idle(me);
+                if <S::Qos as QosPolicy>::IDLE_ROUNDS != 0 {
+                    empty = empty.saturating_add(1);
+                    if empty == <S::Qos as QosPolicy>::IDLE_ROUNDS {
+                        pool.qos.idle(&qos.state);
+                    }
+                }
                 pool.idle.no_work_found(&mut ep, &IdleCx::<S>::new(me, matches!(s, Steal::Retry), &pool.finished));
             }
         }
+    }
+    if qos.started.replace(false) {
+        pool.qos.stop(&qos.state);
     }
 }

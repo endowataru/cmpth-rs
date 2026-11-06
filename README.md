@@ -208,6 +208,7 @@ impl cmpth::UltIdentity for MySystem {
     type Dispatch = cmpth::StandardDispatch;               // order of own queue / steal / external queue
     type Duties = cmpth::duty::GlobalDuties;               // whose periodic polls idle workers run
     type Observe = cmpth::NoObserver;                      // scheduler event hooks
+    type Qos = cmpth::OsQos;                               // QoS hints to the OS (macOS)
     type ExternalQueue = cmpth::StealPathQueue<cmpth::StackfulOnlyTaskDesc<Self>>; // tasks woken off the pool
     type PostChoice = cmpth::DefaultPostChoice;            // how `post` picks a delegator
 }

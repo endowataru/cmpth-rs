@@ -138,6 +138,11 @@ pub trait WorkerSystem: Sized + Send + Sync + 'static {
     /// Receives the scheduler's events.
     type Observe: SchedObserver;
 
+    /// What the workers tell the OS about the urgency of their work. Use
+    /// [`OsQos`](crate::resumable::common::qos::OsQos) (no hints) unless
+    /// the pool should trade speed for energy.
+    type Qos: crate::traits::component::qos::QosPolicy;
+
     /// The concrete worker type driving this scheduler. Every system today
     /// sets this to [`UltWorker<Self>`](crate::resumable::common::worker::UltWorker) — kept as its own associated type
     /// (rather than [`worker_tls`](Self::worker_tls)/[`CurrentLookup`]

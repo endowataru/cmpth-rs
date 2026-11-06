@@ -2,6 +2,7 @@ pub mod delegation;
 pub mod idle;
 pub mod dispatch;
 pub mod observe;
+pub mod qos;
 pub mod run_queue;
 pub mod stackful;
 pub mod stackless;
