@@ -206,7 +206,7 @@ impl cmpth::UltIdentity for MySystem {
     type Idle = cmpth::SpinIdle;                           // what idle workers do (spin / park)
     type Steal = cmpth::RandomSweepSteal;                  // which victims a thief tries
     type Dispatch = cmpth::StandardDispatch;               // order of own queue / steal / external queue
-    type Duties = cmpth::duty::GlobalDuties;               // whose periodic polls idle workers run
+    type Duties = cmpth::GlobalDuties;               // whose periodic polls idle workers run
     type Observe = cmpth::NoObserver;                      // scheduler event hooks
     type Qos = cmpth::OsQos;                               // QoS hints to the OS (macOS)
     type Placement = cmpth::StandardPlacement;             // spawn order; woken tasks to front or back

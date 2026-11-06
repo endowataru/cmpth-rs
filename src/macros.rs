@@ -76,7 +76,7 @@ macro_rules! worker_tls_anchor {
 /// | `Idle` | [`SpinIdle`](crate::SpinIdle) | [`SpinIdle`](crate::SpinIdle) | [`SpinIdle`](crate::SpinIdle) | [`SpinIdle`](crate::SpinIdle) |
 /// | `Steal` | [`RandomSweepSteal`](crate::RandomSweepSteal) | [`RandomSweepSteal`](crate::RandomSweepSteal) | [`RandomSweepSteal`](crate::RandomSweepSteal) | [`RandomSweepSteal`](crate::RandomSweepSteal) |
 /// | `Dispatch` | [`StandardDispatch`](crate::StandardDispatch) | [`StandardDispatch`](crate::StandardDispatch) | [`StandardDispatch`](crate::StandardDispatch) | [`StandardDispatch`](crate::StandardDispatch) |
-/// | `Duties` | [`GlobalDuties`](crate::duty::GlobalDuties) | [`GlobalDuties`](crate::duty::GlobalDuties) | [`GlobalDuties`](crate::duty::GlobalDuties) | [`GlobalDuties`](crate::duty::GlobalDuties) |
+/// | `Duties` | [`GlobalDuties`](crate::resumable::common::duty::GlobalDuties) | [`GlobalDuties`](crate::resumable::common::duty::GlobalDuties) | [`GlobalDuties`](crate::resumable::common::duty::GlobalDuties) | [`GlobalDuties`](crate::resumable::common::duty::GlobalDuties) |
 /// | `Observe` | [`NoObserver`](crate::NoObserver) | [`NoObserver`](crate::NoObserver) | [`NoObserver`](crate::NoObserver) | [`NoObserver`](crate::NoObserver) |
 /// | `Qos` | [`OsQos`](crate::OsQos) | [`OsQos`](crate::OsQos) | [`OsQos`](crate::OsQos) | [`OsQos`](crate::OsQos) |
 /// | `Placement` | [`StandardPlacement`](crate::StandardPlacement) | [`StandardPlacement`](crate::StandardPlacement) | [`StandardPlacement`](crate::StandardPlacement) | [`StandardPlacement`](crate::StandardPlacement) |
@@ -137,7 +137,7 @@ macro_rules! impl_with_defaults {
             $crate::impl_with_defaults!(@or Idle [$($b)*] type Idle = $crate::SpinIdle;);
             $crate::impl_with_defaults!(@or Steal [$($b)*] type Steal = $crate::RandomSweepSteal;);
             $crate::impl_with_defaults!(@or Dispatch [$($b)*] type Dispatch = $crate::StandardDispatch;);
-            $crate::impl_with_defaults!(@or Duties [$($b)*] type Duties = $crate::duty::GlobalDuties;);
+            $crate::impl_with_defaults!(@or Duties [$($b)*] type Duties = $crate::resumable::common::duty::GlobalDuties;);
             $crate::impl_with_defaults!(@or Observe [$($b)*] type Observe = $crate::NoObserver;);
             $crate::impl_with_defaults!(@or Qos [$($b)*] type Qos = $crate::OsQos;);
             $crate::impl_with_defaults!(@or Placement [$($b)*] type Placement = $crate::StandardPlacement;);
@@ -158,7 +158,7 @@ macro_rules! impl_with_defaults {
             $crate::impl_with_defaults!(@or Idle [$($b)*] type Idle = $crate::SpinIdle;);
             $crate::impl_with_defaults!(@or Steal [$($b)*] type Steal = $crate::RandomSweepSteal;);
             $crate::impl_with_defaults!(@or Dispatch [$($b)*] type Dispatch = $crate::StandardDispatch;);
-            $crate::impl_with_defaults!(@or Duties [$($b)*] type Duties = $crate::duty::GlobalDuties;);
+            $crate::impl_with_defaults!(@or Duties [$($b)*] type Duties = $crate::resumable::common::duty::GlobalDuties;);
             $crate::impl_with_defaults!(@or Observe [$($b)*] type Observe = $crate::NoObserver;);
             $crate::impl_with_defaults!(@or Qos [$($b)*] type Qos = $crate::OsQos;);
             $crate::impl_with_defaults!(@or Placement [$($b)*] type Placement = $crate::StandardPlacement;);
@@ -178,7 +178,7 @@ macro_rules! impl_with_defaults {
             $crate::impl_with_defaults!(@or Idle [$($b)*] type Idle = $crate::SpinIdle;);
             $crate::impl_with_defaults!(@or Steal [$($b)*] type Steal = $crate::RandomSweepSteal;);
             $crate::impl_with_defaults!(@or Dispatch [$($b)*] type Dispatch = $crate::StandardDispatch;);
-            $crate::impl_with_defaults!(@or Duties [$($b)*] type Duties = $crate::duty::GlobalDuties;);
+            $crate::impl_with_defaults!(@or Duties [$($b)*] type Duties = $crate::resumable::common::duty::GlobalDuties;);
             $crate::impl_with_defaults!(@or Observe [$($b)*] type Observe = $crate::NoObserver;);
             $crate::impl_with_defaults!(@or Qos [$($b)*] type Qos = $crate::OsQos;);
             $crate::impl_with_defaults!(@or Placement [$($b)*] type Placement = $crate::StandardPlacement;);
@@ -193,7 +193,7 @@ macro_rules! impl_with_defaults {
             $crate::impl_with_defaults!(@or Idle [$($b)*] type Idle = $crate::SpinIdle;);
             $crate::impl_with_defaults!(@or Steal [$($b)*] type Steal = $crate::RandomSweepSteal;);
             $crate::impl_with_defaults!(@or Dispatch [$($b)*] type Dispatch = $crate::StandardDispatch;);
-            $crate::impl_with_defaults!(@or Duties [$($b)*] type Duties = $crate::duty::GlobalDuties;);
+            $crate::impl_with_defaults!(@or Duties [$($b)*] type Duties = $crate::resumable::common::duty::GlobalDuties;);
             $crate::impl_with_defaults!(@or Observe [$($b)*] type Observe = $crate::NoObserver;);
             $crate::impl_with_defaults!(@or Qos [$($b)*] type Qos = $crate::OsQos;);
             $crate::impl_with_defaults!(@or Placement [$($b)*] type Placement = $crate::StandardPlacement;);

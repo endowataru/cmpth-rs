@@ -8,8 +8,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use cmpth::duty::{Duty, DutyPlace};
-use cmpth::{BlockOnSystem, ParkDualTaskSystem, SpawnableStackfulTaskSystem, StackfulBuilder, StackfulInitSystem};
+use cmpth::{
+    BlockOnSystem, DutyLike, DutyPlace, DutySystem, ParkDualTaskSystem, SpawnableStackfulTaskSystem, StackfulBuilder,
+    StackfulInitSystem,
+};
 
 #[test]
 fn duties() {
@@ -17,7 +19,7 @@ fn duties() {
     // (Bounds are loose: on a loaded machine timers fire late.)
     let n = Arc::new(AtomicU64::new(0));
     let n2 = Arc::clone(&n);
-    let d = Duty::new(Duration::from_micros(200), Duration::from_micros(200), DutyPlace::Anywhere, move || {
+    let d = ParkDualTaskSystem::duty(Duration::from_micros(200), Duration::from_micros(200), DutyPlace::Anywhere, move || {
         n2.fetch_add(1, Ordering::Relaxed);
         true
     });
@@ -45,7 +47,7 @@ fn duties() {
     // Nothing to do: the period backs off to its maximum.
     let m = Arc::new(AtomicU64::new(0));
     let m2 = Arc::clone(&m);
-    let d = Duty::new(Duration::from_micros(100), Duration::from_millis(10), DutyPlace::Keeper, move || {
+    let d = ParkDualTaskSystem::duty(Duration::from_micros(100), Duration::from_millis(10), DutyPlace::Keeper, move || {
         m2.fetch_add(1, Ordering::Relaxed);
         false
     });
@@ -59,7 +61,7 @@ fn duties() {
     // On demand: never polled without waiters, every wait period with one.
     let m = Arc::new(AtomicU64::new(0));
     let m2 = Arc::clone(&m);
-    let d = Duty::on_demand(Duration::from_micros(200), DutyPlace::Anywhere, move || {
+    let d = ParkDualTaskSystem::on_demand(Duration::from_micros(200), DutyPlace::Anywhere, move || {
         m2.fetch_add(1, Ordering::Relaxed);
         false
     });
@@ -95,7 +97,7 @@ fn duties() {
             .map(|_| {
                 ParkDualTaskSystem::spawn(|| {
                     let t = Instant::now();
-                    ParkDualTaskSystem::block_on(cmpth::duty::sleep(Duration::from_millis(2)));
+                    ParkDualTaskSystem::block_on(ParkDualTaskSystem::sleep(Duration::from_millis(2)));
                     t.elapsed()
                 })
             })
@@ -112,11 +114,11 @@ fn duties() {
     // role and keeps the duty's due times.  (How many of the polls it keeps
     // depends on how late its timed wake-ups are: when one is over 1 ms
     // late, as on a loaded machine, the keeper takes over.)
-    let d = Arc::new(Duty::on_demand(Duration::from_micros(200), DutyPlace::Anywhere, || false));
+    let d = Arc::new(ParkDualTaskSystem::on_demand(Duration::from_micros(200), DutyPlace::Anywhere, || false));
     let d2 = Arc::clone(&d);
     ParkDualTaskSystem::builder().workers(2).run(move || {
         let _w = d2.waiter();
-        ParkDualTaskSystem::block_on(cmpth::duty::sleep(Duration::from_millis(50)));
+        ParkDualTaskSystem::block_on(ParkDualTaskSystem::sleep(Duration::from_millis(50)));
     });
     let st = d.stats();
     assert!(st.worker_polls > 0 && st.worker_polls + st.keeper_polls > 25, "{st:?}");

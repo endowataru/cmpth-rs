@@ -295,7 +295,7 @@ impl<
 ///     type Idle = cmpth::SpinIdle;
 ///     type Steal = cmpth::RandomSweepSteal;
 ///     type Dispatch = cmpth::StandardDispatch;
-///     type Duties = cmpth::duty::GlobalDuties;
+///     type Duties = cmpth::GlobalDuties;
 ///     type Observe = cmpth::NoObserver;
 ///     type Qos = cmpth::OsQos;
 ///     type Placement = cmpth::StandardPlacement;
@@ -355,7 +355,7 @@ pub trait UltIdentity: WorkerTlsAnchor + Sized + Send + Sync + 'static {
     type Dispatch: crate::resumable::common::dispatch::DispatchPolicy;
 
     /// Duties the idle workers run; see [`crate::WorkerSystem::Duties`].
-    type Duties: crate::duty::DutyDomain;
+    type Duties: crate::resumable::common::duty::DutyDomain;
 
     /// Scheduler observer; see [`crate::WorkerSystem::Observe`].
     type Observe: crate::resumable::common::observe::SchedObserver;
@@ -523,6 +523,13 @@ where
     <M as PoolSystem>::Desc: StackfulTaskDesc,
 {
     type PostChoice = <M as UltIdentity>::PostChoice;
+}
+
+impl<M: UltIdentity + StackfulSchedulerSystem> crate::traits::DutySystem for M
+where
+    <M as PoolSystem>::Desc: StackfulTaskDesc,
+{
+    type Duties = <M as UltIdentity>::Duties;
 }
 
 impl<M: UltIdentity + StackfulSchedulerSystem> NestableSystem for M

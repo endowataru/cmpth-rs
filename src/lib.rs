@@ -31,12 +31,8 @@ mod spin;
 pub mod interchange;
 pub mod resumable;
 pub mod scoped;
-pub mod duty;
-pub mod post;
-#[cfg(all(target_arch = "aarch64", any(target_os = "macos", target_os = "linux")))]
-pub mod preempt;
 
-pub use traits::{BarrierWaitResult, StackfulParking, BlockOnSystem, Context, ContextPolicy, CallCx, CallSlot, Completion, DelegationSystem, DelegatorConsumer, Delegator, DelegatorRun, DualBarrier, FavorPosting, FavorServing, FnConsumer, PostChoice, PostConfig, PostConsumer, PostDelegator, PostDelegatorOf, PostFavor, PostingSystem, Ready, Ticket, DualMutex, HandoffTaskDesc, JoinHandleLike, NestableSystem, Poller, Resumable, ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, StackfulBuilder, StackfulInitSystem, StackfulResumable, StackfulSyncSystem, StacklessBuilder, StacklessInitSystem, StacklessSyncSystem, SuspendableSystem, TaskDesc, TaskExitSink, TaskSystem, TlsAnchor, TlsSlot, SpawnableStackfulTaskSystem, Transfer, WakerTaskDesc, WorkerTlsAnchor};
+pub use traits::{BarrierWaitResult, StackfulParking, BlockOnSystem, Context, DutyLike, DutyOf, DutyPlace, DutyService, DutySystem, DutyToucherLike, DutyToucherOf, DutyWaiterOf, ContextPolicy, CallCx, CallSlot, Completion, DelegationSystem, DelegatorConsumer, Delegator, DelegatorRun, DualBarrier, FavorPosting, FavorServing, FnConsumer, PostChoice, PostConfig, PostConsumer, PostDelegator, PostDelegatorOf, PostFavor, PostingSystem, Ready, Ticket, DualMutex, HandoffTaskDesc, JoinHandleLike, NestableSystem, Poller, Resumable, ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, StackfulBuilder, StackfulInitSystem, StackfulResumable, StackfulSyncSystem, StacklessBuilder, StacklessInitSystem, StacklessSyncSystem, SuspendableSystem, TaskDesc, TaskExitSink, TaskSystem, TlsAnchor, TlsSlot, SpawnableStackfulTaskSystem, Transfer, WakerTaskDesc, WorkerTlsAnchor};
 pub use scoped::{DefaultScopedMarker, ScopedIdentity, ScopedSystem, ScopedTaskSystem};
 pub use os::{available_parallelism, OsBarrier, OsCondvar, OsMutex, OsPoller, OsSystem, OsTls};
 pub use resumable::stackful::context::{LeanFrameContext, NativeContext};
@@ -55,7 +51,8 @@ pub use resumable::common::steal::{RandomSteal, RandomSweepSteal, StealPolicy, S
 pub use resumable::common::dispatch::{DispatchPolicy, Site, StandardDispatch, TaskSources};
 pub use resumable::common::observe::{NoObserver, SchedObserver, StealOutcome};
 pub use resumable::common::idle::{IdleContext, IdleCx, IdleDuties};
-pub use resumable::common::worker_hooks::{WorkerHooks, NoHooks, PinWorkers};
+pub use resumable::common::duty::{DutyConfig, DutyDomain, DutyRegistry, GlobalDuties, NoDuties};
+pub use resumable::common::worker_hooks::{NoHooks, PinWorkers, WorkerHooks};
 pub use resumable::common::placement::{ParentFirst, ParentFirstWakeBack, PlacementPolicy, SpawnOrder, StandardPlacement, WakeBack, WakeTo};
 pub use resumable::common::qos::{BackgroundQos, DemoteIdleQos, OsQos, QosClass, QosPolicy, SplitQos};
 pub use resumable::stackless::lookup::InlineTlsCurrent;
@@ -73,7 +70,7 @@ pub use resumable::stackless::system::{StacklessSchedulerSystem, StacklessTaskSy
 pub use resumable::stackful::tls::UltTls;
 pub use resumable::common::worker::{LocalQueue, TaskPool, UltWorker, WorkerOps, current_worker};
 pub use resumable::stackful::worker::ContextSwitcher;
-pub use post::{DefaultPostChoice, QueuePostDelegator, SlotPostDelegator};
+pub use resumable::common::sync::post::{DefaultPostChoice, QueuePostDelegator, SlotPostDelegator};
 
 // ---------------------------------------------------------------------------
 // Default instantiations
