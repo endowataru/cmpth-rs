@@ -287,6 +287,7 @@ where
 ///     type Observe = cmpth::NoObserver;
 ///     type Qos = cmpth::OsQos;
 ///     type Placement = cmpth::StandardPlacement;
+///     type Hooks = cmpth::NoHooks;
 ///     type ExternalQueue = cmpth::StealPathQueue<cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>>;
 /// }
 ///
@@ -355,6 +356,9 @@ pub trait UltAsyncIdentity: crate::traits::WorkerTlsAnchor + Sized + Send + Sync
     /// [`crate::WorkerSystem::Placement`].
     type Placement: crate::traits::component::placement::PlacementPolicy;
 
+    /// Per-worker start/stop hooks; see [`crate::WorkerSystem::Hooks`].
+    type Hooks: crate::traits::component::worker_hooks::WorkerHooks;
+
     /// Where tasks woken from outside the pool wait; see
     /// [`PoolSystem::ExternalQueue`].
     type ExternalQueue: crate::resumable::common::external_queue::ExternalQueue<UltAsyncSystem<Self>>
@@ -407,6 +411,7 @@ impl<M: UltAsyncIdentity> WorkerSystem for UltAsyncSystem<M> {
     type Observe = <M as UltAsyncIdentity>::Observe;
     type Qos = <M as UltAsyncIdentity>::Qos;
     type Placement = <M as UltAsyncIdentity>::Placement;
+    type Hooks = <M as UltAsyncIdentity>::Hooks;
 
     fn worker_tls() -> &'static <M::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         crate::traits::TlsSlot::from_anchor(<M as crate::traits::WorkerTlsAnchor>::anchor())

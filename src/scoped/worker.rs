@@ -146,6 +146,7 @@ impl<M: ScopedIdentity> WorkerSystem for ScopedSystem<M> {
     type Observe = M::Observe;
     type Qos = M::Qos;
     type Placement = M::Placement;
+    type Hooks = M::Hooks;
     type Worker = ScopedWorker<M>;
 
     // Dead code for every `M`: nothing in `scoped` ever calls
