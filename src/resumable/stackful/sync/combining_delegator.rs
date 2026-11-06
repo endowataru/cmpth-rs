@@ -17,8 +17,15 @@
 //! until no deferred call is left.  Because no thread or ULT is
 //! spawned, it works the same for ULTs and for OS threads (as far as
 //! `S::SuspendedThread` parks both), and before any worker pool exists.
+//!
+//! The callers are served in the order they queue, but the holder serves
+//! everyone queued behind it before it returns, however long the queue
+//! keeps growing (a caller that holds the lock once was measured stuck for
+//! 0.66 s under a steady stream).  A nonzero `BOUND` caps that, as CCSynch
+//! does: after `BOUND` requests of others the holder hands the lock to the
+//! next queued caller, which runs its own request and carries on.
 
-use std::cell::UnsafeCell;
+use std::cell::{Cell, UnsafeCell};
 use std::mem::MaybeUninit;
 use std::pin::Pin;
 use std::ptr::null_mut;
@@ -37,6 +44,9 @@ struct Node<S: SuspendableSystem, C: DelegatorConsumer<S>> {
     next: AtomicPtr<Node<S, C>>,
     req: MaybeUninit<C::Request<'static>>,
     slot: CallSlot<S, C::Response>,
+    /// Set by a holder that handed the lock to this caller (past `BOUND`)
+    /// before waking it: its request has not run.
+    handed: Cell<bool>,
 }
 
 const LOCK: usize = 1;
@@ -44,22 +54,23 @@ const LOCK: usize = 1;
 impl<S: SuspendableSystem, C: DelegatorConsumer<S>> Node<S, C> {
     #[inline]
     fn new() -> Self {
-        Node { next: AtomicPtr::new(null_mut()), req: MaybeUninit::uninit(), slot: CallSlot::default() }
+        Node { next: AtomicPtr::new(null_mut()), req: MaybeUninit::uninit(), slot: CallSlot::default(), handed: Cell::new(false) }
     }
 }
 
-/// On its own cache line: every caller swaps `tail`.
+/// On its own cache line: every caller swaps `tail`.  `BOUND`: see the
+/// module docs (0, the default: no bound).
 #[repr(align(128))]
-pub struct CombiningDelegator<S: SuspendableSystem, C: DelegatorConsumer<S>> {
+pub struct CombiningDelegator<S: SuspendableSystem, C: DelegatorConsumer<S>, const BOUND: usize = 0> {
     tail: AtomicPtr<Node<S, C>>,
     consumer: UnsafeCell<C>,
 }
 
 // SAFETY: the consumer is only touched by the lock holder.
-unsafe impl<S: SuspendableSystem, C: DelegatorConsumer<S>> Send for CombiningDelegator<S, C> {}
-unsafe impl<S: SuspendableSystem, C: DelegatorConsumer<S>> Sync for CombiningDelegator<S, C> {}
+unsafe impl<S: SuspendableSystem, C: DelegatorConsumer<S>, const BOUND: usize> Send for CombiningDelegator<S, C, BOUND> {}
+unsafe impl<S: SuspendableSystem, C: DelegatorConsumer<S>, const BOUND: usize> Sync for CombiningDelegator<S, C, BOUND> {}
 
-impl<S, C> CombiningDelegator<S, C>
+impl<S, C, const BOUND: usize> CombiningDelegator<S, C, BOUND>
 where
     S: SuspendableSystem,
     S::SuspendedThread: StackfulResumable<S>,
@@ -77,7 +88,8 @@ where
 
     /// As the holder whose node is `me`: run the queued requests behind it
     /// until the queue is released (returns null) or handed to a
-    /// `with_lock` caller (returns its node).  `own` is the
+    /// `with_lock` caller or, past `BOUND`, to the next caller (returns its
+    /// node).  `own` is the
     /// holder's own deferred call, if any; the queue is not released before
     /// it completes, and the second result says whether it still has not.
     #[inline]
@@ -85,6 +97,7 @@ where
         let mut cur = me;
         // The caller to wake for `cur` (none for our own node).
         let mut cur_wake: Option<Ready<S>> = None;
+        let mut served = 0usize;
         loop {
             let con = self.consumer();
             if con.is_active() {
@@ -130,6 +143,13 @@ where
             }
             if next.addr() & LOCK != 0 {
                 return (next.map_addr(|a| a & !LOCK), own.is_some());
+            }
+            if BOUND != 0 {
+                if served == BOUND {
+                    unsafe { (*next).handed.set(true) };
+                    return (next, own.is_some());
+                }
+                served += 1;
             }
             let n = unsafe { &*next };
             let req = unsafe { n.req.assume_init_read() };
@@ -182,7 +202,7 @@ where
     }
 }
 
-impl<S, C> DelegatorTrait<S, C> for CombiningDelegator<S, C>
+impl<S, C, const BOUND: usize> DelegatorTrait<S, C> for CombiningDelegator<S, C, BOUND>
 where
     S: SuspendableSystem,
     S::SuspendedThread: StackfulResumable<S>,
@@ -202,8 +222,13 @@ where
             // request out before waking us.
             unsafe { (*me).req.as_mut_ptr().cast::<C::Request<'_>>().write(req.take().unwrap_unchecked()) };
         });
-        if !queued {
-            let req = unsafe { req.take().unwrap_unchecked() };
+        // Handed the lock past `BOUND`: our request is still in the node.
+        if !queued || (BOUND != 0 && unsafe { (*me).handed.get() }) {
+            let req = if queued {
+                unsafe { (*me).req.as_ptr().cast::<C::Request<'_>>().read() }
+            } else {
+                unsafe { req.take().unwrap_unchecked() }
+            };
             let slot = unsafe { &(*me).slot };
             let mut cx = slot.cx();
             match self.consumer().execute(req, &mut cx) {
