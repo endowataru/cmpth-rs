@@ -1,6 +1,6 @@
 //! Worker hooks: what a worker does on its own thread when it starts and
-//! when its pool stops — pin itself to a CPU, name or register its thread,
-//! set up per-thread state a library needs.
+//! when its pool stops — pin itself to a CPU, lower its QoS class, name or
+//! register its thread, set up per-thread state a library needs.
 //!
 //! `start` runs before the worker first looks for work and `stop` after it
 //! last did, both on the worker's thread.  Worker 0's thread is the

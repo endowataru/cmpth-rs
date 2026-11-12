@@ -56,6 +56,14 @@ cmpth::impl_with_defaults! {
     }
 }
 
+pub struct Background;
+cmpth::worker_tls_anchor!(Background);
+cmpth::impl_with_defaults! {
+    impl cmpth::UltDualIdentity for Background {
+        type Hooks = cmpth::BackgroundWorkers;
+    }
+}
+
 #[test]
 fn hooks_run_once_per_worker_on_its_thread() {
     type S = UltDualSystem<Hooked>;
@@ -71,6 +79,36 @@ fn hooks_run_once_per_worker_on_its_thread() {
 fn pinned_workers_run() {
     type S = UltDualSystem<Pinned>;
     conformance::stackful::<S>(4);
+}
+
+#[test]
+fn background_workers_run() {
+    type S = UltDualSystem<Background>;
+    conformance::stackful::<S>(4);
+}
+
+/// Tasks run at background QoS, and the caller's thread (worker 0) gets
+/// its class back.
+#[cfg(target_os = "macos")]
+#[test]
+fn background_workers_set_and_restore_qos() {
+    unsafe extern "C" {
+        fn pthread_get_qos_class_np(t: libc::pthread_t, qos: *mut u32, rel: *mut i32) -> i32;
+    }
+    fn qos() -> u32 {
+        let (mut q, mut r) = (0u32, 0i32);
+        unsafe { pthread_get_qos_class_np(libc::pthread_self(), &mut q, &mut r) };
+        q
+    }
+    const BACKGROUND: u32 = 0x09;
+
+    type S = UltDualSystem<Background>;
+    let before = qos();
+    let inside = <S as StackfulInitSystem>::builder().workers(2).run(qos);
+    assert_eq!(inside, BACKGROUND);
+    let after = qos();
+    // An unset class reads back as the default one once restored.
+    assert!(after == before || (before == 0 && after == 0x15), "{before:#x} -> {after:#x}");
 }
 
 /// A spinning pool and a parking pool, each on its own caller thread; a
