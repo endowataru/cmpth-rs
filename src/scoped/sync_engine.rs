@@ -35,14 +35,14 @@ use std::sync::Arc;
 use crate::resumable::common::worker::{LocalQueue, WorkerOps};
 use crate::resumable::common::worker_core::{try_run_one, wait_round};
 
-use super::system::{ScopedIdentity, ScopedSystem};
+use super::system::{ScopedConfig, ScopedSystem};
 use super::task::StackTask;
 use super::worker::{ScopedRegistry, ScopedWorker};
 
 /// Progress once (pop, else steal); shared by `parallel_call`'s
 /// help-while-waiting loop and shutdown drains.
 #[inline]
-fn try_execute_one<M: ScopedIdentity>(wk: &ScopedWorker<M>) -> bool {
+fn try_execute_one<M: ScopedConfig>(wk: &ScopedWorker<M>) -> bool {
     try_run_one::<ScopedSystem<M>>(wk)
 }
 
@@ -59,7 +59,7 @@ fn try_execute_one<M: ScopedIdentity>(wk: &ScopedWorker<M>) -> bool {
 /// possibly nested inside another call's `a`/`b`).
 pub(crate) fn parallel_call<M, Fa, Fb, Ra, Rb>(a: Fa, b: Fb) -> (Ra, Rb)
 where
-    M: ScopedIdentity,
+    M: ScopedConfig,
     Fa: FnOnce() -> Ra + Send,
     Fb: FnOnce() -> Rb + Send,
     Ra: Send,
@@ -131,12 +131,12 @@ where
 /// even though every field here (and the `init` function itself) stays
 /// crate-private; same opaque-struct shape as
 /// [`resumable::stackful::init::StackfulInit`](crate::resumable::stackful::init::StackfulInit).
-pub struct SyncInit<M: ScopedIdentity> {
+pub struct SyncInit<M: ScopedConfig> {
     registry: Arc<ScopedRegistry<M>>,
     handles: Vec<<crate::os::OsSystem as crate::traits::stackful::SpawnableStackfulTaskSystem>::JoinHandle<()>>,
 }
 
-pub(crate) fn init<M: ScopedIdentity>(num_workers: usize) -> SyncInit<M> {
+pub(crate) fn init<M: ScopedConfig>(num_workers: usize) -> SyncInit<M> {
     assert!(
         ScopedWorker::<M>::current().is_none(),
         "cmpth: nested scoped::init() of the same engine on one thread"
@@ -149,7 +149,7 @@ pub(crate) fn init<M: ScopedIdentity>(num_workers: usize) -> SyncInit<M> {
     SyncInit { registry, handles }
 }
 
-impl<M: ScopedIdentity> Drop for SyncInit<M> {
+impl<M: ScopedConfig> Drop for SyncInit<M> {
     fn drop(&mut self) {
         // No context switch happens anywhere in this engine (every
         // `parallel_call` branch either runs as an ordinary nested call or
@@ -169,7 +169,7 @@ impl<M: ScopedIdentity> Drop for SyncInit<M> {
 /// transitively `parallel_call`s) completes.
 pub(crate) fn run<M, F, R>(num_workers: usize, f: F) -> R
 where
-    M: ScopedIdentity,
+    M: ScopedConfig,
     F: FnOnce() -> R + Send,
     R: Send,
 {
@@ -196,7 +196,7 @@ mod tests {
     use crate::resumable::common::idle::{ParkIdle, SpinIdle};
 
     struct SpinMarker;
-    impl ScopedIdentity for SpinMarker {
+    impl ScopedConfig for SpinMarker {
         type Idle = SpinIdle;
         type Steal = crate::resumable::common::steal::RandomSweepSteal;
         type Dispatch = crate::resumable::common::dispatch::StandardDispatch;
@@ -205,7 +205,7 @@ mod tests {
         type Hooks = crate::resumable::common::worker_hooks::NoHooks;
     }
     struct ParkMarker;
-    impl ScopedIdentity for ParkMarker {
+    impl ScopedConfig for ParkMarker {
         type Idle = ParkIdle;
         type Steal = crate::resumable::common::steal::RandomSweepSteal;
         type Dispatch = crate::resumable::common::dispatch::StandardDispatch;
@@ -214,7 +214,7 @@ mod tests {
         type Hooks = crate::resumable::common::worker_hooks::NoHooks;
     }
 
-    fn fib<M: ScopedIdentity>(n: u64) -> u64 {
+    fn fib<M: ScopedConfig>(n: u64) -> u64 {
         if n <= 1 {
             return n;
         }
@@ -224,11 +224,11 @@ mod tests {
 
     /// Runs every test in this module against both `SpinIdle` and
     /// `ParkIdle` — the whole point of `ScopedSystem<M>` taking its
-    /// `Idle` from `M: ScopedIdentity` is that this engine works unchanged
+    /// `Idle` from `M: ScopedConfig` is that this engine works unchanged
     /// under either.
     #[test]
     fn fib_matches_sequential() {
-        fn go<M: ScopedIdentity>() {
+        fn go<M: ScopedConfig>() {
             for workers in [1, 2, 4] {
                 let r = run::<M, _, _>(workers, || fib::<M>(20));
                 assert_eq!(r, 6765, "workers={workers}");
@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn nested_join_many_levels() {
-        fn go<M: ScopedIdentity>() {
+        fn go<M: ScopedConfig>() {
             let r = run::<M, _, _>(2, || fib::<M>(24));
             assert_eq!(r, 46368);
         }
@@ -250,10 +250,10 @@ mod tests {
 
     #[test]
     fn borrows_non_static_data() {
-        fn go<M: ScopedIdentity>() {
+        fn go<M: ScopedConfig>() {
             let data = vec![1u64, 2, 3, 4, 5, 6, 7, 8];
             let sum = run::<M, _, _>(4, || {
-                fn rec<M: ScopedIdentity>(s: &[u64]) -> u64 {
+                fn rec<M: ScopedConfig>(s: &[u64]) -> u64 {
                     if s.len() <= 1 {
                         return s.first().copied().unwrap_or(0);
                     }

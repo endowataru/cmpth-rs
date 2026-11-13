@@ -52,7 +52,7 @@ impl SchedObserver for Counting {
 pub struct Observed;
 cmpth::worker_tls_anchor!(Observed);
 cmpth::impl_with_defaults! {
-    impl cmpth::UltDualIdentity for Observed {
+    impl cmpth::UltDualConfig for Observed {
         type Idle = cmpth::SearchIdle;
         type Observe = Counting;
     }
@@ -110,7 +110,7 @@ impl DispatchPolicy for StealOnSwitch {
 pub struct Dispatched;
 cmpth::worker_tls_anchor!(Dispatched);
 cmpth::impl_with_defaults! {
-    impl cmpth::UltIdentity for Dispatched {
+    impl cmpth::UltConfig for Dispatched {
         type Dispatch = StealOnSwitch;
     }
 }
@@ -136,7 +136,7 @@ impl DutyDomain for PrivateDuties {
 pub struct ServesPrivate;
 cmpth::worker_tls_anchor!(ServesPrivate);
 cmpth::impl_with_defaults! {
-    impl cmpth::UltIdentity for ServesPrivate {
+    impl cmpth::UltConfig for ServesPrivate {
         type Duties = PrivateDuties;
     }
 }
@@ -144,7 +144,7 @@ cmpth::impl_with_defaults! {
 pub struct ServesNone;
 cmpth::worker_tls_anchor!(ServesNone);
 cmpth::impl_with_defaults! {
-    impl cmpth::UltIdentity for ServesNone {
+    impl cmpth::UltConfig for ServesNone {
         type Duties = NoDuties;
     }
 }

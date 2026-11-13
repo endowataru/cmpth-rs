@@ -41,7 +41,7 @@ use std::task::{Context, Poll, Wake, Waker};
 use crate::resumable::common::worker::{LocalQueue, WorkerOps};
 use crate::resumable::common::worker_core::{try_run_one, wait_round};
 
-use super::system::{ScopedIdentity, ScopedSystem};
+use super::system::{ScopedConfig, ScopedSystem};
 use super::task::TaskRef;
 use super::worker::{ScopedRegistry, ScopedWorker};
 
@@ -116,7 +116,7 @@ enum Body<Fut> {
     Taken,
 }
 
-struct AsyncTask<M: ScopedIdentity, Fut: Future> {
+struct AsyncTask<M: ScopedConfig, Fut: Future> {
     body: Mutex<Body<Fut>>,
     result: Mutex<Option<Fut::Output>>,
     latch: AsyncLatch,
@@ -125,7 +125,7 @@ struct AsyncTask<M: ScopedIdentity, Fut: Future> {
 
 impl<M, Fut> AsyncTask<M, Fut>
 where
-    M: ScopedIdentity,
+    M: ScopedConfig,
     Fut: Future + Send + 'static,
     Fut::Output: Send + 'static,
 {
@@ -199,7 +199,7 @@ impl Wake for WakeFlag {
     }
 }
 
-fn drive<M: ScopedIdentity, Fut: Future + ?Sized>(mut fut: Pin<&mut Fut>) -> Fut::Output {
+fn drive<M: ScopedConfig, Fut: Future + ?Sized>(mut fut: Pin<&mut Fut>) -> Fut::Output {
     let wk = ScopedWorker::<M>::current().expect("cmpth: scoped::parallel_call (async) called outside run_async");
     let woken = Arc::new(WakeFlag(AtomicBool::new(true)));
     let waker = Waker::from(Arc::clone(&woken));
@@ -218,7 +218,7 @@ fn drive<M: ScopedIdentity, Fut: Future + ?Sized>(mut fut: Pin<&mut Fut>) -> Fut
 }
 
 #[inline]
-fn try_execute_one<M: ScopedIdentity>(wk: &ScopedWorker<M>) -> bool {
+fn try_execute_one<M: ScopedConfig>(wk: &ScopedWorker<M>) -> bool {
     try_run_one::<ScopedSystem<M>>(wk)
 }
 
@@ -234,7 +234,7 @@ enum State<Fa: Future> {
 
 /// Returned by [`parallel_call`]. See the module docs for the state
 /// machine this drives.
-pub(crate) struct ParallelInvoke<M: ScopedIdentity, Fa: Future, Fb: Future> {
+pub(crate) struct ParallelInvoke<M: ScopedConfig, Fa: Future, Fb: Future> {
     state: State<Fa>,
     task: Arc<AsyncTask<M, Fb>>,
     /// `task`'s `TaskRef::data`, as a plain integer once pushed — lets
@@ -247,7 +247,7 @@ pub(crate) struct ParallelInvoke<M: ScopedIdentity, Fa: Future, Fb: Future> {
 
 impl<M, Fa, Fb> Future for ParallelInvoke<M, Fa, Fb>
 where
-    M: ScopedIdentity,
+    M: ScopedConfig,
     Fa: Future + Send + 'static,
     Fb: Future + Send + 'static,
     Fa::Output: Send + 'static,
@@ -315,7 +315,7 @@ where
 /// involved on this side.
 pub(crate) fn parallel_call<M, Fa, Fb, Ra, Rb, MkA, MkB>(mk_a: MkA, mk_b: MkB) -> ParallelInvoke<M, Fa, Fb>
 where
-    M: ScopedIdentity,
+    M: ScopedConfig,
     MkA: FnOnce() -> Fa,
     MkB: FnOnce() -> Fb,
     Fa: Future<Output = Ra> + Send + 'static,
@@ -342,7 +342,7 @@ where
 #[allow(dead_code)]
 pub(crate) fn run_async<M, F>(num_workers: usize, root: F)
 where
-    M: ScopedIdentity,
+    M: ScopedConfig,
     F: Future<Output = ()> + Send + 'static,
 {
     let registry = ScopedRegistry::<M>::new(num_workers);
@@ -364,7 +364,7 @@ mod tests {
     use std::sync::atomic::AtomicU64;
 
     struct SpinMarker;
-    impl ScopedIdentity for SpinMarker {
+    impl ScopedConfig for SpinMarker {
         type Idle = SpinIdle;
         type Steal = crate::resumable::common::steal::RandomSweepSteal;
         type Dispatch = crate::resumable::common::dispatch::StandardDispatch;
@@ -373,7 +373,7 @@ mod tests {
         type Hooks = crate::resumable::common::worker_hooks::NoHooks;
     }
     struct ParkMarker;
-    impl ScopedIdentity for ParkMarker {
+    impl ScopedConfig for ParkMarker {
         type Idle = ParkIdle;
         type Steal = crate::resumable::common::steal::RandomSweepSteal;
         type Dispatch = crate::resumable::common::dispatch::StandardDispatch;
@@ -387,7 +387,7 @@ mod tests {
     // that taking thunks (`parallel_call(mk_a, mk_b)`, not
     // `parallel_call(a, b)`) really does dodge it, not just a claim in a
     // doc comment.
-    fn fib<M: ScopedIdentity>(n: u64) -> impl Future<Output = u64> + Send {
+    fn fib<M: ScopedConfig>(n: u64) -> impl Future<Output = u64> + Send {
         async move {
             if n <= 1 {
                 return n;
@@ -399,11 +399,11 @@ mod tests {
 
     /// Runs every test in this module against both `SpinIdle` and
     /// `ParkIdle` — the whole point of `ScopedSystem<M>` taking its `Idle`
-    /// from `M: ScopedIdentity` is that this engine works unchanged under
+    /// from `M: ScopedConfig` is that this engine works unchanged under
     /// either.
     #[test]
     fn fib_matches_sequential() {
-        fn go<M: ScopedIdentity>() {
+        fn go<M: ScopedConfig>() {
             for workers in [1, 2, 4] {
                 let result = Arc::new(AtomicU64::new(0));
                 let result2 = Arc::clone(&result);
@@ -422,7 +422,7 @@ mod tests {
         // Deep enough, with few enough workers, that real steals happen —
         // exercises `AsyncLatch::register`/`set`'s wake path, not just the
         // unstolen inline fast path.
-        fn go<M: ScopedIdentity>() {
+        fn go<M: ScopedConfig>() {
             let result = Arc::new(AtomicU64::new(0));
             let result2 = Arc::clone(&result);
             run_async::<M, _>(2, async move {
@@ -440,7 +440,7 @@ mod tests {
         // once, none of them the root future itself — checks that workers
         // correctly multiplex unrelated work via stealing, not just a
         // single tree.
-        fn go<M: ScopedIdentity>() {
+        fn go<M: ScopedConfig>() {
             let counter = Arc::new(AtomicU64::new(0));
             run_async::<M, _>(4, {
                 let counter = Arc::clone(&counter);

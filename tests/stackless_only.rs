@@ -1,5 +1,5 @@
 //! End-to-end tests for [`cmpth::DefaultStacklessOnlyTaskSystem`]
-//! (`UltAsyncIdentity`): no `Ctx`/`StackAlloc`/`StackfulSchedulerSystem` at
+//! (`UltAsyncConfig`): no `Ctx`/`StackAlloc`/`StackfulSchedulerSystem` at
 //! all, `execute`'s dispatch is `execute_async` (always poll, no `poll_fn`
 //! tag check) instead of `execute_dual`/`execute_stackful`. Only
 //! `StacklessTaskSystem`'s `run_async`/`spawn`/`recurse`/`.await` are

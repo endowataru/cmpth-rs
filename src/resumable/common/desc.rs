@@ -23,9 +23,9 @@
 //! Only the shared machinery lives in this module. The three concrete
 //! descriptor types, one per scheduler flavor, live alongside their own
 //! flavor's other descriptor traits: `StackfulOnlyTaskDesc`
-//! (`resumable::stackful::desc` — `UltIdentity` systems: a real ULT, no
+//! (`resumable::stackful::desc` — `UltConfig` systems: a real ULT, no
 //! `spawn_async` capability, no `poll_fn` slot at all), `StacklessOnlyTaskDesc`
-//! (`resumable::stackless::desc` — `UltAsyncIdentity` systems: a
+//! (`resumable::stackless::desc` — `UltAsyncConfig` systems: a
 //! `spawn_async` future, no real context switch, no `ctx` slot at all), and
 //! `DualTaskDesc` (`resumable::dual::desc` — dual systems: both capabilities
 //! on the *same* descriptor, since a stackful sync joiner and a stackless

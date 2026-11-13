@@ -56,7 +56,7 @@ pub trait DelegationSystem: SpawnableStackfulTaskSystem + SuspendableSystem {
 /// data, so what is left to choose is who pays.
 pub trait PostFavor: 'static {
     /// The delegator `Ch` picks for this favour.
-    type Pick<Ch: PostChoice, C: PostConsumer>: PostDelegator<C>;
+    type Pick<Ch: PostConfig, C: PostConsumer>: PostDelegator<C>;
 }
 
 /// Posting first: a post is a plain store; the server pays for finding
@@ -71,26 +71,26 @@ pub struct FavorPosting;
 pub struct FavorServing;
 
 impl PostFavor for FavorPosting {
-    type Pick<Ch: PostChoice, C: PostConsumer> = Ch::Posting<C>;
+    type Pick<Ch: PostConfig, C: PostConsumer> = Ch::Posting<C>;
 }
 
 impl PostFavor for FavorServing {
-    type Pick<Ch: PostChoice, C: PostConsumer> = Ch::Serving<C>;
+    type Pick<Ch: PostConfig, C: PostConsumer> = Ch::Serving<C>;
 }
 
 /// How a system maps each [`PostFavor`] to an implementation.  A system
-/// picks its choice ([`PostingSystem::PostChoice`]), so the mapping is as
+/// picks one ([`PostingSystem::PostConfig`]), so the mapping is as
 /// replaceable as the rest of the system.
-pub trait PostChoice: 'static {
+pub trait PostConfig: 'static {
     type Posting<C: PostConsumer>: PostDelegator<C>;
     type Serving<C: PostConsumer>: PostDelegator<C>;
 }
 
 /// A system's choice of post delegators.
 pub trait PostingSystem {
-    type PostChoice: PostChoice;
+    type PostConfig: PostConfig;
 }
 
 /// The post delegator system `S` picks for consumer `C`.
 pub type PostDelegatorOf<S, C> =
-    <<C as PostConsumer>::Favor as PostFavor>::Pick<<S as PostingSystem>::PostChoice, C>;
+    <<C as PostConsumer>::Favor as PostFavor>::Pick<<S as PostingSystem>::PostConfig, C>;

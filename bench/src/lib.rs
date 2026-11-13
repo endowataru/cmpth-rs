@@ -135,7 +135,7 @@ pub mod dual {
 }
 
 // ---------------------------------------------------------------------------
-// StackfulOnlyBench — cmpth::DefaultStackfulOnlyTaskSystem (UltIdentity, no
+// StackfulOnlyBench — cmpth::DefaultStackfulOnlyTaskSystem (UltConfig, no
 // AsyncTaskDesc anywhere: Worker::execute is execute_stackful, no poll_fn
 // tag check)
 // ---------------------------------------------------------------------------
@@ -160,7 +160,7 @@ impl BenchSystem for StackfulOnlyBench {
 }
 
 // ---------------------------------------------------------------------------
-// AsyncOnlySystem — cmpth stackless-only system (UltAsyncIdentity, no
+// AsyncOnlySystem — cmpth stackless-only system (UltAsyncConfig, no
 // StackfulSchedulerSystem at all). Doesn't fit BenchSystem (no blocking join);
 // used directly with `run_fib_async`/`fib_async` instead.
 // ---------------------------------------------------------------------------
@@ -170,7 +170,7 @@ pub struct AsyncOnlyMarker;
 cmpth::worker_tls_anchor!(AsyncOnlyMarker);
 
 cmpth::impl_with_defaults! {
-    impl cmpth::UltAsyncIdentity for AsyncOnlyMarker {}
+    impl cmpth::UltAsyncConfig for AsyncOnlyMarker {}
 }
 
 pub type AsyncOnlySystem = cmpth::UltAsyncSystem<AsyncOnlyMarker>;

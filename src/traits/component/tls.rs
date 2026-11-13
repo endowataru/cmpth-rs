@@ -38,9 +38,9 @@ impl Default for TlsAnchor {
 /// A type's own [`TlsAnchor`]: where a system built from that type keeps
 /// its current-worker pointer.
 ///
-/// Kept apart from the config traits ([`UltIdentity`](crate::UltIdentity),
-/// [`UltDualIdentity`](crate::UltDualIdentity),
-/// [`UltAsyncIdentity`](crate::UltAsyncIdentity)) because it is the one
+/// Kept apart from the config traits ([`UltConfig`](crate::UltConfig),
+/// [`UltDualConfig`](crate::UltDualConfig),
+/// [`UltAsyncConfig`](crate::UltAsyncConfig)) because it is the one
 /// member that can never have a default: a `static` in a default method
 /// body or a generic impl is a single instance shared by every
 /// implementor.  Implement it with [`worker_tls_anchor!`](crate::worker_tls_anchor),

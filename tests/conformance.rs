@@ -10,7 +10,7 @@ macro_rules! dual {
         pub struct $name;
         cmpth::worker_tls_anchor!($name);
         cmpth::impl_with_defaults! {
-            impl cmpth::UltDualIdentity for $name {
+            impl cmpth::UltDualConfig for $name {
                 type Steal = $steal;
                 type Idle = $idle;
             }
@@ -43,7 +43,7 @@ impl cmpth::DispatchPolicy for StealOnSwitch {
 pub struct SwitchStealer;
 cmpth::worker_tls_anchor!(SwitchStealer);
 cmpth::impl_with_defaults! {
-    impl cmpth::UltIdentity for SwitchStealer {
+    impl cmpth::UltConfig for SwitchStealer {
         type Dispatch = StealOnSwitch;
         type Idle = cmpth::SearchIdle;
     }

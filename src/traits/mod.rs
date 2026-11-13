@@ -36,7 +36,7 @@ pub use system::block_on::BlockOnSystem;
 pub use component::duty::{DutyLike, DutyPlace, DutyService, DutyToucherLike};
 pub use system::duty::{DutyOf, DutySystem, DutyToucherOf, DutyWaiterOf};
 pub use system::bundle::StackfulTaskSystem;
-pub use system::delegation::{Delegator, DelegatorRun, DelegationSystem, FavorPosting, FavorServing, PostChoice, PostDelegatorOf, PostFavor, PostingSystem};
+pub use system::delegation::{Delegator, DelegatorRun, DelegationSystem, FavorPosting, FavorServing, PostConfig, PostDelegatorOf, PostFavor, PostingSystem};
 pub use system::nesting::NestableSystem;
 pub use system::stackful::{JoinHandleLike, StackfulBuilder, StackfulInitSystem, SpawnableStackfulTaskSystem};
 pub use system::suspend::{StackfulParking, SuspendableSystem};

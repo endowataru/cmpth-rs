@@ -11,14 +11,14 @@ use std::sync::Arc;
 
 use cmpth::{
     JoinHandleLike, LeanFrameContext, OsSystem, ScopedStackfulTaskSystem, SpawnableStackfulTaskSystem,
-    StackfulBuilder, StackfulInitSystem, UltIdentity,
+    StackfulBuilder, StackfulInitSystem, UltConfig,
 };
 
 pub struct LeanContextSystem;
 
 cmpth::worker_tls_anchor!(LeanContextSystem);
 
-impl UltIdentity for LeanContextSystem {
+impl UltConfig for LeanContextSystem {
     type Base = OsSystem;
     type Ctx = LeanFrameContext;
     type Desc = cmpth::resumable::stackful::desc::StackfulOnlyTaskDesc<Self>;
@@ -36,7 +36,7 @@ impl UltIdentity for LeanContextSystem {
     type Observe = cmpth::NoObserver;
     type Hooks = cmpth::NoHooks;
     type ExternalQueue = cmpth::StealPathQueue<cmpth::resumable::stackful::desc::StackfulOnlyTaskDesc<Self>>;
-    type PostChoice = cmpth::DefaultPostChoice;
+    type PostConfig = cmpth::DefaultPostConfig;
 }
 
 #[test]

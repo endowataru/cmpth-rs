@@ -17,7 +17,7 @@ use crate::resumable::common::system::SchedulerSystem;
 ///
 /// Only sound for systems that can never migrate a task across OS threads
 /// mid-poll, i.e. **stackless-only** systems (a
-/// [`UltAsyncIdentity`](crate::resumable::stackless::system::UltAsyncIdentity)
+/// [`UltAsyncConfig`](crate::resumable::stackless::system::UltAsyncConfig)
 /// implementor, which never implements `StackfulSchedulerSystem` and so
 /// never does a real context switch). The natural `Lookup` choice for
 /// exactly that reason. A stackful or dual config must keep using

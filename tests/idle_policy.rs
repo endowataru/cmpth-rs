@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use cmpth::{
     FixedCap, HalfCap, JoinHandleLike, ParkIdle, SearchIdle, SpawnableStackfulTaskSystem, StackfulBuilder, StacklessBuilder,
-    StackfulInitSystem, StacklessInitSystem, UltAsyncIdentity, UltAsyncSystem, UltIdentity,
+    StackfulInitSystem, StacklessInitSystem, UltAsyncConfig, UltAsyncSystem, UltConfig,
 };
 
 /// The same tests for each parking policy, one module each.
@@ -23,7 +23,7 @@ macro_rules! suite {
         cmpth::worker_tls_anchor!(ParkStackful);
 
         cmpth::impl_with_defaults! {
-            impl UltIdentity for ParkStackful {
+            impl UltConfig for ParkStackful {
                 type Idle = $idle;
             }
         }
@@ -32,7 +32,7 @@ macro_rules! suite {
         cmpth::worker_tls_anchor!(ParkAsyncMarker);
 
         cmpth::impl_with_defaults! {
-            impl UltAsyncIdentity for ParkAsyncMarker {
+            impl UltAsyncConfig for ParkAsyncMarker {
                 type Idle = $idle;
             }
         }

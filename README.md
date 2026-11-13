@@ -196,7 +196,7 @@ pub struct MySystem;
 
 cmpth::worker_tls_anchor!(MySystem);                     // the worker's TLS slot
 
-impl cmpth::UltIdentity for MySystem {
+impl cmpth::UltConfig for MySystem {
     type Base = cmpth::OsSystem;                          // what the workers run on
     type Ctx = cmpth::NativeContext;                       // context-switch implementation
     type Desc = cmpth::StackfulOnlyTaskDesc<Self>;               // task descriptor
@@ -210,19 +210,25 @@ impl cmpth::UltIdentity for MySystem {
     type Observe = cmpth::NoObserver;                      // scheduler event hooks
     type Hooks = cmpth::NoHooks;                           // per-worker start/stop hooks (CPU pinning, QoS)
     type ExternalQueue = cmpth::StealPathQueue<cmpth::StackfulOnlyTaskDesc<Self>>; // tasks woken off the pool
-    type PostChoice = cmpth::DefaultPostChoice;            // how `post` picks a delegator
+    type PostConfig = cmpth::DefaultPostConfig;            // how `post` picks a delegator
 }
 ```
 
-`UltIdentity` builds a stackful system this way (`DefaultStackfulOnlyTaskSystem`
-is exactly `MySystem` above); `UltDualIdentity` does the same for a dual
-system (`DefaultDualTaskSystem` and its variants) and `UltAsyncIdentity` for a
+`UltConfig` builds a stackful system this way (`DefaultStackfulOnlyTaskSystem`
+is exactly `MySystem` above); `UltDualConfig` does the same for a dual
+system (`DefaultDualTaskSystem` and its variants) and `UltAsyncConfig` for a
 stackless-only one. All three are config traits — implement one for your own
 marker type and a blanket impl (written inside `cmpth`) supplies
 `SchedulerSystem`/`StackfulSchedulerSystem`/`SpawnableStackfulTaskSystem`.
 They are shorthand for hand-writing the underlying trait implementations
 yourself — the escape hatch for when their fixed shape doesn't fit, since
 every component they wire up is a public trait you can implement directly.
+
+Names follow one rule: a trait that only chooses types and constants at
+compile time is a `*Config` (`UltConfig`, `PostConfig`);
+a struct of values set at run time is a `*Options` (`DutyOptions`,
+`PostOptions`); a trait whose methods the scheduler calls to decide
+something is a `*Policy` (`IdlePolicy`, `StealPolicy`, `DispatchPolicy`).
 
 Rust has no stable defaults for associated types yet, so
 `impl_with_defaults!` supplies them: wrap the impl and give only what
@@ -235,7 +241,7 @@ pub struct MyParkingSystem;
 cmpth::worker_tls_anchor!(MyParkingSystem);
 
 cmpth::impl_with_defaults! {
-    impl cmpth::UltIdentity for MyParkingSystem {
+    impl cmpth::UltConfig for MyParkingSystem {
         type Idle = cmpth::SearchIdle;                     // everything else as above
     }
 }

@@ -42,7 +42,7 @@ impl WorkerHooks for Counting {
 pub struct Hooked;
 cmpth::worker_tls_anchor!(Hooked);
 cmpth::impl_with_defaults! {
-    impl cmpth::UltDualIdentity for Hooked {
+    impl cmpth::UltDualConfig for Hooked {
         type Hooks = Counting;
         type Idle = cmpth::SearchIdle;
     }
@@ -51,7 +51,7 @@ cmpth::impl_with_defaults! {
 pub struct Pinned;
 cmpth::worker_tls_anchor!(Pinned);
 cmpth::impl_with_defaults! {
-    impl cmpth::UltDualIdentity for Pinned {
+    impl cmpth::UltDualConfig for Pinned {
         type Hooks = cmpth::PinWorkers;
     }
 }
@@ -59,7 +59,7 @@ cmpth::impl_with_defaults! {
 pub struct Background;
 cmpth::worker_tls_anchor!(Background);
 cmpth::impl_with_defaults! {
-    impl cmpth::UltDualIdentity for Background {
+    impl cmpth::UltDualConfig for Background {
         type Hooks = cmpth::BackgroundWorkers;
     }
 }

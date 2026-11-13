@@ -27,7 +27,7 @@ use std::time::Instant;
 
 use crate::resumable::common::duty::{Duty, GlobalDuties};
 use crate::traits::{DutyLike, DutyService};
-use crate::traits::{PostChoice, PostOptions, PostConsumer, PostDelegator, Ticket};
+use crate::traits::{PostConfig, PostOptions, PostConsumer, PostDelegator, Ticket};
 
 // ---------------------------------------------------------------------------
 // Producers: one slot per posting thread
@@ -381,14 +381,14 @@ impl<C: PostConsumer> Drop for QueuePostDelegator<C> {
 }
 
 // ---------------------------------------------------------------------------
-// Default choice
+// Default config
 // ---------------------------------------------------------------------------
 
 /// [`SlotPostDelegator`] when posting comes first, [`QueuePostDelegator`]
 /// when serving does.
-pub struct DefaultPostChoice;
+pub struct DefaultPostConfig;
 
-impl PostChoice for DefaultPostChoice {
+impl PostConfig for DefaultPostConfig {
     type Posting<C: PostConsumer> = SlotPostDelegator<C>;
     type Serving<C: PostConsumer> = QueuePostDelegator<C>;
 }
@@ -427,7 +427,7 @@ mod tests {
 
     struct Sys;
     impl PostingSystem for Sys {
-        type PostChoice = DefaultPostChoice;
+        type PostConfig = DefaultPostConfig;
     }
 
     fn run<F: crate::traits::PostFavor>(serve_inline: bool) -> u64 {
@@ -489,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn default_choice_follows_favor() {
+    fn default_config_follows_favor() {
         fn is<T: 'static, U: 'static>() -> bool {
             std::any::TypeId::of::<T>() == std::any::TypeId::of::<U>()
         }
