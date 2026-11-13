@@ -27,7 +27,7 @@ use std::time::Instant;
 
 use crate::resumable::common::duty::{Duty, GlobalDuties};
 use crate::traits::{DutyLike, DutyService};
-use crate::traits::{PostChoice, PostConfig, PostConsumer, PostDelegator, Ticket};
+use crate::traits::{PostChoice, PostOptions, PostConsumer, PostDelegator, Ticket};
 
 // ---------------------------------------------------------------------------
 // Producers: one slot per posting thread
@@ -217,11 +217,11 @@ unsafe impl<C: PostConsumer> Sync for SlotPostDelegator<C> {}
 const SLOT_BACKOFF: u32 = 16;
 
 impl<C: PostConsumer> PostDelegator<C> for SlotPostDelegator<C> {
-    fn start(consumer: C, cfg: PostConfig) -> Pin<Box<Self>> {
+    fn start(consumer: C, opts: PostOptions) -> Pin<Box<Self>> {
         let d = Box::pin(SlotPostDelegator { producers: Producers::new(), server: Server::new(consumer), duty: OnceLock::new() });
         let p = SendPtr(&*d as *const Self);
         // A post seen late still waits up to the backed-off period.
-        let duty = GlobalDuties::duty(cfg.latency, cfg.latency * SLOT_BACKOFF, cfg.place, move || {
+        let duty = GlobalDuties::duty(opts.latency, opts.latency * SLOT_BACKOFF, opts.place, move || {
             let p = &p;
             unsafe { (*p.0).serve_now() }
         });
@@ -296,16 +296,16 @@ impl<C: PostConsumer> QueuePostDelegator<C> {
 }
 
 impl<C: PostConsumer> PostDelegator<C> for QueuePostDelegator<C> {
-    fn start(consumer: C, cfg: PostConfig) -> Pin<Box<Self>> {
+    fn start(consumer: C, opts: PostOptions) -> Pin<Box<Self>> {
         let d = Box::pin(QueuePostDelegator {
             producers: Producers::new(),
             pending: AtomicPtr::new(null_mut()),
             server: Server::new(consumer),
-            latency: cfg.latency,
+            latency: opts.latency,
             duty: OnceLock::new(),
         });
         let p = SendPtr(&*d as *const Self);
-        let duty = GlobalDuties::on_demand(cfg.latency, cfg.place, move || {
+        let duty = GlobalDuties::on_demand(opts.latency, opts.place, move || {
             let p = &p;
             let d = unsafe { &*p.0 };
             let did = d.serve_now();
@@ -437,8 +437,8 @@ mod tests {
         let served: Arc<Vec<AtomicU64>> = Arc::new((0..N).map(|_| AtomicU64::new(0)).collect());
         let serves = Arc::new(AtomicU64::new(0));
         let c = Check::<F> { data: data.clone(), served: served.clone(), serves: serves.clone(), _f: Default::default() };
-        let cfg = PostConfig { latency: Duration::from_micros(50), place: DutyPlace::Anywhere };
-        let d: Pin<Box<PostDelegatorOf<Sys, Check<F>>>> = PostDelegator::start(c, cfg);
+        let opts = PostOptions { latency: Duration::from_micros(50), place: DutyPlace::Anywhere };
+        let d: Pin<Box<PostDelegatorOf<Sys, Check<F>>>> = PostDelegator::start(c, opts);
         let d = &*d;
         std::thread::scope(|sc| {
             for _ in 0..N {

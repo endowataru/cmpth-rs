@@ -172,7 +172,7 @@ pub struct DutyStats {
 
 /// Settings of a [`DutyRegistry`].
 #[derive(Clone, Copy, Debug)]
-pub struct DutyConfig {
+pub struct DutyOptions {
     /// How long an idle worker searches (running the duties) before it
     /// parks while some task waits on a duty (see
     /// [`DutyRegistry::wait_spin_ns`]).
@@ -181,14 +181,14 @@ pub struct DutyConfig {
     pub background_keeper: bool,
 }
 
-impl DutyConfig {
+impl DutyOptions {
     /// 100 us of searching, keeper at normal QoS.
-    pub const DEFAULT: DutyConfig = DutyConfig { wait_spin: Duration::from_micros(100), background_keeper: false };
+    pub const DEFAULT: DutyOptions = DutyOptions { wait_spin: Duration::from_micros(100), background_keeper: false };
 
     /// [`DEFAULT`](Self::DEFAULT), overridden by `CMPTH_WAIT_SPIN_US` and
     /// `CMPTH_DUTY_QOS=background`.
-    pub fn from_env() -> DutyConfig {
-        let mut c = DutyConfig::DEFAULT;
+    pub fn from_env() -> DutyOptions {
+        let mut c = DutyOptions::DEFAULT;
         if let Some(us) = std::env::var("CMPTH_WAIT_SPIN_US").ok().and_then(|v| v.parse::<u64>().ok()) {
             c.wait_spin = Duration::from_micros(us);
         }
@@ -205,9 +205,9 @@ impl DutyConfig {
 ///
 /// ```
 /// use std::time::Duration;
-/// use cmpth::{DutyConfig, DutyDomain, DutyPlace, DutyRegistry, DutyService};
+/// use cmpth::{DutyOptions, DutyDomain, DutyPlace, DutyRegistry, DutyService};
 ///
-/// static MINE: DutyRegistry = DutyRegistry::new(DutyConfig::DEFAULT);
+/// static MINE: DutyRegistry = DutyRegistry::new(DutyOptions::DEFAULT);
 ///
 /// pub struct MyDuties;
 /// impl DutyDomain for MyDuties {
@@ -238,18 +238,18 @@ pub struct DutyRegistry {
     /// ... and wakes up at this time.
     timed_until: AtomicU64,
     /// `None`: read from the environment on first use.
-    init: Option<DutyConfig>,
-    config: OnceLock<DutyConfig>,
+    init: Option<DutyOptions>,
+    options: OnceLock<DutyOptions>,
 }
 
 static GLOBAL: DutyRegistry = DutyRegistry::with_init(None);
 
 impl DutyRegistry {
-    pub const fn new(config: DutyConfig) -> DutyRegistry {
-        DutyRegistry::with_init(Some(config))
+    pub const fn new(options: DutyOptions) -> DutyRegistry {
+        DutyRegistry::with_init(Some(options))
     }
 
-    const fn with_init(init: Option<DutyConfig>) -> DutyRegistry {
+    const fn with_init(init: Option<DutyOptions>) -> DutyRegistry {
         DutyRegistry {
             reg: Mutex::new(Vec::new()),
             keeper: OnceLock::new(),
@@ -260,19 +260,19 @@ impl DutyRegistry {
             timed: AtomicBool::new(false),
             timed_until: AtomicU64::new(NEVER),
             init,
-            config: OnceLock::new(),
+            options: OnceLock::new(),
         }
     }
 
     /// The process-wide registry: [`GlobalDuties`] and [`NoDuties`] register
     /// in it, and the timers behind [`DutyService::sleep`] are a duty of
-    /// it.  Configured by [`DutyConfig::from_env`].
+    /// it.  Configured by [`DutyOptions::from_env`].
     pub fn global() -> &'static DutyRegistry {
         &GLOBAL
     }
 
-    pub fn config(&self) -> &DutyConfig {
-        self.config.get_or_init(|| self.init.unwrap_or_else(DutyConfig::from_env))
+    pub fn options(&self) -> &DutyOptions {
+        self.options.get_or_init(|| self.init.unwrap_or_else(DutyOptions::from_env))
     }
 
     /// [`DutyService::duty`] in this registry.
@@ -516,7 +516,7 @@ impl DutyRegistry {
         // / 200 / 500 us, 0.32 s at background and 20 us; a barrier-bound
         // loop 0.183 s without, 0.210 / 0.205 / 0.195 s at 20 / 100 / 500
         // us, 0.192 s at background.
-        if self.config().background_keeper {
+        if self.options().background_keeper {
             sys::background();
         }
         loop {
@@ -593,7 +593,7 @@ impl DutyRegistry {
     /// How long an idle worker searches (running the duties) before it
     /// parks while some task waits on a duty: what it waits for may need
     /// this process's progress, or arrive soon.  0 without waiters, else
-    /// [`DutyConfig::wait_spin`] (100 us by default).  Measured with a
+    /// [`DutyOptions::wait_spin`] (100 us by default).  Measured with a
     /// transport whose one-sided operations need the target's progress (4
     /// processes, medians of 7, time / energy): a barrier-bound loop 0.191
     /// s / 4.24 J spinning, 0.318 / 5.02 parked at once, 0.224 / 4.08 at
@@ -605,7 +605,7 @@ impl DutyRegistry {
         if self.waiters.load(Ordering::Relaxed) == 0 {
             return 0;
         }
-        ns(self.config().wait_spin)
+        ns(self.options().wait_spin)
     }
 
     /// Called by a worker about to park, `*timed` telling whether it

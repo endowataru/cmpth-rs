@@ -28,7 +28,7 @@ pub use component::wait::Resumable;
 pub use system::TaskSystem;
 pub use system::sync::{BarrierWaitResult, DualBarrier, DualMutex};
 pub use system::scoped::{ScopedStackfulTaskSystem, ScopedStacklessTaskSystem};
-pub use component::delegation::{CallCx, CallSlot, Completion, DelegatorConsumer, FnConsumer, PostConfig, PostConsumer, PostDelegator, Ready, Ticket};
+pub use component::delegation::{CallCx, CallSlot, Completion, DelegatorConsumer, FnConsumer, PostOptions, PostConsumer, PostDelegator, Ready, Ticket};
 pub use component::stackful::{
     Context, ContextPolicy, HandoffTaskDesc, Poller, StackfulResumable, Transfer,
 };

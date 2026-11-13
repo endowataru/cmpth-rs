@@ -32,7 +32,7 @@ pub mod interchange;
 pub mod resumable;
 pub mod scoped;
 
-pub use traits::{BarrierWaitResult, StackfulParking, BlockOnSystem, Context, DutyLike, DutyOf, DutyPlace, DutyService, DutySystem, DutyToucherLike, DutyToucherOf, DutyWaiterOf, ContextPolicy, CallCx, CallSlot, Completion, DelegationSystem, DelegatorConsumer, Delegator, DelegatorRun, DualBarrier, FavorPosting, FavorServing, FnConsumer, PostChoice, PostConfig, PostConsumer, PostDelegator, PostDelegatorOf, PostFavor, PostingSystem, Ready, Ticket, DualMutex, HandoffTaskDesc, JoinHandleLike, NestableSystem, Poller, Resumable, ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, StackfulBuilder, StackfulInitSystem, StackfulResumable, StackfulSyncSystem, StacklessBuilder, StacklessInitSystem, StacklessSyncSystem, SuspendableSystem, TaskDesc, TaskExitSink, TaskSystem, TlsAnchor, TlsSlot, SpawnableStackfulTaskSystem, Transfer, WakerTaskDesc, WorkerTlsAnchor};
+pub use traits::{BarrierWaitResult, StackfulParking, BlockOnSystem, Context, DutyLike, DutyOf, DutyPlace, DutyService, DutySystem, DutyToucherLike, DutyToucherOf, DutyWaiterOf, ContextPolicy, CallCx, CallSlot, Completion, DelegationSystem, DelegatorConsumer, Delegator, DelegatorRun, DualBarrier, FavorPosting, FavorServing, FnConsumer, PostChoice, PostOptions, PostConsumer, PostDelegator, PostDelegatorOf, PostFavor, PostingSystem, Ready, Ticket, DualMutex, HandoffTaskDesc, JoinHandleLike, NestableSystem, Poller, Resumable, ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, StackfulBuilder, StackfulInitSystem, StackfulResumable, StackfulSyncSystem, StacklessBuilder, StacklessInitSystem, StacklessSyncSystem, SuspendableSystem, TaskDesc, TaskExitSink, TaskSystem, TlsAnchor, TlsSlot, SpawnableStackfulTaskSystem, Transfer, WakerTaskDesc, WorkerTlsAnchor};
 pub use scoped::{DefaultScopedMarker, ScopedIdentity, ScopedSystem, ScopedTaskSystem};
 pub use os::{available_parallelism, OsBarrier, OsCondvar, OsMutex, OsPoller, OsSystem, OsTls};
 pub use resumable::stackful::context::{LeanFrameContext, NativeContext};
@@ -51,7 +51,7 @@ pub use resumable::common::steal::{RandomSteal, RandomSweepSteal, StealPolicy, S
 pub use resumable::common::dispatch::{DispatchPolicy, Site, StandardDispatch, TaskSources};
 pub use resumable::common::observe::{NoObserver, SchedObserver, StealOutcome};
 pub use resumable::common::idle::{IdleContext, IdleCx, IdleDuties};
-pub use resumable::common::duty::{DutyConfig, DutyDomain, DutyRegistry, GlobalDuties, NoDuties};
+pub use resumable::common::duty::{DutyOptions, DutyDomain, DutyRegistry, GlobalDuties, NoDuties};
 pub use resumable::common::worker_hooks::{BackgroundWorkers, NoHooks, PinWorkers, WorkerHooks};
 pub use resumable::stackless::lookup::InlineTlsCurrent;
 pub use resumable::common::pool::{DescPool, ReturnPool, SimplePool};
