@@ -235,7 +235,7 @@ pub trait PostConsumer: Send + 'static {
 /// When a [`PostDelegator`] serves unprompted (it also serves whenever
 /// someone calls [`PostDelegator::serve_now`]).
 #[derive(Clone, Copy, Debug)]
-pub struct PostConfig {
+pub struct PostOptions {
     /// At most this long between a post and the serve covering it, while
     /// nobody calls `serve_now`.
     pub latency: std::time::Duration,
@@ -254,7 +254,7 @@ pub struct PostConfig {
 pub trait PostDelegator<C: PostConsumer>: Send + Sync + 'static {
     /// Start accepting posts.  The delegator stays at the returned address
     /// until dropped.
-    fn start(consumer: C, cfg: PostConfig) -> Pin<Box<Self>>;
+    fn start(consumer: C, opts: PostOptions) -> Pin<Box<Self>>;
 
     /// Ask for a serve covering what this thread did so far.  Never blocks
     /// or suspends.  Not preemption-safe: a ULT switched out in the middle

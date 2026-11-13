@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 mod common;
 
 use common::fib;
-use cmpth::{DutyConfig, DutyDomain, DutyPlace, DutyRegistry, NoDuties};
+use cmpth::{DutyOptions, DutyDomain, DutyPlace, DutyRegistry, NoDuties};
 use cmpth::{
     DispatchPolicy, JoinHandleLike, SchedObserver, Site, SpawnableStackfulTaskSystem, StackfulBuilder,
     StackfulInitSystem, StandardDispatch, Steal, StealOutcome, TaskSources, UltDualSystem,
@@ -124,7 +124,7 @@ fn dispatch_policy_is_asked_at_loop_and_switch() {
 
 // --- duty domains ---------------------------------------------------------------
 
-static PRIVATE: DutyRegistry = DutyRegistry::new(DutyConfig::DEFAULT);
+static PRIVATE: DutyRegistry = DutyRegistry::new(DutyOptions::DEFAULT);
 
 pub struct PrivateDuties;
 impl DutyDomain for PrivateDuties {
