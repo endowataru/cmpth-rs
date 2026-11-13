@@ -1,5 +1,5 @@
 //! Stackful-only descriptor operations: a real, switchable saved context,
-//! and [`StackfulOnlyTaskDesc`] — the concrete descriptor for `UltIdentity`
+//! and [`StackfulOnlyTaskDesc`] — the concrete descriptor for `UltConfig`
 //! (stackful-only) systems.
 
 use std::cell::UnsafeCell;
@@ -128,7 +128,7 @@ impl<D: TaskDescCore<Owned: HasCtx>> RunningTaskToken<D> {
 }
 
 // ---------------------------------------------------------------------------
-// StackfulOnlyTaskDesc — UltIdentity systems (real ULTs, no spawn_async)
+// StackfulOnlyTaskDesc — UltConfig systems (real ULTs, no spawn_async)
 // ---------------------------------------------------------------------------
 
 /// Owner-exclusive fields for [`StackfulOnlyTaskDesc`]: [`DescOwned`] plus
@@ -164,7 +164,7 @@ impl<S: PoolSystem> HasCtx for StackfulOnlyOwned<S> {
     fn set_ctx(&mut self, ptr: *mut u8) { self.ctx = ptr; }
 }
 
-/// Concrete descriptor for `UltIdentity`-based (stackful-only) systems: a
+/// Concrete descriptor for `UltConfig`-based (stackful-only) systems: a
 /// real ULT with no `spawn_async` capability, so no `poll_fn` slot exists
 /// at all (contrast [`DualTaskDesc`](crate::resumable::dual::desc::DualTaskDesc),
 /// which needs both on the same struct).

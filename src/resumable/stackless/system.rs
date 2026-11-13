@@ -1,5 +1,5 @@
 //! The blanket [`StacklessTaskSystem`]/[`ScopedStacklessTaskSystem`] impls
-//! for every async-capable [`SchedulerSystem`], and the [`UltAsyncIdentity`]
+//! for every async-capable [`SchedulerSystem`], and the [`UltAsyncConfig`]
 //! config trait that assembles a stackless-only system.
 //!
 //! The trait declarations themselves live in [`crate::traits::stackless`]/
@@ -221,7 +221,7 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// UltAsyncIdentity
+// UltAsyncConfig
 // ---------------------------------------------------------------------------
 
 /// Assembles a complete **stackless-only** ULT system from a handful of
@@ -230,23 +230,23 @@ where
 /// use [`UltAsyncSystem<M>`] as the actual system (the thing you call
 /// `run_async`/`spawn` on).
 ///
-/// A bare blanket `impl<M: UltAsyncIdentity> SchedulerSystem for M` (mirroring
-/// [`UltIdentity`](crate::resumable::stackful::system::UltIdentity)'s
+/// A bare blanket `impl<M: UltAsyncConfig> SchedulerSystem for M` (mirroring
+/// [`UltConfig`](crate::resumable::stackful::system::UltConfig)'s
 /// bare-`M` shape) would conflict under Rust's coherence rules with
-/// `UltIdentity`'s own bare-`M` blanket impl — the compiler can't prove no
+/// `UltConfig`'s own bare-`M` blanket impl — the compiler can't prove no
 /// type ever implements both traits, even though in practice none would.
 /// The [`UltAsyncSystem<M>`] wrapper sidesteps this by targeting a
 /// genuinely different type (verified directly against a real downstream
 /// crate: both flavors coexist and resolve to distinct per-marker
 /// `worker_tls` statics through the wrapper). See
-/// [`UltIdentity`](crate::resumable::stackful::system::UltIdentity)'s doc comment for why a config trait is used at all
+/// [`UltConfig`](crate::resumable::stackful::system::UltConfig)'s doc comment for why a config trait is used at all
 /// instead of a generic struct callers would type-alias (Rust's orphan
 /// rules forbid implementing a foreign trait for a type alias of a foreign
 /// generic struct) — [`UltAsyncSystem<M>`] itself is only ever *named*, never
 /// implemented against, by downstream code, so it doesn't reintroduce that
 /// problem.
 ///
-/// Unlike `UltIdentity`, only implies [`SchedulerSystem`] — never
+/// Unlike `UltConfig`, only implies [`SchedulerSystem`] — never
 /// [`StackfulSchedulerSystem`](crate::resumable::stackful::system::StackfulSchedulerSystem),
 /// so it never names a context-switch policy or stack allocator, because it
 /// has none. Its only entry points are
@@ -264,7 +264,7 @@ where
 /// is the natural `Lookup` choice — sound specifically because this system
 /// never implements `StackfulSchedulerSystem` and so never does a real
 /// context switch (see that type's doc comment for the hazard that would
-/// otherwise apply) — but it isn't defaulted here, matching `UltIdentity`:
+/// otherwise apply) — but it isn't defaulted here, matching `UltConfig`:
 /// associated types can't carry defaults on stable Rust.
 ///
 /// ```
@@ -275,7 +275,7 @@ where
 ///
 /// cmpth::worker_tls_anchor!(MyAsyncMarker);
 ///
-/// impl cmpth::UltAsyncIdentity for MyAsyncMarker {
+/// impl cmpth::UltAsyncConfig for MyAsyncMarker {
 ///     type Base = cmpth::OsSystem;
 ///     type Desc = cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>;
 ///     type RunQueue = cmpth::HybridRunQueue<cmpth::SuspendedTaskToken<cmpth::StacklessOnlyTaskDesc<cmpth::UltAsyncSystem<Self>>>>;
@@ -296,7 +296,7 @@ where
 ///     assert_eq!(h.await, 42);
 /// });
 /// ```
-pub trait UltAsyncIdentity: crate::traits::WorkerTlsAnchor + Sized + Send + Sync + 'static {
+pub trait UltAsyncConfig: crate::traits::WorkerTlsAnchor + Sized + Send + Sync + 'static {
     /// The threading system this scheduler runs on.
     type Base: SpawnableStackfulTaskSystem + NestableSystem;
 
@@ -371,40 +371,40 @@ pub trait UltAsyncIdentity: crate::traits::WorkerTlsAnchor + Sized + Send + Sync
 }
 
 /// The actual stackless-only system type: call `run_async`/`spawn` on
-/// `UltAsyncSystem<M>`, not on `M` itself. See [`UltAsyncIdentity`]'s doc
+/// `UltAsyncSystem<M>`, not on `M` itself. See [`UltAsyncConfig`]'s doc
 /// comment for why `M` alone can't directly implement `SchedulerSystem`.
-pub struct UltAsyncSystem<M: UltAsyncIdentity> {
+pub struct UltAsyncSystem<M: UltAsyncConfig> {
     _marker: PhantomData<fn() -> M>,
 }
 
-impl<M: UltAsyncIdentity> crate::traits::DutySystem for UltAsyncSystem<M> {
-    type Duties = <M as UltAsyncIdentity>::Duties;
+impl<M: UltAsyncConfig> crate::traits::DutySystem for UltAsyncSystem<M> {
+    type Duties = <M as UltAsyncConfig>::Duties;
 }
 
-impl<M: UltAsyncIdentity> PoolSystem for UltAsyncSystem<M> {
+impl<M: UltAsyncConfig> PoolSystem for UltAsyncSystem<M> {
     type Desc  = M::Desc;
-    type ExternalQueue = <M as UltAsyncIdentity>::ExternalQueue;
+    type ExternalQueue = <M as UltAsyncConfig>::ExternalQueue;
     // Never actually allocated through: this flavor has no `spawn`, only
     // `spawn_async` (which goes through AsyncPool below). SimplePool is the
     // cheapest DescPool to instantiate for a type that's never used.
     type Pool = crate::resumable::common::pool::SimplePool<M::Desc>;
-    const ASYNC_POOL_SIZE: usize = <M as UltAsyncIdentity>::ASYNC_POOL_SIZE;
+    const ASYNC_POOL_SIZE: usize = <M as UltAsyncConfig>::ASYNC_POOL_SIZE;
     type AsyncPool = crate::resumable::common::pool::ReturnPool<M::Desc, crate::resumable::common::stack::MallocFrame>;
     type RecursionPool = crate::resumable::common::pool::ThresholdPool<crate::resumable::common::pool::BlockPool>;
 }
 
-impl<M: UltAsyncIdentity> WorkerSystem for UltAsyncSystem<M> {
+impl<M: UltAsyncConfig> WorkerSystem for UltAsyncSystem<M> {
     type Base  = M::Base;
     type SuspendedToken  = crate::resumable::common::desc::SuspendedTaskToken<M::Desc>;
     type Worker = UltWorker<Self>;
     type RunQueue = M::RunQueue;
-    type Lookup = <M as UltAsyncIdentity>::Lookup;
-    type Idle = <M as UltAsyncIdentity>::Idle;
-    type Steal = <M as UltAsyncIdentity>::Steal;
-    type Dispatch = <M as UltAsyncIdentity>::Dispatch;
-    type Duties = <M as UltAsyncIdentity>::Duties;
-    type Observe = <M as UltAsyncIdentity>::Observe;
-    type Hooks = <M as UltAsyncIdentity>::Hooks;
+    type Lookup = <M as UltAsyncConfig>::Lookup;
+    type Idle = <M as UltAsyncConfig>::Idle;
+    type Steal = <M as UltAsyncConfig>::Steal;
+    type Dispatch = <M as UltAsyncConfig>::Dispatch;
+    type Duties = <M as UltAsyncConfig>::Duties;
+    type Observe = <M as UltAsyncConfig>::Observe;
+    type Hooks = <M as UltAsyncConfig>::Hooks;
 
     fn worker_tls() -> &'static <M::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         crate::traits::TlsSlot::from_anchor(<M as crate::traits::WorkerTlsAnchor>::anchor())

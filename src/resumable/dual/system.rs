@@ -1,4 +1,4 @@
-//! [`UltDualIdentity`] — the config trait that assembles a complete dual
+//! [`UltDualConfig`] — the config trait that assembles a complete dual
 //! system (stackful ULTs and stackless tasks on one scheduler) from a
 //! handful of associated types, and [`UltDualSystem<M>`], the system it
 //! builds.
@@ -22,11 +22,11 @@ use crate::traits::{TlsSlot, WorkerTlsAnchor};
 /// stackless `spawn_async` tasks share one scheduler, and its `Mutex`/
 /// `Barrier` are contended together from either calling convention
 /// ([`DualResumable`](crate::DualResumable) waiters, unlike
-/// [`UltIdentity`](crate::UltIdentity)'s stackful-only ones).  Implement
+/// [`UltConfig`](crate::UltConfig)'s stackful-only ones).  Implement
 /// this for your own marker type and use [`UltDualSystem<M>`] as the
-/// actual system — the [`UltAsyncIdentity`](crate::UltAsyncIdentity)/
+/// actual system — the [`UltAsyncConfig`](crate::UltAsyncConfig)/
 /// [`UltAsyncSystem`](crate::UltAsyncSystem) shape, for the same reason: a
-/// blanket impl on bare `M` would overlap with `UltIdentity`'s own under
+/// blanket impl on bare `M` would overlap with `UltConfig`'s own under
 /// Rust's coherence rules.
 ///
 /// The task descriptor is not a choice here: a dual system's tasks are
@@ -40,7 +40,7 @@ use crate::traits::{TlsSlot, WorkerTlsAnchor};
 ///
 /// cmpth::worker_tls_anchor!(MyDualMarker);
 ///
-/// impl cmpth::UltDualIdentity for MyDualMarker {
+/// impl cmpth::UltDualConfig for MyDualMarker {
 ///     type Base = cmpth::OsSystem;
 ///     type Ctx = cmpth::NativeContext;
 ///     type RunQueue = cmpth::HybridRunQueue<cmpth::SuspendedTaskToken<cmpth::DualTaskDesc<cmpth::UltDualSystem<Self>>>>;
@@ -53,7 +53,7 @@ use crate::traits::{TlsSlot, WorkerTlsAnchor};
 ///     type Observe = cmpth::NoObserver;
 ///     type Hooks = cmpth::NoHooks;
 ///     type ExternalQueue = cmpth::StealPathQueue<cmpth::DualTaskDesc<cmpth::UltDualSystem<Self>>>;
-///     type PostChoice = cmpth::DefaultPostChoice;
+///     type PostConfig = cmpth::DefaultPostConfig;
 /// }
 ///
 /// type MyDualSystem = cmpth::UltDualSystem<MyDualMarker>;
@@ -66,7 +66,7 @@ use crate::traits::{TlsSlot, WorkerTlsAnchor};
 ///
 /// `STACK_SIZE` defaults to 64 KiB and `ASYNC_POOL_SIZE` to 512; override
 /// them like any other associated const.
-pub trait UltDualIdentity: WorkerTlsAnchor + Sized + Send + Sync + 'static {
+pub trait UltDualConfig: WorkerTlsAnchor + Sized + Send + Sync + 'static {
     /// The threading system this scheduler runs on.
     type Base: SpawnableStackfulTaskSystem + NestableSystem;
 
@@ -107,11 +107,11 @@ pub trait UltDualIdentity: WorkerTlsAnchor + Sized + Send + Sync + 'static {
         UltDualSystem<Self>: PoolSystem;
 
     /// How `post` chooses a delegator; see
-    /// [`PostingSystem::PostChoice`](crate::traits::PostingSystem::PostChoice).
-    type PostChoice: crate::traits::PostChoice;
+    /// [`PostingSystem::PostConfig`](crate::traits::PostingSystem::PostConfig).
+    type PostConfig: crate::traits::PostConfig;
 
     /// Current-worker lookup policy.  `where UltDualSystem<Self>:
-    /// WorkerSystem`, as for [`UltAsyncIdentity`](crate::UltAsyncIdentity)'s
+    /// WorkerSystem`, as for [`UltAsyncConfig`](crate::UltAsyncConfig)'s
     /// `Lookup`.
     type Lookup: CurrentLookup<UltDualSystem<Self>>
     where
@@ -126,31 +126,31 @@ pub trait UltDualIdentity: WorkerTlsAnchor + Sized + Send + Sync + 'static {
 
 /// The actual dual system type: call `builder`/`spawn`/`spawn_async` on
 /// `UltDualSystem<M>`, not on `M` itself.
-pub struct UltDualSystem<M: UltDualIdentity> {
+pub struct UltDualSystem<M: UltDualConfig> {
     _marker: PhantomData<fn() -> M>,
 }
 
-impl<M: UltDualIdentity> PoolSystem for UltDualSystem<M> {
+impl<M: UltDualConfig> PoolSystem for UltDualSystem<M> {
     type Desc = DualTaskDesc<Self>;
-    type ExternalQueue = <M as UltDualIdentity>::ExternalQueue;
+    type ExternalQueue = <M as UltDualConfig>::ExternalQueue;
     type Pool = crate::resumable::common::pool::ReturnPool<DualTaskDesc<Self>, M::Alloc>;
     type AsyncPool = crate::resumable::common::pool::ReturnPool<DualTaskDesc<Self>, crate::resumable::common::stack::MallocFrame>;
-    const ASYNC_POOL_SIZE: usize = <M as UltDualIdentity>::ASYNC_POOL_SIZE;
+    const ASYNC_POOL_SIZE: usize = <M as UltDualConfig>::ASYNC_POOL_SIZE;
     type RecursionPool = crate::resumable::common::pool::ThresholdPool<crate::resumable::common::pool::BlockPool>;
 }
 
-impl<M: UltDualIdentity> WorkerSystem for UltDualSystem<M> {
+impl<M: UltDualConfig> WorkerSystem for UltDualSystem<M> {
     type Base = M::Base;
     type SuspendedToken = SuspendedTaskToken<DualTaskDesc<Self>>;
     type Worker = UltWorker<Self>;
     type RunQueue = M::RunQueue;
-    type Lookup = <M as UltDualIdentity>::Lookup;
-    type Idle = <M as UltDualIdentity>::Idle;
-    type Steal = <M as UltDualIdentity>::Steal;
-    type Dispatch = <M as UltDualIdentity>::Dispatch;
-    type Duties = <M as UltDualIdentity>::Duties;
-    type Observe = <M as UltDualIdentity>::Observe;
-    type Hooks = <M as UltDualIdentity>::Hooks;
+    type Lookup = <M as UltDualConfig>::Lookup;
+    type Idle = <M as UltDualConfig>::Idle;
+    type Steal = <M as UltDualConfig>::Steal;
+    type Dispatch = <M as UltDualConfig>::Dispatch;
+    type Duties = <M as UltDualConfig>::Duties;
+    type Observe = <M as UltDualConfig>::Observe;
+    type Hooks = <M as UltDualConfig>::Hooks;
 
     fn worker_tls() -> &'static <M::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         TlsSlot::from_anchor(<M as WorkerTlsAnchor>::anchor())
@@ -161,10 +161,10 @@ impl<M: UltDualIdentity> WorkerSystem for UltDualSystem<M> {
 // (`resumable::common::system`) from the `RunnableItem`/`ReclaimableDesc`
 // impls for `DualTaskDesc<_>` (`resumable::dual::worker`).
 
-impl<M: UltDualIdentity> crate::resumable::stackful::system::StackfulWorkerSystem for UltDualSystem<M> {
+impl<M: UltDualConfig> crate::resumable::stackful::system::StackfulWorkerSystem for UltDualSystem<M> {
     type Ctx = M::Ctx;
     type StackAlloc = M::Alloc;
-    const STACK_SIZE: usize = <M as UltDualIdentity>::STACK_SIZE;
+    const STACK_SIZE: usize = <M as UltDualConfig>::STACK_SIZE;
 
     type SuspendedThread = crate::resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>;
 
@@ -177,7 +177,7 @@ impl<M: UltDualIdentity> crate::resumable::stackful::system::StackfulWorkerSyste
     }
 }
 
-impl<M: UltDualIdentity> SpawnableStackfulTaskSystem for UltDualSystem<M> {
+impl<M: UltDualConfig> SpawnableStackfulTaskSystem for UltDualSystem<M> {
     fn yield_now() {
         use crate::resumable::common::worker::WorkerOps;
         use crate::resumable::stackful::worker::StackfulWorker;
@@ -198,34 +198,34 @@ impl<M: UltDualIdentity> SpawnableStackfulTaskSystem for UltDualSystem<M> {
     }
 }
 
-impl<M: UltDualIdentity> BlockOnSystem for UltDualSystem<M> {
+impl<M: UltDualConfig> BlockOnSystem for UltDualSystem<M> {
     type Poller = crate::resumable::stackful::waker::UltPoller<Self>;
 }
 
-impl<M: UltDualIdentity> StackfulSyncSystem for UltDualSystem<M> {
+impl<M: UltDualConfig> StackfulSyncSystem for UltDualSystem<M> {
     type Mutex<T: Send> = crate::resumable::common::sync::DualMutex<Self, T, crate::DualResumable<Self>>;
     type Barrier = crate::resumable::common::sync::DualBarrier<Self, crate::DualResumable<Self>>;
 }
 
-impl<M: UltDualIdentity> SuspendableSystem for UltDualSystem<M> {
+impl<M: UltDualConfig> SuspendableSystem for UltDualSystem<M> {
     /// Dual, so that OS threads that are not workers can park on it too
     /// (a delegator or lock shared with them).
     type SuspendedThread = crate::DualResumable<Self>;
 }
 
-impl<M: UltDualIdentity> DelegationSystem for UltDualSystem<M> {
+impl<M: UltDualConfig> DelegationSystem for UltDualSystem<M> {
     type Delegator<C: crate::traits::stackful::DelegatorConsumer<Self>> =
         crate::resumable::stackful::sync::McsDelegator<Self, C>;
 }
 
-impl<M: UltDualIdentity> crate::traits::PostingSystem for UltDualSystem<M> {
-    type PostChoice = <M as UltDualIdentity>::PostChoice;
+impl<M: UltDualConfig> crate::traits::PostingSystem for UltDualSystem<M> {
+    type PostConfig = <M as UltDualConfig>::PostConfig;
 }
 
-impl<M: UltDualIdentity> crate::traits::DutySystem for UltDualSystem<M> {
-    type Duties = <M as UltDualIdentity>::Duties;
+impl<M: UltDualConfig> crate::traits::DutySystem for UltDualSystem<M> {
+    type Duties = <M as UltDualConfig>::Duties;
 }
 
-impl<M: UltDualIdentity> NestableSystem for UltDualSystem<M> {
+impl<M: UltDualConfig> NestableSystem for UltDualSystem<M> {
     type ThreadSpecific<T: 'static> = crate::resumable::stackful::tls::UltTls<Self, T>;
 }

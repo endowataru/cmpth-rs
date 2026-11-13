@@ -32,8 +32,8 @@ pub mod interchange;
 pub mod resumable;
 pub mod scoped;
 
-pub use traits::{BarrierWaitResult, StackfulParking, BlockOnSystem, Context, DutyLike, DutyOf, DutyPlace, DutyService, DutySystem, DutyToucherLike, DutyToucherOf, DutyWaiterOf, ContextPolicy, CallCx, CallSlot, Completion, DelegationSystem, DelegatorConsumer, Delegator, DelegatorRun, DualBarrier, FavorPosting, FavorServing, FnConsumer, PostChoice, PostOptions, PostConsumer, PostDelegator, PostDelegatorOf, PostFavor, PostingSystem, Ready, Ticket, DualMutex, HandoffTaskDesc, JoinHandleLike, NestableSystem, Poller, Resumable, ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, StackfulBuilder, StackfulInitSystem, StackfulResumable, StackfulSyncSystem, StacklessBuilder, StacklessInitSystem, StacklessSyncSystem, SuspendableSystem, TaskDesc, TaskExitSink, TaskSystem, TlsAnchor, TlsSlot, SpawnableStackfulTaskSystem, Transfer, WakerTaskDesc, WorkerTlsAnchor};
-pub use scoped::{DefaultScopedMarker, ScopedIdentity, ScopedSystem, ScopedTaskSystem};
+pub use traits::{BarrierWaitResult, StackfulParking, BlockOnSystem, Context, DutyLike, DutyOf, DutyPlace, DutyService, DutySystem, DutyToucherLike, DutyToucherOf, DutyWaiterOf, ContextPolicy, CallCx, CallSlot, Completion, DelegationSystem, DelegatorConsumer, Delegator, DelegatorRun, DualBarrier, FavorPosting, FavorServing, FnConsumer, PostConfig, PostOptions, PostConsumer, PostDelegator, PostDelegatorOf, PostFavor, PostingSystem, Ready, Ticket, DualMutex, HandoffTaskDesc, JoinHandleLike, NestableSystem, Poller, Resumable, ScopedStackfulTaskSystem, ScopedStacklessTaskSystem, StackfulBuilder, StackfulInitSystem, StackfulResumable, StackfulSyncSystem, StacklessBuilder, StacklessInitSystem, StacklessSyncSystem, SuspendableSystem, TaskDesc, TaskExitSink, TaskSystem, TlsAnchor, TlsSlot, SpawnableStackfulTaskSystem, Transfer, WakerTaskDesc, WorkerTlsAnchor};
+pub use scoped::{DefaultScopedMarker, ScopedConfig, ScopedSystem, ScopedTaskSystem};
 pub use os::{available_parallelism, OsBarrier, OsCondvar, OsMutex, OsPoller, OsSystem, OsTls};
 pub use resumable::stackful::context::{LeanFrameContext, NativeContext};
 pub use resumable::stackful::waker::UltPoller;
@@ -58,17 +58,17 @@ pub use resumable::common::pool::{DescPool, ReturnPool, SimplePool};
 pub use resumable::common::stack::{HeapStack, MallocFrame, StackAlloc};
 pub use resumable::stackless::async_wait::SuspendedFuture;
 pub use resumable::dual::dual_wait::DualResumable;
-pub use resumable::dual::system::{UltDualIdentity, UltDualSystem};
+pub use resumable::dual::system::{UltDualConfig, UltDualSystem};
 pub use resumable::stackful::suspended::{BasicStackfulOnlyResumable, StackfulOnlyResumableCore};
 pub use resumable::stackful::sync::{Barrier as UltBarrier, CombiningConfig, CombiningDelegator, DefaultCombining, McsDelegator, McsMutex, McsMutexGuard, McsCondvar, BarrierCore, MutexCore};
 pub use resumable::common::sync::{DualBarrier as UltDualBarrier, DualMutex as UltDualMutex, DualMutexGuard as UltDualMutexGuard};
 pub use resumable::common::system::{PoolSystem, SchedulerSystem, WorkerSystem};
-pub use resumable::stackful::system::{StackfulSchedulerSystem, StackfulTaskSystem, StackfulWorkerSystem, UltIdentity};
-pub use resumable::stackless::system::{StacklessSchedulerSystem, StacklessTaskSystem, UltAsyncIdentity, UltAsyncSystem};
+pub use resumable::stackful::system::{StackfulSchedulerSystem, StackfulTaskSystem, StackfulWorkerSystem, UltConfig};
+pub use resumable::stackless::system::{StacklessSchedulerSystem, StacklessTaskSystem, UltAsyncConfig, UltAsyncSystem};
 pub use resumable::stackful::tls::UltTls;
 pub use resumable::common::worker::{LocalQueue, TaskPool, UltWorker, WorkerOps, current_worker};
 pub use resumable::stackful::worker::ContextSwitcher;
-pub use resumable::common::sync::post::{DefaultPostChoice, QueuePostDelegator, SlotPostDelegator};
+pub use resumable::common::sync::post::{DefaultPostConfig, QueuePostDelegator, SlotPostDelegator};
 
 // ---------------------------------------------------------------------------
 // Default instantiations
@@ -76,7 +76,7 @@ pub use resumable::common::sync::post::{DefaultPostChoice, QueuePostDelegator, S
 
 // The dual systems host stackless `spawn_async` tasks as well as stackful
 // ULTs, and their `Mutex`/`Barrier` are contended together from either
-// calling convention; see `UltDualIdentity`.  Each is a marker type plus
+// calling convention; see `UltDualConfig`.  Each is a marker type plus
 // its config, named through `UltDualSystem<_>`; the markers stay hidden,
 // as for `DefaultStacklessOnlyTaskSystem`.  Every system below states only
 // what differs from `impl_with_defaults!`'s defaults.
@@ -87,7 +87,7 @@ pub struct DefaultDualMarker;
 worker_tls_anchor!(DefaultDualMarker);
 
 impl_with_defaults! {
-    impl UltDualIdentity for DefaultDualMarker {}
+    impl UltDualConfig for DefaultDualMarker {}
 }
 
 /// The default ULT system: runs on top of [`OsSystem`].
@@ -99,7 +99,7 @@ pub struct ParkDualMarker;
 worker_tls_anchor!(ParkDualMarker);
 
 impl_with_defaults! {
-    impl UltDualIdentity for ParkDualMarker {
+    impl UltDualConfig for ParkDualMarker {
         type Idle = SearchIdle;
     }
 }
@@ -114,7 +114,7 @@ pub struct ParkHalfDualMarker;
 worker_tls_anchor!(ParkHalfDualMarker);
 
 impl_with_defaults! {
-    impl UltDualIdentity for ParkHalfDualMarker {
+    impl UltDualConfig for ParkHalfDualMarker {
         type Idle = SearchIdle<HalfCap>;
     }
 }
@@ -130,7 +130,7 @@ pub struct DefaultNestedDualMarker;
 worker_tls_anchor!(DefaultNestedDualMarker);
 
 impl_with_defaults! {
-    impl UltDualIdentity for DefaultNestedDualMarker {
+    impl UltDualConfig for DefaultNestedDualMarker {
         type Base = DefaultDualTaskSystem;
     }
 }
@@ -149,18 +149,18 @@ pub type DefaultNestedDualTaskSystem = UltDualSystem<DefaultNestedDualMarker>;
 ///
 /// Use this instead of `DefaultDualTaskSystem` whenever a system never
 /// needs `spawn_async`/async-capable waiting -- the same "pick a system"
-/// call site as any other. Implements [`UltIdentity`] directly: unlike
+/// call site as any other. Implements [`UltConfig`] directly: unlike
 /// [`DefaultStacklessOnlyTaskSystem`], no wrapper type is needed (see
-/// `UltIdentity`'s blanket `impl<M: UltIdentity> SchedulerSystem for M`).
+/// `UltConfig`'s blanket `impl<M: UltConfig> SchedulerSystem for M`).
 pub struct DefaultStackfulOnlyTaskSystem;
 
 worker_tls_anchor!(DefaultStackfulOnlyTaskSystem);
 
 impl_with_defaults! {
-    impl UltIdentity for DefaultStackfulOnlyTaskSystem {}
+    impl UltConfig for DefaultStackfulOnlyTaskSystem {}
 }
 
-// `DefaultStacklessOnlyTaskSystem`'s marker: implements `UltAsyncIdentity`
+// `DefaultStacklessOnlyTaskSystem`'s marker: implements `UltAsyncConfig`
 // directly rather than being exposed itself -- callers only ever need to
 // name the type alias below, the same way `UltAsyncSystem`'s own type
 // parameter is never named at a `DefaultDualTaskSystem`-style call site.
@@ -170,7 +170,7 @@ pub struct DefaultStacklessOnlyMarker;
 worker_tls_anchor!(DefaultStacklessOnlyMarker);
 
 impl_with_defaults! {
-    impl UltAsyncIdentity for DefaultStacklessOnlyMarker {}
+    impl UltAsyncConfig for DefaultStacklessOnlyMarker {}
 }
 
 /// The default stackless-*only* ULT system: runs on top of [`OsSystem`],
@@ -184,8 +184,8 @@ impl_with_defaults! {
 ///
 /// Use this instead of `DefaultDualTaskSystem` whenever a system never needs
 /// stackful `spawn`/blocking `Mutex`/`block_on` — the same "pick a system"
-/// call site as any other, just via `UltAsyncIdentity` instead of
-/// `UltIdentity`.
+/// call site as any other, just via `UltAsyncConfig` instead of
+/// `UltConfig`.
 pub type DefaultStacklessOnlyTaskSystem = UltAsyncSystem<DefaultStacklessOnlyMarker>;
 
 pub mod system {

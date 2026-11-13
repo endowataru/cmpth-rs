@@ -712,10 +712,10 @@ fn float_regs_survive_yield() {
 }
 
 // ---------------------------------------------------------------------------
-// SpawnableStackfulTaskSystem implemented by hand (no UltIdentity blanket)
+// SpawnableStackfulTaskSystem implemented by hand (no UltConfig blanket)
 // ---------------------------------------------------------------------------
 
-/// `UltIdentity`'s blanket impl is convenience, not architecture: everything
+/// `UltConfig`'s blanket impl is convenience, not architecture: everything
 /// it generates can be written as a plain trait impl, as this does. The
 /// only part that cannot be defaulted away on stable Rust is the
 /// per-system TLS static (generic statics do not exist; a static inside a
@@ -898,7 +898,7 @@ impl BlockOnSystem for PollerSystem {
     // `DualTaskDesc`/`StacklessOnlyTaskDesc` do), so `UltPoller` (as
     // `ManualSystem` above uses) isn't available here — `ResumablePoller`
     // is the stackful-only-descriptor poller, same as
-    // `UltIdentity`'s own blanket `BlockOnSystem` impl uses.
+    // `UltConfig`'s own blanket `BlockOnSystem` impl uses.
     type Poller = cmpth::resumable::stackful::waker::ResumablePoller<Self>;
 }
 

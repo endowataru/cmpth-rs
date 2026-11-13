@@ -43,7 +43,7 @@ macro_rules! worker_tls_anchor {
 /// cmpth::worker_tls_anchor!(MyMarker);
 ///
 /// cmpth::impl_with_defaults! {
-///     impl cmpth::UltDualIdentity for MyMarker {
+///     impl cmpth::UltDualConfig for MyMarker {
 ///         type Idle = cmpth::SearchIdle;
 ///         const STACK_SIZE: usize = 128 * 1024;
 ///     }
@@ -61,11 +61,11 @@ macro_rules! worker_tls_anchor {
 /// and pass through unchanged.  A type the trait does not have is a
 /// compile error, and so is one given twice.  The type implementing the
 /// trait also needs [`worker_tls_anchor!`](crate::worker_tls_anchor)
-/// (not for [`ScopedIdentity`](crate::ScopedIdentity)).
+/// (not for [`ScopedConfig`](crate::ScopedConfig)).
 ///
 /// The defaults:
 ///
-/// | type | [`UltIdentity`](crate::UltIdentity) | [`UltDualIdentity`](crate::UltDualIdentity) | [`UltAsyncIdentity`](crate::UltAsyncIdentity) | [`ScopedIdentity`](crate::ScopedIdentity) |
+/// | type | [`UltConfig`](crate::UltConfig) | [`UltDualConfig`](crate::UltDualConfig) | [`UltAsyncConfig`](crate::UltAsyncConfig) | [`ScopedConfig`](crate::ScopedConfig) |
 /// |---|---|---|---|---|
 /// | `Base` | [`OsSystem`](crate::OsSystem) | [`OsSystem`](crate::OsSystem) | [`OsSystem`](crate::OsSystem) | |
 /// | `Ctx` | [`NativeContext`](crate::NativeContext) | [`NativeContext`](crate::NativeContext) | | |
@@ -80,7 +80,7 @@ macro_rules! worker_tls_anchor {
 /// | `Observe` | [`NoObserver`](crate::NoObserver) | [`NoObserver`](crate::NoObserver) | [`NoObserver`](crate::NoObserver) | [`NoObserver`](crate::NoObserver) |
 /// | `Hooks` | [`NoHooks`](crate::NoHooks) | [`NoHooks`](crate::NoHooks) | [`NoHooks`](crate::NoHooks) | [`NoHooks`](crate::NoHooks) |
 /// | `ExternalQueue` | [`StealPathQueue`](crate::StealPathQueue) of `Desc` | [`StealPathQueue`](crate::StealPathQueue) of [`DualTaskDesc`](crate::DualTaskDesc) | [`StealPathQueue`](crate::StealPathQueue) of `Desc` | |
-/// | `PostChoice` | [`DefaultPostChoice`](crate::DefaultPostChoice) | [`DefaultPostChoice`](crate::DefaultPostChoice) | | |
+/// | `PostConfig` | [`DefaultPostConfig`](crate::DefaultPostConfig) | [`DefaultPostConfig`](crate::DefaultPostConfig) | | |
 ///
 /// The type implementing the trait must not be generic (as for
 /// `worker_tls_anchor!`).
@@ -91,7 +91,7 @@ macro_rules! worker_tls_anchor {
 /// pub struct M;
 /// cmpth::worker_tls_anchor!(M);
 /// cmpth::impl_with_defaults! {
-///     impl cmpth::UltDualIdentity for M { type Desc = (); }
+///     impl cmpth::UltDualConfig for M { type Desc = (); }
 /// }
 /// ```
 ///
@@ -99,7 +99,7 @@ macro_rules! worker_tls_anchor {
 /// pub struct M;
 /// cmpth::worker_tls_anchor!(M);
 /// cmpth::impl_with_defaults! {
-///     impl cmpth::UltIdentity for M { type Idle = cmpth::SpinIdle; type Idle = cmpth::ParkIdle; }
+///     impl cmpth::UltConfig for M { type Idle = cmpth::SpinIdle; type Idle = cmpth::ParkIdle; }
 /// }
 /// ```
 #[macro_export]
@@ -111,25 +111,25 @@ macro_rules! impl_with_defaults {
     // `@or` per defaulted type: each scans the body and emits its default
     // only if the body does not give that type.
 
-    (impl cmpth::UltIdentity for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@ult [$crate::UltIdentity] $t; $($b)*); };
-    (impl UltIdentity for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@ult [UltIdentity] $t; $($b)*); };
-    (impl cmpth::UltDualIdentity for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@dual [$crate::UltDualIdentity] $t; $($b)*); };
-    (impl UltDualIdentity for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@dual [UltDualIdentity] $t; $($b)*); };
-    (impl cmpth::UltAsyncIdentity for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@async [$crate::UltAsyncIdentity] $t; $($b)*); };
-    (impl UltAsyncIdentity for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@async [UltAsyncIdentity] $t; $($b)*); };
-    (impl cmpth::ScopedIdentity for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@scoped [$crate::ScopedIdentity] $t; $($b)*); };
-    (impl ScopedIdentity for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@scoped [ScopedIdentity] $t; $($b)*); };
+    (impl cmpth::UltConfig for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@ult [$crate::UltConfig] $t; $($b)*); };
+    (impl UltConfig for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@ult [UltConfig] $t; $($b)*); };
+    (impl cmpth::UltDualConfig for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@dual [$crate::UltDualConfig] $t; $($b)*); };
+    (impl UltDualConfig for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@dual [UltDualConfig] $t; $($b)*); };
+    (impl cmpth::UltAsyncConfig for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@async [$crate::UltAsyncConfig] $t; $($b)*); };
+    (impl UltAsyncConfig for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@async [UltAsyncConfig] $t; $($b)*); };
+    (impl cmpth::ScopedConfig for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@scoped [$crate::ScopedConfig] $t; $($b)*); };
+    (impl ScopedConfig for $t:ty { $($b:tt)* }) => { $crate::impl_with_defaults!(@scoped [ScopedConfig] $t; $($b)*); };
 
     // --- the defaults, per trait -----------------------------------------
 
     (@ult [$($tr:tt)*] $t:ty; $($b:tt)*) => {
-        $crate::impl_with_defaults!(@check UltIdentity; $($b)*);
+        $crate::impl_with_defaults!(@check UltConfig; $($b)*);
         impl $($tr)* for $t {
             $($b)*
             $crate::impl_with_defaults!(@or Base [$($b)*] type Base = $crate::OsSystem;);
             $crate::impl_with_defaults!(@or Ctx [$($b)*] type Ctx = $crate::NativeContext;);
             $crate::impl_with_defaults!(@or Desc [$($b)*] type Desc = $crate::StackfulOnlyTaskDesc<Self>;);
-            $crate::impl_with_defaults!(@or RunQueue [$($b)*] type RunQueue = $crate::HybridRunQueue<$crate::SuspendedTaskToken<<Self as $crate::UltIdentity>::Desc>>;);
+            $crate::impl_with_defaults!(@or RunQueue [$($b)*] type RunQueue = $crate::HybridRunQueue<$crate::SuspendedTaskToken<<Self as $crate::UltConfig>::Desc>>;);
             $crate::impl_with_defaults!(@or Alloc [$($b)*] type Alloc = $crate::HeapStack;);
             $crate::impl_with_defaults!(@or Lookup [$($b)*] type Lookup = $crate::TlsCurrent;);
             $crate::impl_with_defaults!(@or Idle [$($b)*] type Idle = $crate::SpinIdle;);
@@ -138,12 +138,12 @@ macro_rules! impl_with_defaults {
             $crate::impl_with_defaults!(@or Duties [$($b)*] type Duties = $crate::resumable::common::duty::GlobalDuties;);
             $crate::impl_with_defaults!(@or Observe [$($b)*] type Observe = $crate::NoObserver;);
             $crate::impl_with_defaults!(@or Hooks [$($b)*] type Hooks = $crate::NoHooks;);
-            $crate::impl_with_defaults!(@or ExternalQueue [$($b)*] type ExternalQueue = $crate::StealPathQueue<<Self as $crate::UltIdentity>::Desc>;);
-            $crate::impl_with_defaults!(@or PostChoice [$($b)*] type PostChoice = $crate::DefaultPostChoice;);
+            $crate::impl_with_defaults!(@or ExternalQueue [$($b)*] type ExternalQueue = $crate::StealPathQueue<<Self as $crate::UltConfig>::Desc>;);
+            $crate::impl_with_defaults!(@or PostConfig [$($b)*] type PostConfig = $crate::DefaultPostConfig;);
         }
     };
     (@dual [$($tr:tt)*] $t:ty; $($b:tt)*) => {
-        $crate::impl_with_defaults!(@check UltDualIdentity; $($b)*);
+        $crate::impl_with_defaults!(@check UltDualConfig; $($b)*);
         impl $($tr)* for $t {
             $($b)*
             $crate::impl_with_defaults!(@or Base [$($b)*] type Base = $crate::OsSystem;);
@@ -158,16 +158,16 @@ macro_rules! impl_with_defaults {
             $crate::impl_with_defaults!(@or Observe [$($b)*] type Observe = $crate::NoObserver;);
             $crate::impl_with_defaults!(@or Hooks [$($b)*] type Hooks = $crate::NoHooks;);
             $crate::impl_with_defaults!(@or ExternalQueue [$($b)*] type ExternalQueue = $crate::StealPathQueue<$crate::DualTaskDesc<$crate::UltDualSystem<Self>>>;);
-            $crate::impl_with_defaults!(@or PostChoice [$($b)*] type PostChoice = $crate::DefaultPostChoice;);
+            $crate::impl_with_defaults!(@or PostConfig [$($b)*] type PostConfig = $crate::DefaultPostConfig;);
         }
     };
     (@async [$($tr:tt)*] $t:ty; $($b:tt)*) => {
-        $crate::impl_with_defaults!(@check UltAsyncIdentity; $($b)*);
+        $crate::impl_with_defaults!(@check UltAsyncConfig; $($b)*);
         impl $($tr)* for $t {
             $($b)*
             $crate::impl_with_defaults!(@or Base [$($b)*] type Base = $crate::OsSystem;);
             $crate::impl_with_defaults!(@or Desc [$($b)*] type Desc = $crate::StacklessOnlyTaskDesc<$crate::UltAsyncSystem<Self>>;);
-            $crate::impl_with_defaults!(@or RunQueue [$($b)*] type RunQueue = $crate::HybridRunQueue<$crate::SuspendedTaskToken<<Self as $crate::UltAsyncIdentity>::Desc>>;);
+            $crate::impl_with_defaults!(@or RunQueue [$($b)*] type RunQueue = $crate::HybridRunQueue<$crate::SuspendedTaskToken<<Self as $crate::UltAsyncConfig>::Desc>>;);
             $crate::impl_with_defaults!(@or Lookup [$($b)*] type Lookup = $crate::InlineTlsCurrent;);
             $crate::impl_with_defaults!(@or Idle [$($b)*] type Idle = $crate::SpinIdle;);
             $crate::impl_with_defaults!(@or Steal [$($b)*] type Steal = $crate::RandomSweepSteal;);
@@ -175,11 +175,11 @@ macro_rules! impl_with_defaults {
             $crate::impl_with_defaults!(@or Duties [$($b)*] type Duties = $crate::resumable::common::duty::GlobalDuties;);
             $crate::impl_with_defaults!(@or Observe [$($b)*] type Observe = $crate::NoObserver;);
             $crate::impl_with_defaults!(@or Hooks [$($b)*] type Hooks = $crate::NoHooks;);
-            $crate::impl_with_defaults!(@or ExternalQueue [$($b)*] type ExternalQueue = $crate::StealPathQueue<<Self as $crate::UltAsyncIdentity>::Desc>;);
+            $crate::impl_with_defaults!(@or ExternalQueue [$($b)*] type ExternalQueue = $crate::StealPathQueue<<Self as $crate::UltAsyncConfig>::Desc>;);
         }
     };
     (@scoped [$($tr:tt)*] $t:ty; $($b:tt)*) => {
-        $crate::impl_with_defaults!(@check ScopedIdentity; $($b)*);
+        $crate::impl_with_defaults!(@check ScopedConfig; $($b)*);
         impl $($tr)* for $t {
             $($b)*
             $crate::impl_with_defaults!(@or Idle [$($b)*] type Idle = $crate::SpinIdle;);
@@ -193,50 +193,50 @@ macro_rules! impl_with_defaults {
 
     // --- which types each trait has --------------------------------------
 
-    (@has UltIdentity Base) => {};
-    (@has UltIdentity Ctx) => {};
-    (@has UltIdentity Desc) => {};
-    (@has UltIdentity RunQueue) => {};
-    (@has UltIdentity Alloc) => {};
-    (@has UltIdentity Lookup) => {};
-    (@has UltIdentity Idle) => {};
-    (@has UltIdentity Steal) => {};
-    (@has UltIdentity Dispatch) => {};
-    (@has UltIdentity Duties) => {};
-    (@has UltIdentity Observe) => {};
-    (@has UltIdentity Hooks) => {};
-    (@has UltIdentity ExternalQueue) => {};
-    (@has UltIdentity PostChoice) => {};
-    (@has UltDualIdentity Base) => {};
-    (@has UltDualIdentity Ctx) => {};
-    (@has UltDualIdentity RunQueue) => {};
-    (@has UltDualIdentity Alloc) => {};
-    (@has UltDualIdentity Lookup) => {};
-    (@has UltDualIdentity Idle) => {};
-    (@has UltDualIdentity Steal) => {};
-    (@has UltDualIdentity Dispatch) => {};
-    (@has UltDualIdentity Duties) => {};
-    (@has UltDualIdentity Observe) => {};
-    (@has UltDualIdentity Hooks) => {};
-    (@has UltDualIdentity ExternalQueue) => {};
-    (@has UltDualIdentity PostChoice) => {};
-    (@has UltAsyncIdentity Base) => {};
-    (@has UltAsyncIdentity Desc) => {};
-    (@has UltAsyncIdentity RunQueue) => {};
-    (@has UltAsyncIdentity Lookup) => {};
-    (@has UltAsyncIdentity Idle) => {};
-    (@has UltAsyncIdentity Steal) => {};
-    (@has UltAsyncIdentity Dispatch) => {};
-    (@has UltAsyncIdentity Duties) => {};
-    (@has UltAsyncIdentity Observe) => {};
-    (@has UltAsyncIdentity Hooks) => {};
-    (@has UltAsyncIdentity ExternalQueue) => {};
-    (@has ScopedIdentity Idle) => {};
-    (@has ScopedIdentity Steal) => {};
-    (@has ScopedIdentity Dispatch) => {};
-    (@has ScopedIdentity Duties) => {};
-    (@has ScopedIdentity Observe) => {};
-    (@has ScopedIdentity Hooks) => {};
+    (@has UltConfig Base) => {};
+    (@has UltConfig Ctx) => {};
+    (@has UltConfig Desc) => {};
+    (@has UltConfig RunQueue) => {};
+    (@has UltConfig Alloc) => {};
+    (@has UltConfig Lookup) => {};
+    (@has UltConfig Idle) => {};
+    (@has UltConfig Steal) => {};
+    (@has UltConfig Dispatch) => {};
+    (@has UltConfig Duties) => {};
+    (@has UltConfig Observe) => {};
+    (@has UltConfig Hooks) => {};
+    (@has UltConfig ExternalQueue) => {};
+    (@has UltConfig PostConfig) => {};
+    (@has UltDualConfig Base) => {};
+    (@has UltDualConfig Ctx) => {};
+    (@has UltDualConfig RunQueue) => {};
+    (@has UltDualConfig Alloc) => {};
+    (@has UltDualConfig Lookup) => {};
+    (@has UltDualConfig Idle) => {};
+    (@has UltDualConfig Steal) => {};
+    (@has UltDualConfig Dispatch) => {};
+    (@has UltDualConfig Duties) => {};
+    (@has UltDualConfig Observe) => {};
+    (@has UltDualConfig Hooks) => {};
+    (@has UltDualConfig ExternalQueue) => {};
+    (@has UltDualConfig PostConfig) => {};
+    (@has UltAsyncConfig Base) => {};
+    (@has UltAsyncConfig Desc) => {};
+    (@has UltAsyncConfig RunQueue) => {};
+    (@has UltAsyncConfig Lookup) => {};
+    (@has UltAsyncConfig Idle) => {};
+    (@has UltAsyncConfig Steal) => {};
+    (@has UltAsyncConfig Dispatch) => {};
+    (@has UltAsyncConfig Duties) => {};
+    (@has UltAsyncConfig Observe) => {};
+    (@has UltAsyncConfig Hooks) => {};
+    (@has UltAsyncConfig ExternalQueue) => {};
+    (@has ScopedConfig Idle) => {};
+    (@has ScopedConfig Steal) => {};
+    (@has ScopedConfig Dispatch) => {};
+    (@has ScopedConfig Duties) => {};
+    (@has ScopedConfig Observe) => {};
+    (@has ScopedConfig Hooks) => {};
     (@has $tr:ident $k:ident) => {
         compile_error!(concat!("impl_with_defaults!: `", stringify!($tr), "` has no associated type `", stringify!($k), "`"));
     };
@@ -274,7 +274,7 @@ macro_rules! impl_with_defaults {
     (@or Observe [type Observe = $v:ty; $($r:tt)*] $($d:tt)*) => {};
     (@or Hooks [type Hooks = $v:ty; $($r:tt)*] $($d:tt)*) => {};
     (@or ExternalQueue [type ExternalQueue = $v:ty; $($r:tt)*] $($d:tt)*) => {};
-    (@or PostChoice [type PostChoice = $v:ty; $($r:tt)*] $($d:tt)*) => {};
+    (@or PostConfig [type PostConfig = $v:ty; $($r:tt)*] $($d:tt)*) => {};
     (@or $k:ident [type $o:ident = $v:ty; $($r:tt)*] $($d:tt)*) => {
         $crate::impl_with_defaults!(@or $k [$($r)*] $($d)*);
     };
@@ -285,6 +285,6 @@ macro_rules! impl_with_defaults {
     (@or $k:ident [$($r:tt)*] $($d:tt)*) => {};
 
     ($($other:tt)*) => {
-        compile_error!("impl_with_defaults!: expected `impl Trait for Type { ... }` with Trait one of UltIdentity, UltDualIdentity, UltAsyncIdentity, ScopedIdentity");
+        compile_error!("impl_with_defaults!: expected `impl Trait for Type { ... }` with Trait one of UltConfig, UltDualConfig, UltAsyncConfig, ScopedConfig");
     };
 }

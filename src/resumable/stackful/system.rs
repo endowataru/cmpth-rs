@@ -1,25 +1,25 @@
 //! [`StackfulSchedulerSystem`] — extends
 //! [`SchedulerSystem`]
-//! with real-stack context-switch capability, and the [`UltIdentity`]
+//! with real-stack context-switch capability, and the [`UltConfig`]
 //! config trait that assembles a complete stackful-only system from a
 //! handful of associated types.
 //!
 //! # Nesting
 //!
-//! Every `UltIdentity` implementor is a full `SpawnableStackfulTaskSystem`, so naming a
+//! Every `UltConfig` implementor is a full `SpawnableStackfulTaskSystem`, so naming a
 //! second one as `Base` stacks one ULT scheduler on top of another without
 //! any extra boilerplate:
 //!
 //! ```ignore
 //! pub struct Outer;
-//! impl cmpth::UltIdentity for Outer { type Base = cmpth::OsSystem; ... }
+//! impl cmpth::UltConfig for Outer { type Base = cmpth::OsSystem; ... }
 //!
 //! pub struct Inner;
-//! impl cmpth::UltIdentity for Inner { type Base = Outer; ... }
+//! impl cmpth::UltConfig for Inner { type Base = Outer; ... }
 //! ```
 //!
 //! [`DefaultNestedDualTaskSystem`](crate::DefaultNestedDualTaskSystem) is
-//! built the same way through [`UltDualIdentity`](crate::UltDualIdentity).
+//! built the same way through [`UltDualConfig`](crate::UltDualConfig).
 
 use crate::traits::stackful::{
     BlockOnSystem, ContextPolicy, DelegationSystem, NestableSystem, StackfulSyncSystem,
@@ -234,7 +234,7 @@ where
     }
 }
 
-/// Empty bundle: `SpawnableStackfulTaskSystem` is implemented directly (via `UltIdentity`'s
+/// Empty bundle: `SpawnableStackfulTaskSystem` is implemented directly (via `UltConfig`'s
 /// blanket impl or by hand); `ScopedStackfulTaskSystem` is blanket-derived
 /// from it just above. This impl just ties the four bounds together as one.
 impl<
@@ -244,7 +244,7 @@ impl<
 }
 
 // ---------------------------------------------------------------------------
-// UltIdentity
+// UltConfig
 // ---------------------------------------------------------------------------
 
 /// Assembles a complete stackful-only ULT system from a handful of
@@ -255,11 +255,11 @@ impl<
 ///
 /// Not a generic struct (`UltSystem<Base, Ctx, ...>`) that callers would
 /// type-alias: Rust's orphan rules forbid implementing a foreign trait
-/// (`SchedulerIdentity`-shaped) for a foreign type (a type alias for a
+/// (`SchedulerSystem` and the rest) for a foreign type (a type alias for a
 /// `cmpth`-defined generic struct is still `cmpth`'s type, not the
 /// caller's) — verified directly against a real downstream crate. A
 /// config trait sidesteps this: the caller's own marker type is what
-/// implements `UltIdentity`, and the blanket impls below (written inside
+/// implements `UltConfig`, and the blanket impls below (written inside
 /// `cmpth`, where they're allowed to name `cmpth`'s own traits freely) are
 /// what extend it with `SchedulerSystem`/etc.
 ///
@@ -285,7 +285,7 @@ impl<
 ///
 /// cmpth::worker_tls_anchor!(MySystem);
 ///
-/// impl cmpth::UltIdentity for MySystem {
+/// impl cmpth::UltConfig for MySystem {
 ///     type Base = cmpth::OsSystem;
 ///     type Ctx = cmpth::NativeContext;
 ///     type Desc = cmpth::StackfulOnlyTaskDesc<Self>;
@@ -299,7 +299,7 @@ impl<
 ///     type Observe = cmpth::NoObserver;
 ///     type Hooks = cmpth::NoHooks;
 ///     type ExternalQueue = cmpth::StealPathQueue<cmpth::StackfulOnlyTaskDesc<Self>>;
-///     type PostChoice = cmpth::DefaultPostChoice;
+///     type PostConfig = cmpth::DefaultPostConfig;
 /// }
 ///
 /// MySystem::builder().workers(2).run(|| {
@@ -310,7 +310,7 @@ impl<
 ///
 /// `STACK_SIZE` defaults to 64 KiB; override it like any other associated
 /// const.
-pub trait UltIdentity: WorkerTlsAnchor + Sized + Send + Sync + 'static {
+pub trait UltConfig: WorkerTlsAnchor + Sized + Send + Sync + 'static {
     /// The threading system this scheduler runs on.
     type Base: SpawnableStackfulTaskSystem + NestableSystem;
 
@@ -331,11 +331,11 @@ pub trait UltIdentity: WorkerTlsAnchor + Sized + Send + Sync + 'static {
     /// `common::system`), so gating `Desc` itself on `SchedulerSystem` would
     /// be circular (`Desc` needs `SchedulerSystem` needs `Desc`, verified as
     /// a real `E0275` overflow before this bound was lowered). `PoolSystem`
-    /// is safe because [`PoolSystem for M`](trait@UltIdentity)'s impl below
+    /// is safe because [`PoolSystem for M`](trait@UltConfig)'s impl below
     /// is unconditional — it never routes back through `SchedulerSystem`.
     type Desc: crate::resumable::common::desc::TaskDescAlloc
         + StackfulTaskDesc
-        + TaskDescCore<Owned: HasExternalQueue<<Self as UltIdentity>::Desc, Queue = <Self as PoolSystem>::ExternalQueue>>
+        + TaskDescCore<Owned: HasExternalQueue<<Self as UltConfig>::Desc, Queue = <Self as PoolSystem>::ExternalQueue>>
     where
         Self: PoolSystem;
 
@@ -368,8 +368,8 @@ pub trait UltIdentity: WorkerTlsAnchor + Sized + Send + Sync + 'static {
         Self: PoolSystem;
 
     /// How `post` chooses a delegator; see
-    /// [`PostingSystem::PostChoice`](crate::traits::PostingSystem::PostChoice).
-    type PostChoice: crate::traits::PostChoice;
+    /// [`PostingSystem::PostConfig`](crate::traits::PostingSystem::PostConfig).
+    type PostConfig: crate::traits::PostConfig;
 
     /// Stack allocation policy.
     type Alloc: StackAlloc;
@@ -387,34 +387,34 @@ pub trait UltIdentity: WorkerTlsAnchor + Sized + Send + Sync + 'static {
         Self: WorkerSystem;
 }
 
-impl<M: UltIdentity> PoolSystem for M {
+impl<M: UltConfig> PoolSystem for M {
     type Desc  = M::Desc;
-    type ExternalQueue = <M as UltIdentity>::ExternalQueue;
+    type ExternalQueue = <M as UltConfig>::ExternalQueue;
     type Pool          = crate::resumable::common::pool::ReturnPool<M::Desc, M::Alloc>;
     // Never actually allocated through: nothing calls spawn_async on a
-    // stackful-only UltIdentity system (StacklessTaskSystem's blanket
+    // stackful-only UltConfig system (StacklessTaskSystem's blanket
     // impl still applies whenever M::Desc: AsyncTaskDesc, e.g. for
     // DualTaskDesc, but the capability just goes unused here). Mirrors
-    // UltAsyncIdentity's unused `Pool` in the other direction.
+    // UltAsyncConfig's unused `Pool` in the other direction.
     type AsyncPool = crate::resumable::common::pool::SimplePool<M::Desc>;
     const ASYNC_POOL_SIZE: usize = 0;
     // Never actually taken from: nothing calls `recurse` on a
-    // stackful-only UltIdentity system either. Mirrors `AsyncPool` above.
+    // stackful-only UltConfig system either. Mirrors `AsyncPool` above.
     type RecursionPool = crate::resumable::common::pool::ThresholdPool<crate::resumable::common::pool::BlockPool>;
 }
 
-impl<M: UltIdentity> WorkerSystem for M {
+impl<M: UltConfig> WorkerSystem for M {
     type Base  = M::Base;
     type SuspendedToken  = SuspendedTaskToken<M::Desc>;
     type Worker = UltWorker<Self>;
     type RunQueue = M::RunQueue;
-    type Lookup = <M as UltIdentity>::Lookup;
-    type Idle = <M as UltIdentity>::Idle;
-    type Steal = <M as UltIdentity>::Steal;
-    type Dispatch = <M as UltIdentity>::Dispatch;
-    type Duties = <M as UltIdentity>::Duties;
-    type Observe = <M as UltIdentity>::Observe;
-    type Hooks = <M as UltIdentity>::Hooks;
+    type Lookup = <M as UltConfig>::Lookup;
+    type Idle = <M as UltConfig>::Idle;
+    type Steal = <M as UltConfig>::Steal;
+    type Dispatch = <M as UltConfig>::Dispatch;
+    type Duties = <M as UltConfig>::Duties;
+    type Observe = <M as UltConfig>::Observe;
+    type Hooks = <M as UltConfig>::Hooks;
 
     fn worker_tls() -> &'static <M::Base as NestableSystem>::ThreadSpecific<UltWorker<Self>> {
         TlsSlot::from_anchor(<M as WorkerTlsAnchor>::anchor())
@@ -428,7 +428,7 @@ impl<M: UltIdentity> WorkerSystem for M {
 // types' `RunnableItem`/`ReclaimableDesc` impls in `stackful::worker`/
 // `dual::worker`).
 
-impl<M: UltIdentity> StackfulWorkerSystem for M
+impl<M: UltConfig> StackfulWorkerSystem for M
 where
     <M as PoolSystem>::Desc: StackfulTaskDesc,
     <<M as PoolSystem>::Desc as TaskDescCore>::Owned:
@@ -436,12 +436,12 @@ where
 {
     type Ctx = M::Ctx;
     type StackAlloc = M::Alloc;
-    const STACK_SIZE: usize = <M as UltIdentity>::STACK_SIZE;
+    const STACK_SIZE: usize = <M as UltConfig>::STACK_SIZE;
 
     type SuspendedThread = crate::resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>;
 }
 
-impl<M: UltIdentity + StackfulSchedulerSystem> SpawnableStackfulTaskSystem for M
+impl<M: UltConfig + StackfulSchedulerSystem> SpawnableStackfulTaskSystem for M
 where
     <M as PoolSystem>::Desc: StackfulTaskDesc,
     M::Worker: crate::resumable::stackful::worker::StackfulWorker<M>
@@ -452,7 +452,7 @@ where
         use crate::resumable::stackful::worker::StackfulWorker;
         match M::Worker::current() {
             Some(wk) => { wk.yield_now(); }
-            None => <<M as UltIdentity>::Base as SpawnableStackfulTaskSystem>::yield_now(),
+            None => <<M as UltConfig>::Base as SpawnableStackfulTaskSystem>::yield_now(),
         }
     }
 
@@ -467,14 +467,14 @@ where
     }
 }
 
-impl<M: UltIdentity + StackfulSchedulerSystem> BlockOnSystem for M
+impl<M: UltConfig + StackfulSchedulerSystem> BlockOnSystem for M
 where
     <M as PoolSystem>::Desc: StackfulTaskDesc,
 {
     type Poller = crate::resumable::stackful::waker::ResumablePoller<Self>;
 }
 
-impl<M: UltIdentity + StackfulSchedulerSystem> StackfulSyncSystem for M
+impl<M: UltConfig + StackfulSchedulerSystem> StackfulSyncSystem for M
 where
     <M as PoolSystem>::Desc: StackfulTaskDesc,
 {
@@ -482,14 +482,14 @@ where
     type Barrier         = crate::resumable::common::sync::DualBarrier<Self, crate::resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>>;
 }
 
-impl<M: UltIdentity + StackfulSchedulerSystem> SuspendableSystem for M
+impl<M: UltConfig + StackfulSchedulerSystem> SuspendableSystem for M
 where
     <M as PoolSystem>::Desc: StackfulTaskDesc,
 {
     type SuspendedThread = crate::resumable::stackful::suspended::BasicStackfulOnlyResumable<Self>;
 }
 
-impl<M: UltIdentity + StackfulSchedulerSystem> DelegationSystem for M
+impl<M: UltConfig + StackfulSchedulerSystem> DelegationSystem for M
 where
     <M as PoolSystem>::Desc: StackfulTaskDesc,
     M::Worker: crate::resumable::common::worker::DescWorkerOps<M>,
@@ -498,21 +498,21 @@ where
         crate::resumable::stackful::sync::McsDelegator<Self, C>;
 }
 
-impl<M: UltIdentity + StackfulSchedulerSystem> crate::traits::PostingSystem for M
+impl<M: UltConfig + StackfulSchedulerSystem> crate::traits::PostingSystem for M
 where
     <M as PoolSystem>::Desc: StackfulTaskDesc,
 {
-    type PostChoice = <M as UltIdentity>::PostChoice;
+    type PostConfig = <M as UltConfig>::PostConfig;
 }
 
-impl<M: UltIdentity + StackfulSchedulerSystem> crate::traits::DutySystem for M
+impl<M: UltConfig + StackfulSchedulerSystem> crate::traits::DutySystem for M
 where
     <M as PoolSystem>::Desc: StackfulTaskDesc,
 {
-    type Duties = <M as UltIdentity>::Duties;
+    type Duties = <M as UltConfig>::Duties;
 }
 
-impl<M: UltIdentity + StackfulSchedulerSystem> NestableSystem for M
+impl<M: UltConfig + StackfulSchedulerSystem> NestableSystem for M
 where
     <M as PoolSystem>::Desc: StackfulTaskDesc,
     M::Worker: crate::resumable::common::worker::DescWorkerOps<M>,

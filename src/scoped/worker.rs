@@ -21,7 +21,7 @@ use crate::traits::component::tls::TlsAnchor;
 use crate::traits::stackful::{NestableSystem, SpawnableStackfulTaskSystem};
 use crate::traits::stackful::JoinHandleLike;
 
-use super::system::{ScopedIdentity, ScopedSystem};
+use super::system::{ScopedConfig, ScopedSystem};
 use super::task::TaskRef;
 
 /// `scoped`'s whole worker: just the shared queue layer.
@@ -60,7 +60,7 @@ thread_local! {
 
 pub struct ScopedLookup<M>(PhantomData<M>);
 
-impl<M: ScopedIdentity> CurrentLookup<ScopedSystem<M>> for ScopedLookup<M> {
+impl<M: ScopedConfig> CurrentLookup<ScopedSystem<M>> for ScopedLookup<M> {
     fn current() -> Option<&'static ScopedWorker<M>> {
         let p = CURRENT.with(Cell::get) as *const ScopedWorker<M>;
         if p.is_null() { None } else { Some(unsafe { &*p }) }
@@ -73,7 +73,7 @@ impl<M: ScopedIdentity> CurrentLookup<ScopedSystem<M>> for ScopedLookup<M> {
 /// reads from this same thread-local rather than `worker_tls()`'s `OsTls`
 /// slot — `worker_tls()` still exists to satisfy the trait, but nothing
 /// here actually routes through it.
-pub(super) fn set_current<M: ScopedIdentity>(wk: *const ScopedWorker<M>) {
+pub(super) fn set_current<M: ScopedConfig>(wk: *const ScopedWorker<M>) {
     CURRENT.with(|c| c.set(wk as *const ()));
 }
 
@@ -85,12 +85,12 @@ pub(super) fn set_current<M: ScopedIdentity>(wk: *const ScopedWorker<M>) {
 /// The `scoped` counterpart of
 /// [`Scheduler<S>`](crate::resumable::common::scheduler::Scheduler): the same
 /// [`PoolCore`], minus the descriptor pools and external queue.
-pub(super) struct ScopedRegistry<M: ScopedIdentity> {
+pub(super) struct ScopedRegistry<M: ScopedConfig> {
     pub(super) workers: Box<[ScopedWorker<M>]>,
     pub(super) pool: PoolCore<ScopedSystem<M>>,
 }
 
-impl<M: ScopedIdentity> ScopedRegistry<M> {
+impl<M: ScopedConfig> ScopedRegistry<M> {
     pub(super) fn new(num_workers: usize) -> Arc<Self> {
         assert!(num_workers >= 1, "need at least one worker");
         let workers: Box<[ScopedWorker<M>]> = (0..num_workers).map(ScopedWorker::<M>::new).collect();
@@ -134,7 +134,7 @@ impl<M: ScopedIdentity> ScopedRegistry<M> {
 // WorkerSystem for ScopedSystem
 // ---------------------------------------------------------------------------
 
-impl<M: ScopedIdentity> WorkerSystem for ScopedSystem<M> {
+impl<M: ScopedConfig> WorkerSystem for ScopedSystem<M> {
     type Base = OsSystem;
     type SuspendedToken = TaskRef;
     type RunQueue = HybridRunQueue<TaskRef>;
@@ -156,7 +156,7 @@ impl<M: ScopedIdentity> WorkerSystem for ScopedSystem<M> {
     // ANCHOR: TlsAnchor` is declared once in this single generic `impl<M>`
     // block: a `static`'s *type* can't mention an outer generic parameter
     // (`E0401`), so unlike `worker_tls_anchor`'s per-concrete-type contract
-    // elsewhere (each `UltIdentity` leaf writes its own `static`), one
+    // elsewhere (each `UltConfig` leaf writes its own `static`), one
     // `ANCHOR`/index here would be shared by every `M` if this were ever
     // actually exercised. Only satisfies `WorkerSystem`'s required
     // associated fn.
@@ -170,7 +170,7 @@ impl<M: ScopedIdentity> WorkerSystem for ScopedSystem<M> {
 // RunnableItem for TaskRef — dispatch is just the existing trampoline
 // ---------------------------------------------------------------------------
 
-impl<M: ScopedIdentity> RunnableItem<ScopedSystem<M>> for TaskRef {
+impl<M: ScopedConfig> RunnableItem<ScopedSystem<M>> for TaskRef {
     fn run_on(self, _wk: &ScopedWorker<M>) {
         // SAFETY: every `TaskRef` in circulation was built by
         // `StackTask::as_task_ref`/`AsyncTask::as_task_ref`, whose

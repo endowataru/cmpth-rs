@@ -1,6 +1,6 @@
 //! Stackless-only descriptor operations: the `spawn_async` poll entry
 //! point, and [`StacklessOnlyTaskDesc`] — the concrete descriptor for
-//! `UltAsyncIdentity` (stackless-only) systems.
+//! `UltAsyncConfig` (stackless-only) systems.
 
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -249,7 +249,7 @@ impl<D: TaskDescCore<Owned: HasPollFn<D>>> RunningTaskToken<D> {
 }
 
 // ---------------------------------------------------------------------------
-// StacklessOnlyTaskDesc — UltAsyncIdentity systems (spawn_async, no real
+// StacklessOnlyTaskDesc — UltAsyncConfig systems (spawn_async, no real
 // context switch)
 // ---------------------------------------------------------------------------
 
@@ -280,7 +280,7 @@ impl<S: PoolSystem> HasPollFn<StacklessOnlyTaskDesc<S>> for StacklessOnlyOwned<S
     fn set_poll_fn(&mut self, f: Option<TaskPollFn<StacklessOnlyTaskDesc<S>>>) { self.poll_fn = f; }
 }
 
-/// Concrete descriptor for `UltAsyncIdentity`-based (stackless-only)
+/// Concrete descriptor for `UltAsyncConfig`-based (stackless-only)
 /// systems: a `spawn_async` task with no real context switch, so no `ctx`
 /// slot exists at all.
 pub struct StacklessOnlyTaskDesc<S: PoolSystem> {
