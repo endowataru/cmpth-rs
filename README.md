@@ -297,10 +297,18 @@ the examples do, not that way.
   (`ScopedStackfulTaskSystem`) and an `.await`-based
   (`ScopedStacklessTaskSystem`) flavor
 - `block_on` integration for driving futures from ULT context
-- Mutex, condvar, barrier, and MCS-based delegation primitives, all generic
-  over the threading system
+- Mutex, condvar, barrier, and delegation primitives (MCS, combining,
+  post delegators), all generic over the threading system
+- Idle policies: spin (`SpinIdle`), or park the OS thread with a capped
+  number of searching workers (`SearchIdle`, as Go and Tokio do)
+- Swappable victim selection (`StealPolicy`), dispatch order
+  (`DispatchPolicy`), scheduler observers (`SchedObserver`) and
+  per-worker start/stop hooks (`WorkerHooks`: CPU pinning, background QoS)
+- Duties (`DutySystem`): polls that must run every so often, served by
+  idle workers or a keeper thread instead of busy ones
 - Pluggable task-descriptor pools (`SimplePool`, `ReturnPool`)
-- Wakers callable from external (non-worker) OS threads
+- Wakers callable from external (non-worker) OS threads; plain OS threads
+  can share the dual system's mutex and delegators
 
 ## Performance
 
